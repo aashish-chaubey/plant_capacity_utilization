@@ -1,0 +1,914 @@
+from __future__ import annotations
+
+from datetime import date, datetime, time, timedelta
+from math import isfinite
+from numbers import Real
+import re
+import warnings
+from typing import Any
+
+import pandas as pd
+
+
+warnings.filterwarnings(
+    "ignore",
+    message="Workbook contains no default style, apply openpyxl's default",
+    category=UserWarning,
+    module="openpyxl.styles.stylesheet",
+)
+
+CAPACITY_MINUTES_PER_FOLDER_DAY = 240.0
+
+BOOK_WISE_SHEET = "Book Wise Details"
+DOWN_TIME_SHEET = "Down Time"
+REPORT_DATE_COLUMN = "Report Date"
+
+REQUIRED_SHEETS = [BOOK_WISE_SHEET, DOWN_TIME_SHEET]
+
+BOOK_WISE_REQUIRED_COLUMNS = [
+    "Issue Date",
+    "Machine",
+    "Folder",
+    "Start Date",
+    "Start Time",
+    "End Date",
+    "End Time",
+    "Total Run Time (mnts)",
+    "Total Downtime",
+    "Reflong",
+    "Issue Id",
+    "Run Date",
+]
+
+DOWN_TIME_REQUIRED_COLUMNS = [
+    "IssueID",
+    "Machine",
+    "Folder",
+    "Related",
+    "Reason",
+    "Start Time",
+    "End Time",
+    "Total Downtime",
+    "Run Date",
+]
+
+
+def validate_workbook(workbook: pd.ExcelFile) -> list[str]:
+    """Validate exact sheet names and required columns after trimming whitespace."""
+    errors: list[str] = []
+    sheet_names = set(workbook.sheet_names)
+
+    for sheet in REQUIRED_SHEETS:
+        if sheet not in sheet_names:
+            errors.append(f"Missing sheet: {sheet}")
+
+    required_by_sheet = {
+        BOOK_WISE_SHEET: BOOK_WISE_REQUIRED_COLUMNS,
+        DOWN_TIME_SHEET: DOWN_TIME_REQUIRED_COLUMNS,
+    }
+    for sheet, required_columns in required_by_sheet.items():
+        if sheet not in sheet_names:
+            continue
+
+        try:
+            preview = pd.read_excel(workbook, sheet_name=sheet, nrows=0)
+        except Exception as exc:  # pragma: no cover - defensive guard for corrupt sheets
+            errors.append(f"Unable to read sheet: {sheet} ({exc})")
+            continue
+
+        available_columns = {str(column).strip() for column in preview.columns}
+        for column in required_columns:
+            if column not in available_columns:
+                errors.append(f"Missing column in {sheet}: {column}")
+
+    return errors
+
+
+def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
+    """Read and normalize Book Wise Details rows needed for capacity calculations.
+
+    Report Date is derived only from Issue Date.
+    Run Date is parsed but not used for capacity/date grouping.
+    """
+    df = _read_sheet(workbook, BOOK_WISE_SHEET)
+
+    df["Issue Date"] = df["Issue Date"].apply(_parse_date_value)
+    df["Run Date"] = df["Run Date"].apply(_parse_date_value)
+
+    # All reporting/grouping is based only on Issue Date.
+    df[REPORT_DATE_COLUMN] = df["Issue Date"]
+
+    df["Machine"] = df["Machine"].apply(_clean_text)
+    df["Folder"] = df["Folder"].apply(_clean_text)
+    df["Issue Id"] = df["Issue Id"].apply(_clean_text)
+    df["Reflong"] = df["Reflong"].apply(_clean_text)
+    df["Total Run Time (mnts)"] = df["Total Run Time (mnts)"].apply(_parse_minutes_value)
+    df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
+
+    # Fallback date must be Issue Date, not Run Date.
+    df["Start DateTime"] = df.apply(
+        lambda row: _combine_date_time(row["Start Date"], row["Start Time"], row["Issue Date"]),
+        axis=1,
+    )
+    df["End DateTime"] = df.apply(
+        lambda row: _combine_date_time(row["End Date"], row["End Time"], row["Issue Date"]),
+        axis=1,
+    )
+
+    return df
+
+
+def parse_down_time(workbook: pd.ExcelFile) -> pd.DataFrame:
+    """Read and normalize Down Time rows needed for downtime/reflong classification."""
+    df = _read_sheet(workbook, DOWN_TIME_SHEET)
+    df["Run Date"] = df["Run Date"].apply(_parse_date_value)
+    df["Machine"] = df["Machine"].apply(_clean_text)
+    df["Folder"] = df["Folder"].apply(_clean_text)
+    df["IssueID"] = df["IssueID"].apply(_clean_text)
+    df["Related"] = df["Related"].apply(_clean_text)
+    df["Reason"] = df["Reason"].apply(_clean_text)
+    df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
+    return df
+
+
+def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate one 240-minute capacity unit for each Issue Date + Machine + Folder.
+
+    Strict first step:
+    - Keep only Book Wise Details rows that overlap the Issue Date 00:00-04:00 window.
+    - Discard all other print jobs before deriving active folders.
+    - All downstream calculations use only this interval-filtered data.
+    """
+    keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+
+    # Step 1: basic usable rows.
+    active_rows = book_df[_has_capacity_keys(book_df)].copy()
+
+    if active_rows.empty:
+        return _empty_folder_day_metrics()
+
+    # Step 2: strict interval filter FIRST.
+    # Only rows overlapping Issue Date 00:00-04:00 survive.
+    interval_editions = _filter_interval_editions(active_rows)
+
+    if interval_editions.empty:
+        return _empty_folder_day_metrics()
+
+    # Step 3: active folders are derived only from interval rows.
+    # This prevents folders/jobs outside 00:00-04:00 from appearing.
+    active_units = (
+        interval_editions[keys]
+        .drop_duplicates()
+        .sort_values(keys)
+        .reset_index(drop=True)
+    )
+
+    # Step 4: runtime/lost/buffer calculations use only interval rows.
+    calculated_metrics = _calculate_interval_metrics_by_folder_day(interval_editions)
+
+    # Step 5: downtime is also limited to issues present in interval rows.
+    down_grouped = _aggregate_down_time_by_capacity_unit_filtered(
+        book_df,
+        down_time_df,
+        interval_editions,
+    )
+
+    metrics = (
+        active_units.merge(calculated_metrics, on=keys, how="left")
+        .merge(down_grouped, on=keys, how="left")
+    )
+
+    numeric_columns = [
+        "gross_runtime",
+        "runtime",
+        "late_start_time",
+        "change_over_time",
+        "natural_buffer_time",
+        "total_downtime",
+        "reflong_related_downtime",
+    ]
+
+    for column in numeric_columns:
+        if column not in metrics:
+            metrics[column] = 0.0
+        metrics[column] = pd.to_numeric(metrics[column], errors="coerce").fillna(0.0)
+
+    metrics["available_capacity"] = CAPACITY_MINUTES_PER_FOLDER_DAY
+
+    # Normal downtime excludes reflong-related downtime.
+    metrics["downtime"] = (
+        metrics["total_downtime"] - metrics["reflong_related_downtime"]
+    ).clip(lower=0)
+
+    # Net runtime after subtracting all downtime.
+    metrics["runtime"] = (
+        metrics["gross_runtime"] - metrics["total_downtime"]
+    ).clip(lower=0)
+
+    metrics["lost_time"] = (
+        metrics["late_start_time"]
+        + metrics["change_over_time"]
+        + metrics["reflong_related_downtime"]
+    ).clip(lower=0)
+
+    # Strict railguard:
+    # runtime + downtime + lost_time + buffer_time must equal 240.
+    fixed_used_minutes = (
+        metrics["runtime"]
+        + metrics["downtime"]
+        + metrics["lost_time"]
+    )
+
+    metrics["buffer_time"] = (
+        metrics["available_capacity"] - fixed_used_minutes
+    ).clip(lower=0, upper=CAPACITY_MINUTES_PER_FOLDER_DAY)
+
+    return metrics[
+        [
+            REPORT_DATE_COLUMN,
+            "Machine",
+            "Folder",
+            "available_capacity",
+            "runtime",
+            "lost_time",
+            "downtime",
+            "buffer_time",
+            "change_over_time",
+            "reflong_related_downtime",
+            "late_start_time",
+        ]
+    ]
+
+
+def _merge_print_intervals(
+    intervals: list[tuple[pd.Timestamp, pd.Timestamp]]
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Merge overlapping or touching print intervals.
+
+    Examples:
+    - 00:10-00:30 and 00:10-00:30 becomes 00:10-00:30.
+    - 00:19-00:58 and 00:19-01:02 becomes 00:19-01:02.
+    - 00:10-00:30 and 00:30-00:45 becomes 00:10-00:45.
+    """
+    valid_intervals = [
+        (pd.Timestamp(start), pd.Timestamp(end))
+        for start, end in intervals
+        if pd.notna(start) and pd.notna(end) and pd.Timestamp(end) > pd.Timestamp(start)
+    ]
+
+    if not valid_intervals:
+        return []
+
+    valid_intervals.sort(key=lambda item: item[0])
+
+    merged: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    for start, end in valid_intervals:
+        if not merged:
+            merged.append((start, end))
+            continue
+
+        previous_start, previous_end = merged[-1]
+
+        if start <= previous_end:
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+
+    return merged
+
+
+def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only editions that overlap the Issue Date 00:00-04:00 window.
+
+    A row is included only if it overlaps the Issue Date window.
+
+    Examples:
+    - 03:45 to 05:30 contributes only 15 minutes.
+    - 23:50 previous day to 00:20 Issue Date contributes 20 minutes.
+    - 04:00 to 04:30 contributes 0 minutes and is excluded.
+    """
+    df = book_df[
+        (book_df[REPORT_DATE_COLUMN].notna()) &
+        (book_df["Issue Date"].notna()) &
+        (book_df["Machine"].ne("")) &
+        (book_df["Folder"].ne("")) &
+        (book_df["Start DateTime"].notna()) &
+        (book_df["End DateTime"].notna())
+    ].copy()
+
+    interval_columns = [
+        "Window Start",
+        "Window End",
+        "Effective Start DateTime",
+        "Effective End DateTime",
+    ]
+
+    if df.empty:
+        return pd.DataFrame(columns=[*df.columns, *interval_columns])
+
+    kept_rows = []
+
+    for _, row in df.iterrows():
+        issue_date = row["Issue Date"]
+        start_dt = pd.Timestamp(row["Start DateTime"])
+        end_dt = pd.Timestamp(row["End DateTime"])
+
+        if issue_date is None or pd.isna(start_dt) or pd.isna(end_dt):
+            continue
+
+        if end_dt <= start_dt:
+            continue
+
+        window_start = pd.Timestamp(datetime.combine(issue_date, time(0, 0)))
+        window_end = pd.Timestamp(datetime.combine(issue_date, time(4, 0)))
+
+        effective_start = max(start_dt, window_start)
+        effective_end = min(end_dt, window_end)
+
+        if effective_start < effective_end:
+            row = row.copy()
+            row["Window Start"] = window_start
+            row["Window End"] = window_end
+            row["Effective Start DateTime"] = effective_start
+            row["Effective End DateTime"] = effective_end
+            kept_rows.append(row)
+
+    if not kept_rows:
+        return pd.DataFrame(columns=[*df.columns, *interval_columns])
+
+    return pd.DataFrame(kept_rows)
+
+
+def _aggregate_down_time_by_capacity_unit_filtered(
+    book_df: pd.DataFrame,
+    down_time_df: pd.DataFrame,
+    interval_editions: pd.DataFrame,
+) -> pd.DataFrame:
+    """Aggregate downtime only for editions in the Issue Date 00:00-04:00 interval.
+
+    Down Time does not have Issue Date, so Report Date is mapped from Book Wise Details
+    using IssueID + Machine + Folder.
+
+    Reflong is classified only for the exact matched interval edition group.
+    """
+    keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+
+    down_rows = down_time_df[
+        (down_time_df["IssueID"].ne("")) &
+        (down_time_df["Machine"].ne("")) &
+        (down_time_df["Folder"].ne(""))
+    ].copy()
+
+    if down_rows.empty or interval_editions.empty:
+        return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
+
+    interval_lookup = (
+        interval_editions[
+            interval_editions["Issue Id"].ne("")
+            & interval_editions[REPORT_DATE_COLUMN].notna()
+            & interval_editions["Machine"].ne("")
+            & interval_editions["Folder"].ne("")
+        ]
+        .assign(
+            lookup_key=lambda df: list(
+                zip(
+                    df["Issue Id"],
+                    df["Machine"],
+                    df["Folder"],
+                )
+            ),
+            reflong_yes=lambda df: (
+                df["Reflong"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.casefold()
+                .eq("yes")
+            ),
+        )
+        .groupby("lookup_key", dropna=False)
+        .agg(
+            report_date=(REPORT_DATE_COLUMN, "first"),
+            reflong_yes=("reflong_yes", "any"),
+        )
+        .to_dict(orient="index")
+    )
+
+    down_rows["lookup_key"] = list(
+        zip(
+            down_rows["IssueID"],
+            down_rows["Machine"],
+            down_rows["Folder"],
+        )
+    )
+
+    down_rows = down_rows[down_rows["lookup_key"].isin(interval_lookup.keys())].copy()
+
+    if down_rows.empty:
+        return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
+
+    down_rows[REPORT_DATE_COLUMN] = down_rows["lookup_key"].map(
+        lambda key: interval_lookup.get(key, {}).get("report_date")
+    )
+
+    down_rows["book_reflong_yes"] = down_rows["lookup_key"].map(
+        lambda key: interval_lookup.get(key, {}).get("reflong_yes", False)
+    )
+
+    down_rows = down_rows[down_rows[REPORT_DATE_COLUMN].notna()].copy()
+
+    if down_rows.empty:
+        return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
+
+    down_rows["related_starts_reflong"] = (
+        down_rows["Related"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+        .str.startswith("reflong")
+    )
+
+    down_rows["reflong_related_downtime"] = down_rows["Total Downtime"].where(
+        down_rows["book_reflong_yes"] & down_rows["related_starts_reflong"],
+        0.0,
+    )
+
+    return (
+        down_rows.groupby(keys, dropna=False)
+        .agg(
+            total_downtime=("Total Downtime", "sum"),
+            reflong_related_downtime=("reflong_related_downtime", "sum"),
+        )
+        .reset_index()
+    )
+
+
+def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate gross runtime, late start, change-over, and natural buffer.
+
+    Runtime is based on merged non-overlapping print intervals so concurrent jobs are
+    counted only once.
+
+    Change-over is calculated from the actual print sequence for a folder/day:
+    the positive gap between the end of one merged print interval and the start
+    of the next. The workbook's Change Over Time column is intentionally ignored.
+
+    Final net runtime is calculated later after downtime is subtracted.
+    """
+    keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+
+    df = book_df.copy()
+
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                *keys,
+                "gross_runtime",
+                "runtime",
+                "late_start_time",
+                "change_over_time",
+                "natural_buffer_time",
+            ]
+        )
+
+    results = []
+
+    for (report_date, machine, folder), group in df.groupby(keys, dropna=False):
+        group = group.sort_values("Effective Start DateTime").reset_index(drop=True)
+
+        window_start = group.iloc[0]["Window Start"]
+        window_end = group.iloc[0]["Window End"]
+
+        raw_intervals = list(
+            zip(
+                group["Effective Start DateTime"],
+                group["Effective End DateTime"],
+            )
+        )
+
+        merged_intervals = _merge_print_intervals(raw_intervals)
+
+        if not merged_intervals:
+            results.append(
+                {
+                    REPORT_DATE_COLUMN: report_date,
+                    "Machine": machine,
+                    "Folder": folder,
+                    "gross_runtime": 0.0,
+                    "runtime": 0.0,
+                    "late_start_time": 0.0,
+                    "change_over_time": 0.0,
+                    "natural_buffer_time": CAPACITY_MINUTES_PER_FOLDER_DAY,
+                }
+            )
+            continue
+
+        first_start = merged_intervals[0][0]
+        last_end = merged_intervals[-1][1]
+
+        late_start_minutes = max(
+            (first_start - window_start).total_seconds() / 60,
+            0.0,
+        )
+
+        gross_runtime = 0.0
+
+        for start_dt, end_dt in merged_intervals:
+            duration_minutes = (end_dt - start_dt).total_seconds() / 60
+
+            if duration_minutes > 0:
+                gross_runtime += duration_minutes
+
+        change_over_time = 0.0
+
+        for i in range(len(merged_intervals) - 1):
+            current_end = merged_intervals[i][1]
+            next_start = merged_intervals[i + 1][0]
+
+            gap = (next_start - current_end).total_seconds() / 60
+
+            if gap > 0:
+                change_over_time += gap
+
+        natural_buffer_time = max(
+            (window_end - last_end).total_seconds() / 60,
+            0.0,
+        )
+
+        gross_runtime = min(max(gross_runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        late_start_minutes = min(max(late_start_minutes, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        change_over_time = min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        natural_buffer_time = min(max(natural_buffer_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+
+        results.append(
+            {
+                REPORT_DATE_COLUMN: report_date,
+                "Machine": machine,
+                "Folder": folder,
+                "gross_runtime": gross_runtime,
+                # Temporary value. Net runtime is recalculated after downtime is merged.
+                "runtime": gross_runtime,
+                "late_start_time": late_start_minutes,
+                "change_over_time": change_over_time,
+                "natural_buffer_time": natural_buffer_time,
+            }
+        )
+
+    return pd.DataFrame(results)
+
+
+def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate folder-day capacity units into daily executive metrics using Issue Date."""
+    if folder_day_df.empty:
+        return _empty_daily_metrics()
+
+    daily = (
+        folder_day_df.groupby(REPORT_DATE_COLUMN, dropna=False)
+        .agg(
+            active_folders_count=("Folder", "count"),
+            available_capacity=("available_capacity", "sum"),
+            runtime=("runtime", "sum"),
+            lost_time=("lost_time", "sum"),
+            downtime=("downtime", "sum"),
+            buffer_time=("buffer_time", "sum"),
+        )
+        .reset_index()
+        .rename(columns={REPORT_DATE_COLUMN: "Run Date"})
+        .sort_values("Run Date")
+    )
+
+    daily["utilization_percentage"] = daily.apply(
+        lambda row: _percentage(row["runtime"], row["available_capacity"]),
+        axis=1,
+    )
+
+    return daily
+
+
+def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
+    total_available = float(daily_df["available_capacity"].sum()) if not daily_df.empty else 0.0
+    total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
+
+    return {
+        "total_available_capacity": _clean_number(total_available),
+        "total_runtime": _clean_number(total_runtime),
+        "total_lost_time": _clean_number(daily_df["lost_time"].sum() if not daily_df.empty else 0),
+        "total_downtime": _clean_number(daily_df["downtime"].sum() if not daily_df.empty else 0),
+        "total_buffer_time": _clean_number(daily_df["buffer_time"].sum() if not daily_df.empty else 0),
+        "average_utilization_percentage": _clean_number(_percentage(total_runtime, total_available)),
+        "active_folder_days": int(daily_df["active_folders_count"].sum()) if not daily_df.empty else 0,
+    }
+
+
+def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
+    book_df = parse_book_wise_details(workbook)
+    down_time_df = parse_down_time(workbook)
+    folder_day_df = calculate_folder_day_metrics(book_df, down_time_df)
+    daily_df = calculate_daily_metrics(folder_day_df)
+
+    return {
+        "valid": True,
+        "summary": calculate_summary_metrics(daily_df),
+        "daily": _daily_records(daily_df),
+        "details": _detail_records(folder_day_df),
+        "errors": [],
+    }
+
+
+def _read_sheet(workbook: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+    df = pd.read_excel(workbook, sheet_name=sheet_name)
+    df = df.rename(columns=lambda column: str(column).strip())
+    df = df.dropna(how="all").copy()
+    return df
+
+
+def _has_capacity_keys(df: pd.DataFrame) -> pd.Series:
+    date_column = REPORT_DATE_COLUMN if REPORT_DATE_COLUMN in df.columns else "Run Date"
+
+    return (
+        df[date_column].notna()
+        & df["Machine"].ne("")
+        & df["Folder"].ne("")
+    )
+
+
+def _aggregate_down_time_by_capacity_unit(book_df: pd.DataFrame, down_time_df: pd.DataFrame) -> pd.DataFrame:
+    keys = ["Run Date", "Machine", "Folder"]
+    down_rows = down_time_df[_has_capacity_keys(down_time_df)].copy()
+
+    if down_rows.empty:
+        return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
+
+    issue_reflong_lookup = (
+        book_df[book_df["Issue Id"].ne("")]
+        .assign(reflong_yes=book_df["Reflong"].apply(lambda value: value.strip().casefold() == "yes"))
+        .groupby("Issue Id")["reflong_yes"]
+        .any()
+        .to_dict()
+    )
+
+    down_rows["book_reflong_yes"] = down_rows["IssueID"].map(issue_reflong_lookup).fillna(False)
+    down_rows["related_starts_reflong"] = down_rows["Related"].str.casefold().str.startswith("reflong")
+    down_rows["reflong_related_downtime"] = down_rows["Total Downtime"].where(
+        down_rows["book_reflong_yes"] & down_rows["related_starts_reflong"],
+        0.0,
+    )
+
+    return (
+        down_rows.groupby(keys, dropna=False)
+        .agg(
+            total_downtime=("Total Downtime", "sum"),
+            reflong_related_downtime=("reflong_related_downtime", "sum"),
+        )
+        .reset_index()
+    )
+
+
+def _calculate_late_start_minutes(run_date: date | None, first_start: Any) -> float:
+    if run_date is None or pd.isna(first_start):
+        return 0.0
+
+    expected_start = pd.Timestamp(datetime.combine(run_date, time.min))
+    actual_start = pd.Timestamp(first_start)
+
+    if actual_start <= expected_start:
+        return 0.0
+
+    delay_minutes = (actual_start - expected_start).total_seconds() / 60
+    return min(delay_minutes, CAPACITY_MINUTES_PER_FOLDER_DAY)
+
+
+def _combine_date_time(date_value: Any, time_value: Any, fallback_date: date | None) -> pd.Timestamp | pd.NaT:
+    parsed_date = _parse_date_value(date_value) or fallback_date
+    parsed_time = _parse_time_value(time_value)
+
+    if parsed_date is None or parsed_time is None:
+        return pd.NaT
+
+    return pd.Timestamp(datetime.combine(parsed_date, parsed_time))
+
+
+def _parse_date_value(value: Any) -> date | None:
+    if _is_blank(value):
+        return None
+
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    if isinstance(value, (int, float)) and isfinite(float(value)):
+        try:
+            return pd.to_datetime(value, unit="D", origin="1899-12-30").date()
+        except Exception:
+            return None
+
+    text = str(value).strip()
+    dayfirst = not bool(re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", text))
+    parsed = pd.to_datetime(text, errors="coerce", dayfirst=dayfirst)
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
+
+
+def _parse_time_value(value: Any) -> time | None:
+    if _is_blank(value):
+        return None
+
+    if isinstance(value, datetime):
+        return value.time().replace(tzinfo=None)
+
+    if isinstance(value, time):
+        return value.replace(tzinfo=None)
+
+    if isinstance(value, timedelta):
+        seconds = int(value.total_seconds()) % (24 * 60 * 60)
+        return (datetime.min + timedelta(seconds=seconds)).time()
+
+    if isinstance(value, (int, float)) and isfinite(float(value)):
+        numeric = float(value)
+        if 0 <= numeric < 1:
+            seconds = int(round(numeric * 24 * 60 * 60))
+            return (datetime.min + timedelta(seconds=seconds)).time()
+        if 0 <= numeric <= 24:
+            hours = int(numeric)
+            minutes = int(round((numeric - hours) * 60))
+            return (datetime.min + timedelta(hours=hours, minutes=minutes)).time()
+        return None
+
+    text = str(value).strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            pass
+
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.time().replace(tzinfo=None)
+
+
+def _parse_minutes_value(value: Any) -> float:
+    if _is_blank(value):
+        return 0.0
+
+    if isinstance(value, timedelta):
+        return max(value.total_seconds() / 60, 0.0)
+
+    if isinstance(value, time):
+        return float(value.hour * 60 + value.minute + value.second / 60)
+
+    if isinstance(value, (int, float)) and isfinite(float(value)):
+        return max(float(value), 0.0)
+
+    text = str(value).strip()
+    if ":" in text:
+        parts = text.split(":")
+        try:
+            numbers = [float(part) for part in parts]
+        except ValueError:
+            numbers = []
+
+        if len(numbers) == 2:
+            return max(numbers[0] * 60 + numbers[1], 0.0)
+        if len(numbers) == 3:
+            return max(numbers[0] * 60 + numbers[1] + numbers[2] / 60, 0.0)
+
+    numeric = pd.to_numeric(text, errors="coerce")
+    if pd.isna(numeric):
+        return 0.0
+    return max(float(numeric), 0.0)
+
+
+def _clean_text(value: Any) -> str:
+    if _is_blank(value):
+        return ""
+
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+
+    return str(value).strip()
+
+
+def _is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _percentage(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator * 100
+
+
+def _clean_number(value: Any) -> int | float:
+    numeric = float(value) if value is not None else 0.0
+    if not isfinite(numeric):
+        numeric = 0.0
+    rounded = round(numeric, 2)
+    if rounded.is_integer():
+        return int(rounded)
+    return rounded
+
+
+def _format_run_date(value: Any) -> str:
+    if isinstance(value, date):
+        return value.isoformat()
+    parsed = _parse_date_value(value)
+    return parsed.isoformat() if parsed else ""
+
+
+def _daily_records(daily_df: pd.DataFrame) -> list[dict[str, Any]]:
+    if daily_df.empty:
+        return []
+
+    renamed = daily_df.rename(columns={"Run Date": "run_date"}).copy()
+    renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
+    return _rounded_records(renamed)
+
+
+def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
+    if folder_day_df.empty:
+        return []
+
+    renamed = folder_day_df.rename(
+        columns={
+            REPORT_DATE_COLUMN: "run_date",
+            "Machine": "machine",
+            "Folder": "folder",
+        }
+    ).copy()
+
+    renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
+
+    return _rounded_records(
+        renamed[
+            [
+                "run_date",
+                "machine",
+                "folder",
+                "available_capacity",
+                "runtime",
+                "lost_time",
+                "downtime",
+                "buffer_time",
+                "change_over_time",
+                "reflong_related_downtime",
+                "late_start_time",
+            ]
+        ]
+    )
+
+
+def _rounded_records(df: pd.DataFrame) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for record in df.to_dict(orient="records"):
+        records.append(
+            {
+                key: _clean_number(value) if isinstance(value, Real) else value
+                for key, value in record.items()
+            }
+        )
+    return records
+
+
+def _empty_folder_day_metrics() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            REPORT_DATE_COLUMN,
+            "Machine",
+            "Folder",
+            "available_capacity",
+            "runtime",
+            "lost_time",
+            "downtime",
+            "buffer_time",
+            "change_over_time",
+            "reflong_related_downtime",
+            "late_start_time",
+        ]
+    )
+
+
+def _empty_daily_metrics() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "Run Date",
+            "active_folders_count",
+            "available_capacity",
+            "runtime",
+            "lost_time",
+            "downtime",
+            "buffer_time",
+            "utilization_percentage",
+        ]
+    )
