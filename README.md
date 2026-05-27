@@ -1,6 +1,6 @@
 # Plant Capacity Utilization Dashboard
 
-Working MVP for uploading an Excel production report and generating daily capacity utilization across active machine-folder combinations.
+Working MVP for uploading an Excel production report and generating capacity utilization across active machine-folder combinations with annual, half-yearly, quarterly, monthly, and custom timeframe filters.
 
 ## Stack
 
@@ -69,7 +69,9 @@ If the backend is running on a different URL, set:
 VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
 
-## Expected Excel Format
+## Expected Report Structure
+
+Uploads are sent directly to processing without a separate file validation checklist. Processing still expects the production report data to use the sheets and columns below.
 
 Required sheets:
 
@@ -168,7 +170,7 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
 }
 ```
 
-Validation failure response:
+Processing failure response:
 
 ```json
 {
@@ -177,8 +179,7 @@ Validation failure response:
   "daily": [],
   "details": [],
   "errors": [
-    "Missing sheet: Book Wise Details",
-    "Missing column in Down Time: Total Downtime"
+    "Processing failed: Worksheet named 'Book Wise Details' not found"
   ]
 }
 ```

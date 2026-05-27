@@ -19,69 +19,22 @@ warnings.filterwarnings(
 
 CAPACITY_MINUTES_PER_FOLDER_DAY = 240.0
 
+GENERAL_SHEET = "General"
 BOOK_WISE_SHEET = "Book Wise Details"
 DOWN_TIME_SHEET = "Down Time"
 REPORT_DATE_COLUMN = "Report Date"
 
-REQUIRED_SHEETS = [BOOK_WISE_SHEET, DOWN_TIME_SHEET]
 
-BOOK_WISE_REQUIRED_COLUMNS = [
-    "Issue Date",
-    "Machine",
-    "Folder",
-    "Start Date",
-    "Start Time",
-    "End Date",
-    "End Time",
-    "Total Run Time (mnts)",
-    "Total Downtime",
-    "Reflong",
-    "Issue Id",
-    "Run Date",
-]
+def parse_general(workbook: pd.ExcelFile) -> pd.DataFrame:
+    """Read issue-level tower assignments from the General sheet when present."""
+    try:
+        df = _read_sheet(workbook, GENERAL_SHEET)
+    except ValueError:
+        return pd.DataFrame(columns=["IssueID", "Towers used"])
 
-DOWN_TIME_REQUIRED_COLUMNS = [
-    "IssueID",
-    "Machine",
-    "Folder",
-    "Related",
-    "Reason",
-    "Start Time",
-    "End Time",
-    "Total Downtime",
-    "Run Date",
-]
-
-
-def validate_workbook(workbook: pd.ExcelFile) -> list[str]:
-    """Validate exact sheet names and required columns after trimming whitespace."""
-    errors: list[str] = []
-    sheet_names = set(workbook.sheet_names)
-
-    for sheet in REQUIRED_SHEETS:
-        if sheet not in sheet_names:
-            errors.append(f"Missing sheet: {sheet}")
-
-    required_by_sheet = {
-        BOOK_WISE_SHEET: BOOK_WISE_REQUIRED_COLUMNS,
-        DOWN_TIME_SHEET: DOWN_TIME_REQUIRED_COLUMNS,
-    }
-    for sheet, required_columns in required_by_sheet.items():
-        if sheet not in sheet_names:
-            continue
-
-        try:
-            preview = pd.read_excel(workbook, sheet_name=sheet, nrows=0)
-        except Exception as exc:  # pragma: no cover - defensive guard for corrupt sheets
-            errors.append(f"Unable to read sheet: {sheet} ({exc})")
-            continue
-
-        available_columns = {str(column).strip() for column in preview.columns}
-        for column in required_columns:
-            if column not in available_columns:
-                errors.append(f"Missing column in {sheet}: {column}")
-
-    return errors
+    df["IssueID"] = df["IssueID"].apply(_clean_text)
+    df["Towers used"] = df["Towers used"].apply(_clean_text)
+    return df
 
 
 def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
@@ -229,6 +182,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
             "Machine",
             "Folder",
             "available_capacity",
+            "gross_runtime",
             "runtime",
             "lost_time",
             "downtime",
@@ -445,6 +399,62 @@ def _aggregate_down_time_by_capacity_unit_filtered(
     )
 
 
+def _aggregate_down_time_by_tower(
+    down_time_df: pd.DataFrame,
+    issue_tower_lookup: dict[str, list[str]],
+    issue_date_lookup: dict[str, date],
+    issue_reflong_lookup: dict[str, bool],
+) -> dict[tuple[date, str], dict[str, float]]:
+    totals: dict[tuple[date, str], dict[str, float]] = {}
+
+    if down_time_df.empty:
+        return totals
+
+    for _, row in down_time_df.iterrows():
+        issue_id = _clean_text(row.get("IssueID"))
+        towers = issue_tower_lookup.get(issue_id, [])
+        report_date = issue_date_lookup.get(issue_id)
+
+        if not issue_id or not towers or not report_date:
+            continue
+
+        total_downtime = _parse_minutes_value(row.get("Total Downtime"))
+        if total_downtime <= 0:
+            continue
+
+        is_reflong_related = (
+            issue_reflong_lookup.get(issue_id, False)
+            and _clean_text(row.get("Related")).casefold().startswith("reflong")
+        )
+
+        for tower in towers:
+            key = (report_date, tower)
+            totals.setdefault(key, {"downtime": 0.0, "reflong_related_downtime": 0.0})
+
+            if is_reflong_related:
+                totals[key]["reflong_related_downtime"] += total_downtime
+            else:
+                totals[key]["downtime"] += total_downtime
+
+    return totals
+
+
+def _calculate_changeover_minutes(
+    intervals: list[tuple[pd.Timestamp, pd.Timestamp]]
+) -> float:
+    change_over_time = 0.0
+
+    for i in range(len(intervals) - 1):
+        current_end = intervals[i][1]
+        next_start = intervals[i + 1][0]
+        gap = (next_start - current_end).total_seconds() / 60
+
+        if gap > 0:
+            change_over_time += gap
+
+    return change_over_time
+
+
 def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataFrame:
     """Calculate gross runtime, late start, change-over, and natural buffer.
 
@@ -521,16 +531,7 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             if duration_minutes > 0:
                 gross_runtime += duration_minutes
 
-        change_over_time = 0.0
-
-        for i in range(len(merged_intervals) - 1):
-            current_end = merged_intervals[i][1]
-            next_start = merged_intervals[i + 1][0]
-
-            gap = (next_start - current_end).total_seconds() / 60
-
-            if gap > 0:
-                change_over_time += gap
+        change_over_time = _calculate_changeover_minutes(merged_intervals)
 
         natural_buffer_time = max(
             (window_end - last_end).total_seconds() / 60,
@@ -587,6 +588,130 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     return daily
 
 
+def calculate_tower_day_metrics(
+    book_df: pd.DataFrame,
+    down_time_df: pd.DataFrame,
+    general_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Calculate engaged minutes for each tower in the Issue Date 00:00-04:00 window."""
+    columns = [
+        REPORT_DATE_COLUMN,
+        "Tower",
+        "available_capacity",
+        "gross_runtime",
+        "runtime",
+        "downtime",
+        "change_over_time",
+        "reflong_related_downtime",
+        "late_start_time",
+    ]
+
+    if general_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    tower_lookup = _build_issue_tower_lookup(general_df)
+    if not tower_lookup:
+        return pd.DataFrame(columns=columns)
+
+    active_rows = book_df[_has_capacity_keys(book_df)].copy()
+    if active_rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    interval_editions = _filter_interval_editions(active_rows)
+    if interval_editions.empty:
+        return pd.DataFrame(columns=columns)
+
+    interval_editions = interval_editions[
+        [
+            REPORT_DATE_COLUMN,
+            "Issue Id",
+            "Reflong",
+            "Effective Start DateTime",
+            "Effective End DateTime",
+            "Window Start",
+        ]
+    ].drop_duplicates()
+
+    tower_intervals: dict[tuple[date, str], list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+    issue_tower_lookup: dict[str, list[str]] = {}
+    issue_date_lookup: dict[str, date] = {}
+    issue_reflong_lookup: dict[str, bool] = {}
+
+    for _, row in interval_editions.iterrows():
+        report_date = row[REPORT_DATE_COLUMN]
+        issue_id = row["Issue Id"]
+        towers = tower_lookup.get(issue_id, [])
+
+        if not report_date or not towers:
+            continue
+
+        interval = (
+            pd.Timestamp(row["Effective Start DateTime"]),
+            pd.Timestamp(row["Effective End DateTime"]),
+        )
+
+        issue_date_lookup.setdefault(issue_id, report_date)
+        issue_reflong_lookup[issue_id] = (
+            issue_reflong_lookup.get(issue_id, False)
+            or _clean_text(row["Reflong"]).casefold() == "yes"
+        )
+        issue_tower_lookup.setdefault(issue_id, towers)
+
+        for tower in towers:
+            tower_intervals.setdefault((report_date, tower), []).append(interval)
+
+    tower_down_time = _aggregate_down_time_by_tower(
+        down_time_df,
+        issue_tower_lookup,
+        issue_date_lookup,
+        issue_reflong_lookup,
+    )
+
+    records = []
+
+    for (report_date, tower), intervals in tower_intervals.items():
+        merged_intervals = _merge_print_intervals(intervals)
+        runtime = sum(
+            (end_dt - start_dt).total_seconds() / 60
+            for start_dt, end_dt in merged_intervals
+        )
+        change_over_time = _calculate_changeover_minutes(merged_intervals)
+        late_start_time = 0.0
+
+        if merged_intervals:
+            window_start = pd.Timestamp(datetime.combine(report_date, time(0, 0)))
+            late_start_time = max(
+                (merged_intervals[0][0] - window_start).total_seconds() / 60,
+                0.0,
+            )
+
+        downtime_parts = tower_down_time.get(
+            (report_date, tower),
+            {"downtime": 0.0, "reflong_related_downtime": 0.0},
+        )
+        downtime = float(downtime_parts["downtime"])
+        reflong_related_downtime = float(downtime_parts["reflong_related_downtime"])
+
+        records.append(
+            {
+                REPORT_DATE_COLUMN: report_date,
+                "Tower": tower,
+                "available_capacity": CAPACITY_MINUTES_PER_FOLDER_DAY,
+                "gross_runtime": min(max(runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                "runtime": min(max(runtime - downtime - reflong_related_downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                "downtime": min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                "change_over_time": min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                "reflong_related_downtime": min(max(reflong_related_downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                "late_start_time": min(max(late_start_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+            }
+        )
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Tower"]).reset_index(drop=True)
+
+
 def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_available = float(daily_df["available_capacity"].sum()) if not daily_df.empty else 0.0
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
@@ -603,9 +728,11 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
 
 
 def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
+    general_df = parse_general(workbook)
     book_df = parse_book_wise_details(workbook)
     down_time_df = parse_down_time(workbook)
     folder_day_df = calculate_folder_day_metrics(book_df, down_time_df)
+    tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df)
     daily_df = calculate_daily_metrics(folder_day_df)
 
     return {
@@ -613,6 +740,7 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
         "summary": calculate_summary_metrics(daily_df),
         "daily": _daily_records(daily_df),
         "details": _detail_records(folder_day_df),
+        "tower_details": _tower_detail_records(tower_day_df),
         "errors": [],
     }
 
@@ -794,6 +922,36 @@ def _clean_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _build_issue_tower_lookup(general_df: pd.DataFrame) -> dict[str, list[str]]:
+    lookup: dict[str, list[str]] = {}
+
+    for _, row in general_df.iterrows():
+        issue_id = _clean_text(row.get("IssueID"))
+        towers = _split_towers(row.get("Towers used"))
+
+        if not issue_id or not towers:
+            continue
+
+        existing_towers = lookup.setdefault(issue_id, [])
+        for tower in towers:
+            if tower not in existing_towers:
+                existing_towers.append(tower)
+
+    return lookup
+
+
+def _split_towers(value: Any) -> list[str]:
+    text = _clean_text(value)
+    if not text:
+        return []
+
+    return [
+        tower
+        for tower in (_clean_text(part) for part in text.split(","))
+        if tower
+    ]
+
+
 def _is_blank(value: Any) -> bool:
     if value is None:
         return True
@@ -857,10 +1015,41 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "machine",
                 "folder",
                 "available_capacity",
+                "gross_runtime",
                 "runtime",
                 "lost_time",
                 "downtime",
                 "buffer_time",
+                "change_over_time",
+                "reflong_related_downtime",
+                "late_start_time",
+            ]
+        ]
+    )
+
+
+def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
+    if tower_day_df.empty:
+        return []
+
+    renamed = tower_day_df.rename(
+        columns={
+            REPORT_DATE_COLUMN: "run_date",
+            "Tower": "tower",
+        }
+    ).copy()
+
+    renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
+
+    return _rounded_records(
+        renamed[
+            [
+                "run_date",
+                "tower",
+                "available_capacity",
+                "gross_runtime",
+                "runtime",
+                "downtime",
                 "change_over_time",
                 "reflong_related_downtime",
                 "late_start_time",
@@ -888,6 +1077,7 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
             "Machine",
             "Folder",
             "available_capacity",
+            "gross_runtime",
             "runtime",
             "lost_time",
             "downtime",

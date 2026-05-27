@@ -6,7 +6,7 @@ import pandas as pd
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.services.capacity import build_capacity_response, validate_workbook
+from app.services.capacity import build_capacity_response
 
 
 app = FastAPI(title="Plant Capacity Utilization API", version="0.1.0")
@@ -27,15 +27,6 @@ def health_check() -> dict[str, str]:
 
 @app.post("/api/upload")
 async def upload_production_report(file: UploadFile = File(...)) -> dict:
-    if not file.filename or not file.filename.lower().endswith(".xlsx"):
-        return {
-            "valid": False,
-            "summary": None,
-            "daily": [],
-            "details": [],
-            "errors": ["Only .xlsx production reports are supported."],
-        }
-
     try:
         contents = await file.read()
         workbook = pd.ExcelFile(BytesIO(contents), engine="openpyxl")
@@ -45,17 +36,7 @@ async def upload_production_report(file: UploadFile = File(...)) -> dict:
             "summary": None,
             "daily": [],
             "details": [],
-            "errors": ["Unable to read workbook. Upload a valid .xlsx file."],
-        }
-
-    errors = validate_workbook(workbook)
-    if errors:
-        return {
-            "valid": False,
-            "summary": None,
-            "daily": [],
-            "details": [],
-            "errors": errors,
+            "errors": ["Unable to read workbook. Upload a readable Excel workbook."],
         }
 
     try:

@@ -20,30 +20,85 @@ const COLORS = {
   buffer_time: "#cbd5e1"
 };
 
+const ENGAGED_TIME_OPTIONS = [
+  {
+    key: "gross_runtime",
+    label: "Print runtime",
+    color: COLORS.runtime
+  },
+  {
+    key: "downtime",
+    label: "Downtime / breakdown",
+    color: COLORS.downtime
+  },
+  {
+    key: "reflong_related_downtime",
+    label: "Reflong time",
+    color: "#b91c1c"
+  },
+  {
+    key: "change_over_time",
+    label: "Changeover time",
+    color: COLORS.lost_time
+  },
+  {
+    key: "late_start_time",
+    label: "LPR to print start",
+    color: "#0f766e"
+  }
+];
+
 export default function Dashboard({ data }) {
-  const firstDay = data.daily?.[0]?.run_date || "";
-  const [selectedDay, setSelectedDay] = useState(firstDay);
-  const [isFolderPanelOpen, setIsFolderPanelOpen] = useState(false);
+  const [focusedDay, setFocusedDay] = useState("");
+  const [engagedComponentKeys, setEngagedComponentKeys] = useState(["gross_runtime"]);
 
   useEffect(() => {
-    setSelectedDay(firstDay);
-    setIsFolderPanelOpen(false);
-  }, [firstDay]);
+    if (focusedDay && !data.daily.some((day) => day.run_date === focusedDay)) {
+      setFocusedDay("");
+    }
+  }, [data.daily, focusedDay]);
 
-  const selectedDaily = useMemo(
-    () => data.daily.find((day) => day.run_date === selectedDay) || data.daily[0],
-    [data.daily, selectedDay]
-  );
-  const selectedDetails = useMemo(
+  const breakdownDetails = useMemo(
     () =>
-      data.details
-        .filter((row) => row.run_date === selectedDaily?.run_date)
-        .map((row) => ({
-          ...row,
-          label: `${row.machine} / ${row.folder}`
-        })),
-    [data.details, selectedDaily]
+      focusedDay
+        ? data.details.filter((row) => row.run_date === focusedDay)
+        : data.details,
+    [data.details, focusedDay]
   );
+
+  const breakdownTowerDetails = useMemo(
+    () =>
+      focusedDay
+        ? (data.tower_details || []).filter((row) => row.run_date === focusedDay)
+        : data.tower_details || [],
+    [data.tower_details, focusedDay]
+  );
+
+  const breakdownProductionDays = focusedDay ? 1 : data.daily.length;
+  const towerBreakdown = useMemo(
+    () => aggregateResourceUsage(breakdownTowerDetails, "tower", breakdownProductionDays, engagedComponentKeys, "natural"),
+    [breakdownTowerDetails, breakdownProductionDays, engagedComponentKeys]
+  );
+  const folderBreakdown = useMemo(
+    () => aggregateResourceUsage(breakdownDetails, "folder", breakdownProductionDays, engagedComponentKeys),
+    [breakdownDetails, breakdownProductionDays, engagedComponentKeys]
+  );
+  const selectedEngagedOptions = useMemo(
+    () => ENGAGED_TIME_OPTIONS.filter((option) => engagedComponentKeys.includes(option.key)),
+    [engagedComponentKeys]
+  );
+
+  const breakdownScope = focusedDay ? focusedDay : "Selected timeframe";
+
+  function toggleEngagedComponent(componentKey) {
+    setEngagedComponentKeys((current) => {
+      if (current.includes(componentKey)) {
+        return current.length === 1 ? current : current.filter((key) => key !== componentKey);
+      }
+
+      return [...current, componentKey];
+    });
+  }
 
   const kpis = [
     ["Total Available Capacity", formatMinutes(data.summary.total_available_capacity), "blue"],
@@ -69,11 +124,9 @@ export default function Dashboard({ data }) {
             <h2 className="text-base font-semibold text-slate-950">Daily capacity split</h2>
             <p className="mt-1 text-sm text-slate-500">Runtime, lost time, downtime, and spare time by Run Date</p>
           </div>
-          {selectedDaily && (
-            <div className="text-sm text-slate-500">
-              Selected: <span className="font-semibold text-slate-800">{selectedDaily.run_date}</span>
-            </div>
-          )}
+          <div className="text-sm text-slate-500">
+            Breakdowns: <span className="font-semibold text-slate-800">{breakdownScope}</span>
+          </div>
         </div>
 
         <div className="h-[360px] w-full">
@@ -83,8 +136,7 @@ export default function Dashboard({ data }) {
               margin={{ top: 12, right: 20, left: 8, bottom: 18 }}
               onClick={(event) => {
                 if (event?.activeLabel) {
-                  setSelectedDay(event.activeLabel);
-                  setIsFolderPanelOpen(true);
+                  setFocusedDay(event.activeLabel);
                 }
               }}
             >
@@ -112,17 +164,174 @@ export default function Dashboard({ data }) {
         </div>
       </section>
 
-      <FolderMachinePanel
-        day={selectedDaily}
-        details={selectedDetails}
-        open={isFolderPanelOpen}
-        onClose={() => setIsFolderPanelOpen(false)}
-      />
+      <section className="space-y-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-slate-950">Breakdown charts</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              {focusedDay ? `Showing ${focusedDay}` : "Showing selected timeframe"}
+            </p>
+          </div>
+          {focusedDay && (
+            <button
+              type="button"
+              onClick={() => setFocusedDay("")}
+              className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-950"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+              Clear day
+            </button>
+          )}
+        </div>
 
-      <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-        <DailyTable daily={data.daily} selectedDay={selectedDaily?.run_date} onSelectDay={setSelectedDay} />
-        <DetailsTable day={selectedDaily} details={selectedDetails} />
+        <EngagedTimeSelector
+          options={ENGAGED_TIME_OPTIONS}
+          selectedKeys={engagedComponentKeys}
+          onToggle={toggleEngagedComponent}
+        />
+
+        <div className="grid gap-6 xl:grid-cols-2">
+          <UtilizationBreakdownChart
+            title="Tower breakdown"
+            subtitle={focusedDay ? "Tower utilization for selected day" : "Average tower utilization across the selected timeframe"}
+            data={towerBreakdown}
+            nameKey="tower"
+            engagedOptions={selectedEngagedOptions}
+            emptyMessage="No tower usage found for this selection."
+          />
+          <UtilizationBreakdownChart
+            title="Folder breakdown"
+            subtitle={focusedDay ? "Folder utilization for selected day" : "Average folder utilization across the selected timeframe"}
+            data={folderBreakdown}
+            nameKey="folder"
+            engagedOptions={selectedEngagedOptions}
+            emptyMessage="No folder usage found for this selection."
+          />
+        </div>
       </section>
+    </div>
+  );
+}
+
+function EngagedTimeSelector({ options, selectedKeys, onToggle }) {
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-soft">
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-950">Engaged time includes</h3>
+          <p className="mt-1 text-xs text-slate-500">Select one or more components to define utilization in the breakdown charts.</p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:flex xl:flex-wrap xl:justify-end">
+          {options.map((option) => {
+            const selected = selectedKeys.includes(option.key);
+
+            return (
+              <label
+                key={option.key}
+                className={`inline-flex min-h-9 cursor-pointer items-center gap-2 rounded-lg border px-3 text-sm font-semibold transition ${
+                  selected
+                    ? "border-blue-300 bg-blue-50 text-slate-950"
+                    : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  onChange={() => onToggle(option.key)}
+                  className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span
+                  className="h-2.5 w-2.5 rounded-full"
+                  style={{ backgroundColor: option.color }}
+                />
+                {option.label}
+              </label>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function UtilizationBreakdownChart({ title, subtitle, data, nameKey, engagedOptions, emptyMessage }) {
+  const chartHeight = Math.max(280, data.length * 42 + 64);
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-soft">
+      <div className="mb-4">
+        <h2 className="text-base font-semibold text-slate-950">{title}</h2>
+        <p className="mt-1 text-sm text-slate-500">{subtitle}</p>
+      </div>
+
+      {data.length === 0 ? (
+        <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-slate-200 text-sm text-slate-500">
+          {emptyMessage}
+        </div>
+      ) : (
+        <div className="max-h-[460px] overflow-y-auto pr-2">
+          <div className="w-full" style={{ height: chartHeight }}>
+            <ResponsiveContainer>
+              <BarChart data={data} layout="vertical" margin={{ top: 8, right: 24, left: 8, bottom: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                <XAxis
+                  type="number"
+                  domain={[0, 100]}
+                  tickFormatter={(value) => `${value}%`}
+                  tick={{ fill: "#475569", fontSize: 12 }}
+                  tickLine={false}
+                  axisLine={{ stroke: "#cbd5e1" }}
+                />
+                <YAxis
+                  type="category"
+                  dataKey={nameKey}
+                  width={104}
+                  tick={{ fill: "#334155", fontSize: 12 }}
+                  tickLine={false}
+                  axisLine={{ stroke: "#cbd5e1" }}
+                />
+                <Tooltip content={<UtilizationTooltip nameKey={nameKey} engagedOptions={engagedOptions} />} cursor={{ fill: "rgba(15, 23, 42, 0.06)" }} />
+                {engagedOptions.map((option, index) => (
+                  <Bar
+                    key={option.key}
+                    dataKey={`${option.key}_percentage`}
+                    name={option.label}
+                    stackId="engaged"
+                    fill={option.color}
+                    radius={index === engagedOptions.length - 1 ? [0, 6, 6, 0] : [0, 0, 0, 0]}
+                  />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function UtilizationTooltip({ active, payload, nameKey, engagedOptions }) {
+  if (!active || !payload?.length) return null;
+  const row = payload[0].payload;
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-3 text-sm shadow-soft">
+      <p className="font-semibold text-slate-950">{row[nameKey]}</p>
+      <div className="mt-2 space-y-1 text-slate-600">
+        {engagedOptions.map((option) => (
+          <TooltipRow
+            key={option.key}
+            label={option.label}
+            value={`${formatMinutes(row[option.key])} (${formatPercent(row[`${option.key}_percentage`])})`}
+            color={option.color}
+          />
+        ))}
+        <div className="border-t border-slate-200 pt-2">
+          <p>Engaged: {formatMinutes(row.runtime)}</p>
+          <p>Available: {formatMinutes(row.available_capacity)}</p>
+          <p>Utilization: {formatPercent(row.utilization_percentage)}</p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -332,6 +541,97 @@ function DetailsTable({ day, details }) {
       </div>
     </section>
   );
+}
+
+function aggregateResourceUsage(rows, nameKey, selectedProductionDays, componentKeys, sortMode = "utilization") {
+  if (!selectedProductionDays || rows.length === 0) return [];
+
+  const grouped = new Map();
+
+  for (const row of rows) {
+    const name = row[nameKey];
+    if (!name) continue;
+
+    const current = grouped.get(name) || {
+      [nameKey]: name,
+      runtime: 0,
+      available_capacity: selectedProductionDays * 240
+    };
+
+    for (const componentKey of componentKeys) {
+      current[componentKey] = (current[componentKey] || 0) + Number(row[componentKey] || 0);
+    }
+
+    grouped.set(name, current);
+  }
+
+  return Array.from(grouped.values())
+    .map((row) => {
+      const runtime = componentKeys.reduce((total, componentKey) => total + Number(row[componentKey] || 0), 0);
+      const utilizationPercentage = row.available_capacity > 0 ? (runtime / row.available_capacity) * 100 : 0;
+
+      const nextRow = {
+        ...row,
+        runtime: cleanNumber(runtime),
+        available_capacity: cleanNumber(row.available_capacity),
+        utilization_percentage: cleanNumber(utilizationPercentage)
+      };
+
+      for (const componentKey of componentKeys) {
+        const componentMinutes = Number(row[componentKey] || 0);
+        nextRow[componentKey] = cleanNumber(componentMinutes);
+        nextRow[`${componentKey}_percentage`] = cleanNumber(
+          row.available_capacity > 0 ? (componentMinutes / row.available_capacity) * 100 : 0
+        );
+      }
+
+      return nextRow;
+    })
+    .sort((a, b) => {
+      if (sortMode === "natural") {
+        return compareResourceNames(a[nameKey], b[nameKey]);
+      }
+
+      return b.utilization_percentage - a.utilization_percentage || b.runtime - a.runtime;
+    });
+}
+
+function compareResourceNames(first, second) {
+  const firstParts = splitResourceName(first);
+  const secondParts = splitResourceName(second);
+
+  if (firstParts.prefix !== secondParts.prefix) {
+    return firstParts.prefix.localeCompare(secondParts.prefix);
+  }
+
+  if (firstParts.number !== secondParts.number) {
+    return firstParts.number - secondParts.number;
+  }
+
+  return String(first || "").localeCompare(String(second || ""));
+}
+
+function splitResourceName(value) {
+  const text = String(value || "").trim();
+  const match = /^(.*?)(\d+)(.*)$/.exec(text);
+
+  if (!match) {
+    return {
+      prefix: text,
+      number: Number.MAX_SAFE_INTEGER
+    };
+  }
+
+  return {
+    prefix: match[1].trim(),
+    number: Number(match[2])
+  };
+}
+
+function cleanNumber(value) {
+  const numeric = Number.isFinite(Number(value)) ? Number(value) : 0;
+  const rounded = Math.round(numeric * 100) / 100;
+  return Number.isInteger(rounded) ? rounded : Number(rounded.toFixed(2));
 }
 
 function formatNumber(value) {

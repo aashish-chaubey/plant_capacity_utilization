@@ -35,7 +35,7 @@ export default function UploadPanel({ onUpload, loading, compact = false }) {
           <div>
             <h2 className="text-base font-semibold text-slate-950">Upload production report</h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">
-              Accepts `.xlsx` files with `Book Wise Details` and `Down Time` sheets.
+              Upload an Excel production report to calculate capacity utilization.
             </p>
           </div>
         </div>
@@ -44,7 +44,6 @@ export default function UploadPanel({ onUpload, loading, compact = false }) {
           <input
             ref={inputRef}
             type="file"
-            accept=".xlsx"
             className="hidden"
             onChange={(event) => submitFile(event.target.files?.[0])}
           />
