@@ -22,7 +22,7 @@ const COLORS = {
 
 const ENGAGED_TIME_OPTIONS = [
   {
-    key: "gross_runtime",
+    key: "runtime",
     label: "Print runtime",
     color: COLORS.runtime
   },
@@ -34,7 +34,7 @@ const ENGAGED_TIME_OPTIONS = [
   {
     key: "reflong_related_downtime",
     label: "Reflong time",
-    color: "#b91c1c"
+    color: "#fce7f3"
   },
   {
     key: "change_over_time",
@@ -44,13 +44,93 @@ const ENGAGED_TIME_OPTIONS = [
   {
     key: "late_start_time",
     label: "LPR to print start",
-    color: "#0f766e"
+    color: "#93c5fd"
   }
 ];
 
+function prepareDailyChartData(dailyData) {
+  if (!dailyData || dailyData.length === 0) return dailyData;
+
+  // If 31 or fewer days, show daily
+  if (dailyData.length <= 31) {
+    return dailyData.map((day) => ({
+      ...day,
+      display_label: formatDisplayDate(day.run_date),
+      original_date: day.run_date
+    }));
+  }
+
+  // Otherwise aggregate to weeks
+  const weeks = [];
+  let currentWeek = null;
+  let weekData = null;
+
+  for (const day of dailyData) {
+    const date = new Date(day.run_date);
+    const dayOfWeek = date.getDay();
+    const dayOfMonth = date.getDate();
+    const month = date.getMonth();
+    const year = date.getFullYear();
+
+    // Sunday = 0, so week starts on Sunday
+    const daysFromSunday = dayOfWeek;
+    const weekStart = new Date(year, month, dayOfMonth - daysFromSunday);
+    const weekKey = weekStart.toISOString().split("T")[0];
+
+    if (currentWeek !== weekKey) {
+      if (weekData !== null) {
+        weeks.push(weekData);
+      }
+
+      const weekEnd = new Date(weekStart);
+      weekEnd.setDate(weekEnd.getDate() + 6);
+
+      currentWeek = weekKey;
+      weekData = {
+        run_date: weekStart.toISOString().split("T")[0],
+        display_label: `${formatDisplayDate(weekStart.toISOString().split("T")[0])} - ${formatDisplayDate(weekEnd.toISOString().split("T")[0])}`,
+        original_date: weekStart.toISOString().split("T")[0],
+        runtime: 0,
+        lost_time: 0,
+        downtime: 0,
+        buffer_time: 0,
+        available_capacity: 0,
+        active_folders_count: 0,
+        utilization_percentage: 0
+      };
+    }
+
+    // Aggregate metrics
+    weekData.runtime += day.runtime;
+    weekData.lost_time += day.lost_time;
+    weekData.downtime += day.downtime;
+    weekData.buffer_time += day.buffer_time;
+    weekData.available_capacity += day.available_capacity;
+    weekData.active_folders_count += day.active_folders_count;
+  }
+
+  if (weekData !== null) {
+    weeks.push(weekData);
+  }
+
+  // Recalculate utilization percentage based on aggregated values
+  return weeks.map((week) => ({
+    ...week,
+    utilization_percentage:
+      week.available_capacity > 0
+        ? (week.runtime / week.available_capacity) * 100
+        : 0
+  }));
+}
+
+function formatDisplayDate(dateStr) {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 export default function Dashboard({ data }) {
   const [focusedDay, setFocusedDay] = useState("");
-  const [engagedComponentKeys, setEngagedComponentKeys] = useState(["gross_runtime"]);
+  const [engagedComponentKeys, setEngagedComponentKeys] = useState(["runtime"]);
 
   useEffect(() => {
     if (focusedDay && !data.daily.some((day) => day.run_date === focusedDay)) {
@@ -75,6 +155,12 @@ export default function Dashboard({ data }) {
   );
 
   const breakdownProductionDays = focusedDay ? 1 : data.daily.length;
+  
+  const dailyChartData = useMemo(
+    () => prepareDailyChartData(data.daily),
+    [data.daily]
+  );
+
   const towerBreakdown = useMemo(
     () => aggregateResourceUsage(breakdownTowerDetails, "tower", breakdownProductionDays, engagedComponentKeys, "natural"),
     [breakdownTowerDetails, breakdownProductionDays, engagedComponentKeys]
@@ -132,20 +218,23 @@ export default function Dashboard({ data }) {
         <div className="h-[360px] w-full">
           <ResponsiveContainer>
             <BarChart
-              data={data.daily}
-              margin={{ top: 12, right: 20, left: 8, bottom: 18 }}
+              data={dailyChartData}
+              margin={{ top: 12, right: 20, left: 8, bottom: 60 }}
               onClick={(event) => {
-                if (event?.activeLabel) {
-                  setFocusedDay(event.activeLabel);
+                if (event?.activeTooltipIndex !== undefined && dailyChartData[event.activeTooltipIndex]) {
+                  setFocusedDay(dailyChartData[event.activeTooltipIndex].original_date);
                 }
               }}
             >
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
               <XAxis
-                dataKey="run_date"
-                tick={{ fill: "#475569", fontSize: 12 }}
+                dataKey="display_label"
+                tick={{ fill: "#475569", fontSize: 11 }}
                 tickLine={false}
                 axisLine={{ stroke: "#cbd5e1" }}
+                angle={-45}
+                textAnchor="end"
+                height={80}
               />
               <YAxis
                 tick={{ fill: "#475569", fontSize: 12 }}
@@ -255,7 +344,54 @@ function EngagedTimeSelector({ options, selectedKeys, onToggle }) {
 }
 
 function UtilizationBreakdownChart({ title, subtitle, data, nameKey, engagedOptions, emptyMessage }) {
-  const chartHeight = Math.max(280, data.length * 42 + 64);
+  const chartHeight = Math.max(300, data.length * 60 + 80);
+
+  const CustomYAxisTick = (props) => {
+    const { x, y, payload } = props;
+    const parts = payload.value.split("\n");
+
+    if (parts.length === 2) {
+      return (
+        <g transform={`translate(${x},${y})`}>
+          <text
+            x={0}
+            y={0}
+            dy={4}
+            textAnchor="end"
+            fill="#628141"
+            fontSize={11}
+            fontWeight="600"
+          >
+            {parts[0]}
+          </text>
+          <text
+            x={0}
+            y={14}
+            dy={4}
+            textAnchor="end"
+            fill="#B12C00"
+            fontSize={11}
+            fontWeight="500"
+          >
+            {parts[1]}
+          </text>
+        </g>
+      );
+    }
+
+    return (
+      <text
+        x={x}
+        y={y}
+        dy={4}
+        textAnchor="end"
+        fill="#334155"
+        fontSize={11}
+      >
+        {payload.value}
+      </text>
+    );
+  };
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-soft">
@@ -269,10 +405,10 @@ function UtilizationBreakdownChart({ title, subtitle, data, nameKey, engagedOpti
           {emptyMessage}
         </div>
       ) : (
-        <div className="max-h-[460px] overflow-y-auto pr-2">
+        <div className="rounded-lg border border-slate-100 bg-slate-50 p-2">
           <div className="w-full" style={{ height: chartHeight }}>
             <ResponsiveContainer>
-              <BarChart data={data} layout="vertical" margin={{ top: 8, right: 24, left: 8, bottom: 8 }}>
+              <BarChart data={data} layout="vertical" margin={{ top: 8, right: 24, left: 16, bottom: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
                 <XAxis
                   type="number"
@@ -285,8 +421,8 @@ function UtilizationBreakdownChart({ title, subtitle, data, nameKey, engagedOpti
                 <YAxis
                   type="category"
                   dataKey={nameKey}
-                  width={104}
-                  tick={{ fill: "#334155", fontSize: 12 }}
+                  width={140}
+                  tick={<CustomYAxisTick />}
                   tickLine={false}
                   axisLine={{ stroke: "#cbd5e1" }}
                 />
@@ -435,7 +571,7 @@ function CapacityTooltip({ active, payload, label }) {
 
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-3 text-sm shadow-soft">
-      <p className="font-semibold text-slate-950">{label}</p>
+      <p className="font-semibold text-slate-950">{day.display_label}</p>
       <div className="mt-2 space-y-1 text-slate-600">
         <TooltipRow label="Runtime" value={formatMinutes(day.runtime)} color={COLORS.runtime} />
         <TooltipRow label="Lost Time" value={formatMinutes(day.lost_time)} color={COLORS.lost_time} />

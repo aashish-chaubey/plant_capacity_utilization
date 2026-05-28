@@ -596,6 +596,7 @@ def calculate_tower_day_metrics(
     """Calculate engaged minutes for each tower in the Issue Date 00:00-04:00 window."""
     columns = [
         REPORT_DATE_COLUMN,
+        "Machine",
         "Tower",
         "available_capacity",
         "gross_runtime",
@@ -625,6 +626,7 @@ def calculate_tower_day_metrics(
         [
             REPORT_DATE_COLUMN,
             "Issue Id",
+            "Machine",
             "Reflong",
             "Effective Start DateTime",
             "Effective End DateTime",
@@ -632,17 +634,19 @@ def calculate_tower_day_metrics(
         ]
     ].drop_duplicates()
 
-    tower_intervals: dict[tuple[date, str], list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+    tower_intervals: dict[tuple[date, str, str], list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
     issue_tower_lookup: dict[str, list[str]] = {}
+    issue_machine_lookup: dict[str, str] = {}
     issue_date_lookup: dict[str, date] = {}
     issue_reflong_lookup: dict[str, bool] = {}
 
     for _, row in interval_editions.iterrows():
         report_date = row[REPORT_DATE_COLUMN]
         issue_id = row["Issue Id"]
+        machine = row["Machine"]
         towers = tower_lookup.get(issue_id, [])
 
-        if not report_date or not towers:
+        if not report_date or not towers or not machine:
             continue
 
         interval = (
@@ -656,9 +660,10 @@ def calculate_tower_day_metrics(
             or _clean_text(row["Reflong"]).casefold() == "yes"
         )
         issue_tower_lookup.setdefault(issue_id, towers)
+        issue_machine_lookup.setdefault(issue_id, machine)
 
         for tower in towers:
-            tower_intervals.setdefault((report_date, tower), []).append(interval)
+            tower_intervals.setdefault((report_date, machine, tower), []).append(interval)
 
     tower_down_time = _aggregate_down_time_by_tower(
         down_time_df,
@@ -669,7 +674,7 @@ def calculate_tower_day_metrics(
 
     records = []
 
-    for (report_date, tower), intervals in tower_intervals.items():
+    for (report_date, machine, tower), intervals in tower_intervals.items():
         merged_intervals = _merge_print_intervals(intervals)
         runtime = sum(
             (end_dt - start_dt).total_seconds() / 60
@@ -695,6 +700,7 @@ def calculate_tower_day_metrics(
         records.append(
             {
                 REPORT_DATE_COLUMN: report_date,
+                "Machine": machine,
                 "Tower": tower,
                 "available_capacity": CAPACITY_MINUTES_PER_FOLDER_DAY,
                 "gross_runtime": min(max(runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
@@ -709,7 +715,7 @@ def calculate_tower_day_metrics(
     if not records:
         return pd.DataFrame(columns=columns)
 
-    return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Tower"]).reset_index(drop=True)
+    return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Machine", "Tower"]).reset_index(drop=True)
 
 
 def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
@@ -1007,12 +1013,13 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
     ).copy()
 
     renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
+    # Combine machine and folder into a single folder identifier with newline for better display
+    renamed["folder"] = renamed["machine"] + "\n" + renamed["folder"]
 
     return _rounded_records(
         renamed[
             [
                 "run_date",
-                "machine",
                 "folder",
                 "available_capacity",
                 "gross_runtime",
@@ -1035,11 +1042,14 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
     renamed = tower_day_df.rename(
         columns={
             REPORT_DATE_COLUMN: "run_date",
+            "Machine": "machine",
             "Tower": "tower",
         }
     ).copy()
 
     renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
+    # Combine machine and tower into a single tower identifier with newline for better display
+    renamed["tower"] = renamed["machine"] + "\n" + renamed["tower"]
 
     return _rounded_records(
         renamed[
