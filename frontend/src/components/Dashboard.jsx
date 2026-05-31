@@ -17,7 +17,8 @@ const COLORS = {
   runtime: "#2563eb",
   lost_time: "#f59e0b",
   downtime: "#dc2626",
-  buffer_time: "#cbd5e1"
+  buffer_time: "#cbd5e1",
+  waiting_time: "#a78bfa"
 };
 
 const ENGAGED_TIME_OPTIONS = [
@@ -35,6 +36,11 @@ const ENGAGED_TIME_OPTIONS = [
     key: "reflong_related_downtime",
     label: "Reflong time",
     color: "#fce7f3"
+  },
+  {
+    key: "waiting_time",
+    label: "Waiting time",
+    color: COLORS.waiting_time
   },
   {
     key: "change_over_time",
@@ -128,6 +134,24 @@ function formatDisplayDate(dateStr) {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+function buildCapacityTicks(rows) {
+  const maxValue = Math.max(
+    120,
+    ...(rows || []).map((row) =>
+      Number(row.runtime || 0)
+      + Number(row.lost_time || 0)
+      + Number(row.downtime || 0)
+      + Number(row.buffer_time || 0)
+    )
+  );
+  const maxTick = Math.ceil(maxValue / 120) * 120;
+
+  return Array.from(
+    { length: Math.floor(maxTick / 120) + 1 },
+    (_, index) => index * 120
+  );
+}
+
 export default function Dashboard({ data }) {
   const [focusedDay, setFocusedDay] = useState("");
   const [engagedComponentKeys, setEngagedComponentKeys] = useState(["runtime"]);
@@ -159,6 +183,10 @@ export default function Dashboard({ data }) {
   const dailyChartData = useMemo(
     () => prepareDailyChartData(data.daily),
     [data.daily]
+  );
+  const dailyCapacityTicks = useMemo(
+    () => buildCapacityTicks(dailyChartData),
+    [dailyChartData]
   );
 
   const towerBreakdown = useMemo(
@@ -237,6 +265,8 @@ export default function Dashboard({ data }) {
                 height={80}
               />
               <YAxis
+                domain={[0, dailyCapacityTicks[dailyCapacityTicks.length - 1]]}
+                ticks={dailyCapacityTicks}
                 tick={{ fill: "#475569", fontSize: 12 }}
                 tickLine={false}
                 axisLine={{ stroke: "#cbd5e1" }}
@@ -286,6 +316,8 @@ export default function Dashboard({ data }) {
             data={towerBreakdown}
             nameKey="tower"
             engagedOptions={selectedEngagedOptions}
+            barSize={10}
+            rowHeight={34}
             emptyMessage="No tower usage found for this selection."
           />
           <UtilizationBreakdownChart
@@ -294,6 +326,8 @@ export default function Dashboard({ data }) {
             data={folderBreakdown}
             nameKey="folder"
             engagedOptions={selectedEngagedOptions}
+            barSize={24}
+            rowHeight={54}
             emptyMessage="No folder usage found for this selection."
           />
         </div>
@@ -343,8 +377,17 @@ function EngagedTimeSelector({ options, selectedKeys, onToggle }) {
   );
 }
 
-function UtilizationBreakdownChart({ title, subtitle, data, nameKey, engagedOptions, emptyMessage }) {
-  const chartHeight = Math.max(300, data.length * 60 + 80);
+function UtilizationBreakdownChart({
+  title,
+  subtitle,
+  data,
+  nameKey,
+  engagedOptions,
+  barSize,
+  rowHeight,
+  emptyMessage
+}) {
+  const chartHeight = Math.max(320, data.length * rowHeight + 56);
 
   const CustomYAxisTick = (props) => {
     const { x, y, payload } = props;
@@ -422,6 +465,7 @@ function UtilizationBreakdownChart({ title, subtitle, data, nameKey, engagedOpti
                   type="category"
                   dataKey={nameKey}
                   width={140}
+                  interval={0}
                   tick={<CustomYAxisTick />}
                   tickLine={false}
                   axisLine={{ stroke: "#cbd5e1" }}
@@ -434,7 +478,8 @@ function UtilizationBreakdownChart({ title, subtitle, data, nameKey, engagedOpti
                     name={option.label}
                     stackId="engaged"
                     fill={option.color}
-                    radius={index === engagedOptions.length - 1 ? [0, 6, 6, 0] : [0, 0, 0, 0]}
+                    barSize={barSize}
+                    radius={index === engagedOptions.length - 1 ? [0, 4, 4, 0] : [0, 0, 0, 0]}
                   />
                 ))}
               </BarChart>
