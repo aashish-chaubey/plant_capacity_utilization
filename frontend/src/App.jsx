@@ -353,6 +353,8 @@ function filterCapacityData(result, range) {
 function calculateSummary(dailyRows) {
   const totalAvailable = sumBy(dailyRows, "available_capacity");
   const totalRuntime = sumBy(dailyRows, "runtime");
+  const rawPercentage = totalAvailable > 0 ? (totalRuntime / totalAvailable) * 100 : 0;
+  const cappedPercentage = Math.min(rawPercentage, 100);
 
   return {
     total_available_capacity: cleanNumber(totalAvailable),
@@ -360,9 +362,7 @@ function calculateSummary(dailyRows) {
     total_lost_time: cleanNumber(sumBy(dailyRows, "lost_time")),
     total_downtime: cleanNumber(sumBy(dailyRows, "downtime")),
     total_buffer_time: cleanNumber(sumBy(dailyRows, "buffer_time")),
-    average_utilization_percentage: cleanNumber(
-      totalAvailable > 0 ? (totalRuntime / totalAvailable) * 100 : 0
-    ),
+    average_utilization_percentage: cleanNumber(cappedPercentage),
     active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count"))
   };
 }

@@ -114,6 +114,7 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
 - A capacity unit is one unique `Issue Date + Machine + Folder`.
 - A folder is active on a day if it has at least one print interval overlapping `Issue Date` 00:00-04:00.
 - Each active capacity unit has `240` available minutes for the fixed `00:00-04:00` window.
+- Daily plant capacity uses the maximum active folder count observed for that plant/report. For example, if the plant reaches 5 active folders on any day, every daily bar uses `5 * 240 = 1200` available minutes.
 - Runtime is calculated from merged print intervals inside the 00:00-04:00 window, so overlapping or duplicate edition rows are not double counted.
 - Changeover time is calculated from the actual print sequence for each folder/day: the positive gap between the end of one edition print interval and the start of the next. The workbook's `Change Over Time (mins)` value is ignored.
 - Downtime is summed from `Down Time`.`Total Downtime`.
@@ -122,7 +123,7 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
   - the matched book-wise row has `Reflong = Yes`
   - `Down Time`.`Related` starts with `Reflong`, case-insensitive
 - Late start is calculated per capacity unit from expected `00:00` to the earliest parsed print start time, capped at `240` minutes.
-- Spare time is returned as `buffer_time` in the API and is calculated as `240 - runtime - lost_time - downtime`, floored at `0`.
+- Spare time is returned as `buffer_time` in the API. Per active folder it is calculated as `240 - runtime - lost_time - downtime`, floored at `0`; daily spare time also includes full 240-minute spare capacity for any plant-capacity folder that was not active that day.
 - Average utilization is weighted: `total_runtime / total_available_capacity * 100`.
 
 ## Example Response
@@ -143,12 +144,13 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
     {
       "run_date": "2026-03-31",
       "active_folders_count": 3,
-      "available_capacity": 720,
+      "capacity_folders_count": 5,
+      "available_capacity": 1200,
       "runtime": 185,
       "lost_time": 40,
       "downtime": 6,
-      "buffer_time": 489,
-      "utilization_percentage": 25.69
+      "buffer_time": 969,
+      "utilization_percentage": 15.42
     }
   ],
   "details": [

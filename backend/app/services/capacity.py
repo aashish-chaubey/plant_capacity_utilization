@@ -45,8 +45,13 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
     """
     df = _read_sheet(workbook, BOOK_WISE_SHEET)
 
+    # Parse all date and time columns FIRST to ensure no NaT values later
     df["Issue Date"] = df["Issue Date"].apply(_parse_date_value)
     df["Run Date"] = df["Run Date"].apply(_parse_date_value)
+    df["Start Date"] = df["Start Date"].apply(_parse_date_value)
+    df["End Date"] = df["End Date"].apply(_parse_date_value)
+    df["Start Time"] = df["Start Time"].apply(_parse_time_value)
+    df["End Time"] = df["End Time"].apply(_parse_time_value)
 
     # All reporting/grouping is based only on Issue Date.
     df[REPORT_DATE_COLUMN] = df["Issue Date"]
@@ -57,6 +62,10 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
     df["Reflong"] = df["Reflong"].apply(_clean_text)
     df["Total Run Time (mnts)"] = df["Total Run Time (mnts)"].apply(_parse_minutes_value)
     df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
+    df["Change Over Time (mins)"] = df.get(
+        "Change Over Time (mins)",
+        pd.Series(0, index=df.index),
+    ).apply(_parse_minutes_value)
 
     # Parse Last Tiff timestamp
     df["Last Tiff DateTime"] = df.get("Last Tiff", pd.Series()).apply(_parse_datetime_value)
@@ -296,6 +305,50 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
             row["Window End"] = window_end
             row["Effective Start DateTime"] = effective_start
             row["Effective End DateTime"] = effective_end
+            kept_rows.append(row)
+
+    if not kept_rows:
+        return pd.DataFrame(columns=[*df.columns, *interval_columns])
+
+    return pd.DataFrame(kept_rows)
+
+
+def _filter_end_time_editions(book_df: pd.DataFrame) -> pd.DataFrame:
+    """Keep editions whose print end time falls inside Issue Date 00:00-04:00."""
+    df = book_df[
+        (book_df[REPORT_DATE_COLUMN].notna()) &
+        (book_df["Issue Date"].notna()) &
+        (book_df["Machine"].ne("")) &
+        (book_df["Folder"].ne("")) &
+        (book_df["Start DateTime"].notna()) &
+        (book_df["End DateTime"].notna())
+    ].copy()
+
+    interval_columns = ["Window Start", "Window End"]
+
+    if df.empty:
+        return pd.DataFrame(columns=[*df.columns, *interval_columns])
+
+    kept_rows = []
+
+    for _, row in df.iterrows():
+        issue_date = row["Issue Date"]
+        start_dt = pd.Timestamp(row["Start DateTime"])
+        end_dt = pd.Timestamp(row["End DateTime"])
+
+        if issue_date is None or pd.isna(start_dt) or pd.isna(end_dt):
+            continue
+
+        if end_dt <= start_dt:
+            continue
+
+        window_start = pd.Timestamp(datetime.combine(issue_date, time(0, 0)))
+        window_end = pd.Timestamp(datetime.combine(issue_date, time(4, 0)))
+
+        if window_start <= end_dt <= window_end:
+            row = row.copy()
+            row["Window Start"] = window_start
+            row["Window End"] = window_end
             kept_rows.append(row)
 
     if not kept_rows:
@@ -656,11 +709,10 @@ def _calculate_waiting_and_timing(
     first_last_tiff = last_tiff_times.get(interval_to_row_index.get(0))
     
     if first_last_tiff and pd.notna(first_last_tiff):
-        # Check if Last Tiff is within the window (from window_start to print_start)
         if first_last_tiff >= window_start:
-            # Last Tiff is within the window
-            waiting_time = max((first_last_tiff - window_start).total_seconds() / 60, 0.0)
-            late_start_time = max((first_print_start - first_last_tiff).total_seconds() / 60, 0.0)
+            ready_at = min(first_last_tiff, first_print_start)
+            waiting_time = max((ready_at - window_start).total_seconds() / 60, 0.0)
+            late_start_time = max((first_print_start - ready_at).total_seconds() / 60, 0.0)
         else:
             # Last Tiff is before the window (e.g., previous day)
             # No waiting time needed; edition was already ready
@@ -679,12 +731,14 @@ def _calculate_waiting_and_timing(
         next_last_tiff = last_tiff_times.get(interval_to_row_index.get(next_interval_idx))
         
         if next_last_tiff and pd.notna(next_last_tiff):
-            # For subsequent edition: waiting_time = Last Tiff - previous_end
-            edition_waiting = max((next_last_tiff - current_end).total_seconds() / 60, 0.0)
+            # If the next edition was ready before the previous print ended, the
+            # full gap is changeover. Otherwise split the gap into waiting and
+            # changeover around the next Last Tiff timestamp.
+            ready_at = min(max(next_last_tiff, current_end), next_start)
+            edition_waiting = max((ready_at - current_end).total_seconds() / 60, 0.0)
             waiting_time += edition_waiting
-            
-            # Change over time = next_start - Last Tiff
-            edition_changeover = max((next_start - next_last_tiff).total_seconds() / 60, 0.0)
+
+            edition_changeover = max((next_start - ready_at).total_seconds() / 60, 0.0)
             change_over_time += edition_changeover
         else:
             # No Last Tiff available, treat gap as change-over time
@@ -715,6 +769,16 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
         .sort_values("Run Date")
     )
 
+    capacity_folders_count = int(daily["active_folders_count"].max())
+    fixed_daily_capacity = capacity_folders_count * CAPACITY_MINUTES_PER_FOLDER_DAY
+    unused_folder_capacity = (
+        fixed_daily_capacity - daily["available_capacity"]
+    ).clip(lower=0)
+
+    daily["capacity_folders_count"] = capacity_folders_count
+    daily["available_capacity"] = fixed_daily_capacity
+    daily["buffer_time"] = daily["buffer_time"] + unused_folder_capacity
+
     daily["utilization_percentage"] = daily.apply(
         lambda row: _percentage(row["runtime"], row["available_capacity"]),
         axis=1,
@@ -741,6 +805,7 @@ def calculate_tower_day_metrics(
         "waiting_time",
         "reflong_related_downtime",
         "late_start_time",
+        "buffer_time",
     ]
 
     if general_df.empty:
@@ -822,33 +887,38 @@ def calculate_tower_day_metrics(
             (end_dt - start_dt).total_seconds() / 60
             for start_dt, end_dt in merged_intervals
         )
-        change_over_time = _calculate_changeover_minutes(merged_intervals)
+        change_over_time = 0.0
         waiting_time = 0.0
         late_start_time = 0.0
 
         group = pd.DataFrame(tower_rows.get((report_date, machine, tower), []))
-        if not group.empty and merged_intervals:
-            window_start = group.iloc[0].get("Window Start")
-            if pd.notna(window_start):
+        if merged_intervals:
+            # Determine window_start - either from group or construct default
+            window_start = None
+            if not group.empty:
+                window_start = group.iloc[0].get("Window Start")
+            
+            if pd.isna(window_start):
+                window_start = pd.Timestamp(datetime.combine(report_date, time(0, 0)))
+            else:
+                window_start = pd.Timestamp(window_start)
+            
+            # Always use _calculate_waiting_and_timing if we have group data with Last Tiff
+            if not group.empty:
                 last_tiff_times = _extract_last_tiff_times(group)
                 waiting_time, late_start_time, change_over_time = _calculate_waiting_and_timing(
                     group,
                     merged_intervals,
-                    pd.Timestamp(window_start),
+                    window_start,
                     last_tiff_times,
                 )
             else:
-                window_start = pd.Timestamp(datetime.combine(report_date, time(0, 0)))
+                # No group data, use fallback calculation
                 late_start_time = max(
                     (merged_intervals[0][0] - window_start).total_seconds() / 60,
                     0.0,
                 )
-        elif merged_intervals:
-            window_start = pd.Timestamp(datetime.combine(report_date, time(0, 0)))
-            late_start_time = max(
-                (merged_intervals[0][0] - window_start).total_seconds() / 60,
-                0.0,
-            )
+                change_over_time = _calculate_changeover_minutes(merged_intervals)
 
         downtime_parts = tower_down_time.get(
             (report_date, machine, tower),
@@ -856,6 +926,27 @@ def calculate_tower_day_metrics(
         )
         downtime = float(downtime_parts["downtime"])
         reflong_related_downtime = float(downtime_parts["reflong_related_downtime"])
+        runtime_minutes = min(
+            max(runtime - downtime - reflong_related_downtime, 0.0),
+            CAPACITY_MINUTES_PER_FOLDER_DAY,
+        )
+        downtime_minutes = min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        changeover_minutes = min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        waiting_minutes = min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        reflong_minutes = min(max(reflong_related_downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        late_start_minutes = min(max(late_start_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        fixed_used_minutes = (
+            runtime_minutes
+            + downtime_minutes
+            + changeover_minutes
+            + waiting_minutes
+            + reflong_minutes
+            + late_start_minutes
+        )
+        buffer_minutes = min(
+            max(CAPACITY_MINUTES_PER_FOLDER_DAY - fixed_used_minutes, 0.0),
+            CAPACITY_MINUTES_PER_FOLDER_DAY,
+        )
 
         records.append(
             {
@@ -864,12 +955,13 @@ def calculate_tower_day_metrics(
                 "Tower": tower,
                 "available_capacity": CAPACITY_MINUTES_PER_FOLDER_DAY,
                 "gross_runtime": min(max(runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                "runtime": min(max(runtime - downtime - reflong_related_downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                "downtime": min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                "change_over_time": min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                "waiting_time": min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                "reflong_related_downtime": min(max(reflong_related_downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                "late_start_time": min(max(late_start_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                "runtime": runtime_minutes,
+                "downtime": downtime_minutes,
+                "change_over_time": changeover_minutes,
+                "waiting_time": waiting_minutes,
+                "reflong_related_downtime": reflong_minutes,
+                "late_start_time": late_start_minutes,
+                "buffer_time": buffer_minutes,
             }
         )
 
@@ -880,19 +972,22 @@ def calculate_tower_day_metrics(
 
 
 def calculate_complexity_timing_metrics(book_df: pd.DataFrame) -> pd.DataFrame:
-    """Return interval-level runtime and waiting time grouped by complexity code."""
+    """Return edition-level timing metrics for prints ending in 00:00-04:00."""
     columns = [
         REPORT_DATE_COLUMN,
         "Complexity",
         "runtime",
         "waiting_time",
+        "change_over_time",
+        "downtime",
+        "spare_time",
     ]
 
     active_rows = book_df[_has_capacity_keys(book_df)].copy()
     if active_rows.empty:
         return pd.DataFrame(columns=columns)
 
-    interval_editions = _filter_interval_editions(active_rows)
+    interval_editions = _filter_end_time_editions(active_rows)
     if interval_editions.empty:
         return pd.DataFrame(columns=columns)
 
@@ -901,51 +996,60 @@ def calculate_complexity_timing_metrics(book_df: pd.DataFrame) -> pd.DataFrame:
     if interval_editions.empty:
         return pd.DataFrame(columns=columns)
 
-    dedupe_columns = [
-        REPORT_DATE_COLUMN,
-        "Issue Id",
-        "Machine",
-        "Folder",
-        "Complexity",
-        "Reflong",
-        "Last Tiff DateTime",
-        "Effective Start DateTime",
-        "Effective End DateTime",
-        "Window Start",
-    ]
-    interval_editions = interval_editions[dedupe_columns].drop_duplicates()
-
     records: list[dict[str, Any]] = []
     group_keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
 
     for _, group in interval_editions.groupby(group_keys, dropna=False):
-        group = group.sort_values("Effective Start DateTime")
+        group = group.sort_values(["Start DateTime", "End DateTime"])
         previous_end = pd.Timestamp(group.iloc[0]["Window Start"])
         last_tiff_times = _extract_last_tiff_times(group)
 
-        for row_index, row in group.iterrows():
-            start_dt = pd.Timestamp(row["Effective Start DateTime"])
-            end_dt = pd.Timestamp(row["Effective End DateTime"])
+        for (start_dt, end_dt), interval_rows in group.groupby(
+            ["Start DateTime", "End DateTime"],
+            sort=True,
+            dropna=False,
+        ):
+            start_dt = pd.Timestamp(start_dt)
+            end_dt = pd.Timestamp(end_dt)
             if pd.isna(start_dt) or pd.isna(end_dt) or end_dt <= start_dt:
                 continue
 
-            runtime = max((end_dt - start_dt).total_seconds() / 60, 0.0)
-            last_tiff = last_tiff_times.get(row_index, pd.NaT)
-            waiting_time = 0.0
+            gap_start = min(max(previous_end, pd.Timestamp(interval_rows.iloc[0]["Window Start"])), start_dt)
+            default_changeover = max((start_dt - gap_start).total_seconds() / 60, 0.0)
 
-            if pd.notna(last_tiff):
-                ready_at = min(pd.Timestamp(last_tiff), start_dt)
-                if ready_at > previous_end:
-                    waiting_time = (ready_at - previous_end).total_seconds() / 60
+            for row_index, row in interval_rows.iterrows():
+                workbook_runtime = _parse_minutes_value(row.get("Total Run Time (mnts)"))
+                runtime = (
+                    workbook_runtime
+                    if workbook_runtime > 0
+                    else max((end_dt - start_dt).total_seconds() / 60, 0.0)
+                )
+                downtime = _parse_minutes_value(row.get("Total Downtime"))
+                last_tiff = last_tiff_times.get(row_index, pd.NaT)
+                waiting_time = 0.0
+                change_over_time = default_changeover
 
-            records.append(
-                {
-                    REPORT_DATE_COLUMN: row[REPORT_DATE_COLUMN],
-                    "Complexity": row["Complexity"],
-                    "runtime": min(max(runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                    "waiting_time": min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                }
-            )
+                if pd.notna(last_tiff):
+                    ready_at = min(max(pd.Timestamp(last_tiff), gap_start), start_dt)
+                    waiting_time = max((ready_at - gap_start).total_seconds() / 60, 0.0)
+                    change_over_time = max((start_dt - ready_at).total_seconds() / 60, 0.0)
+
+                spare_time = max(
+                    (pd.Timestamp(row["Window End"]) - end_dt).total_seconds() / 60,
+                    0.0,
+                )
+
+                records.append(
+                    {
+                        REPORT_DATE_COLUMN: row[REPORT_DATE_COLUMN],
+                        "Complexity": row["Complexity"],
+                        "runtime": min(max(runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                        "waiting_time": min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                        "change_over_time": min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                        "downtime": min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                        "spare_time": min(max(spare_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                    }
+                )
 
             previous_end = max(previous_end, end_dt)
 
@@ -1248,7 +1352,8 @@ def _is_blank(value: Any) -> bool:
 def _percentage(numerator: float, denominator: float) -> float:
     if denominator <= 0:
         return 0.0
-    return numerator / denominator * 100
+    percentage = numerator / denominator * 100
+    return min(percentage, 100.0)
 
 
 def _clean_number(value: Any) -> int | float:
@@ -1342,6 +1447,7 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "waiting_time",
                 "reflong_related_downtime",
                 "late_start_time",
+                "buffer_time",
             ]
         ]
     )
@@ -1367,6 +1473,9 @@ def _complexity_timing_records(complexity_timing_df: pd.DataFrame) -> list[dict[
                 "complexity",
                 "runtime",
                 "waiting_time",
+                "change_over_time",
+                "downtime",
+                "spare_time",
             ]
         ]
     )
@@ -1409,6 +1518,7 @@ def _empty_daily_metrics() -> pd.DataFrame:
         columns=[
             "Run Date",
             "active_folders_count",
+            "capacity_folders_count",
             "available_capacity",
             "runtime",
             "lost_time",

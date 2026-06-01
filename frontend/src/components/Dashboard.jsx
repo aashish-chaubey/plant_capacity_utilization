@@ -18,7 +18,10 @@ const COLORS = {
   lost_time: "#f59e0b",
   downtime: "#dc2626",
   buffer_time: "#cbd5e1",
-  waiting_time: "#a78bfa"
+  reflong_related_downtime: "#fede1c",
+  waiting_time: "#ffce00",
+  change_over_time: "#ffa701",
+  late_start_time: "#ff8d02"
 };
 
 const ENGAGED_TIME_OPTIONS = [
@@ -35,7 +38,7 @@ const ENGAGED_TIME_OPTIONS = [
   {
     key: "reflong_related_downtime",
     label: "Reflong time",
-    color: "#fce7f3"
+    color: COLORS.reflong_related_downtime
   },
   {
     key: "waiting_time",
@@ -45,16 +48,28 @@ const ENGAGED_TIME_OPTIONS = [
   {
     key: "change_over_time",
     label: "Changeover time",
-    color: COLORS.lost_time
+    color: COLORS.change_over_time
   },
   {
     key: "late_start_time",
     label: "LPR to print start",
-    color: "#93c5fd"
+    color: COLORS.late_start_time
+  },
+  {
+    key: "buffer_time",
+    label: "Spare time",
+    color: COLORS.buffer_time
   }
 ];
 
 const COMPLEXITY_CODES = Array.from({ length: 15 }, (_, index) => `C${index + 1}`);
+const COMPLEXITY_METRIC_OPTIONS = [
+  { key: "runtime", label: "Runtime" },
+  { key: "change_over_time", label: "Changeover time" },
+  { key: "downtime", label: "Downtime" },
+  { key: "spare_time", label: "Spare time" }
+];
+const BOX_PLOT_FILL = "#cbd5e1";
 
 function prepareDailyChartData(dailyData) {
   if (!dailyData || dailyData.length === 0) return dailyData;
@@ -104,6 +119,7 @@ function prepareDailyChartData(dailyData) {
         buffer_time: 0,
         available_capacity: 0,
         active_folders_count: 0,
+        capacity_folders_count: 0,
         utilization_percentage: 0
       };
     }
@@ -115,6 +131,7 @@ function prepareDailyChartData(dailyData) {
     weekData.buffer_time += day.buffer_time;
     weekData.available_capacity += day.available_capacity;
     weekData.active_folders_count += day.active_folders_count;
+    weekData.capacity_folders_count += day.capacity_folders_count || day.active_folders_count || 0;
   }
 
   if (weekData !== null) {
@@ -124,10 +141,7 @@ function prepareDailyChartData(dailyData) {
   // Recalculate utilization percentage based on aggregated values
   return weeks.map((week) => ({
     ...week,
-    utilization_percentage:
-      week.available_capacity > 0
-        ? (week.runtime / week.available_capacity) * 100
-        : 0
+    utilization_percentage: calculatePercentage(week.runtime, week.available_capacity)
   }));
 }
 
@@ -158,6 +172,7 @@ export default function Dashboard({ data }) {
   const [focusedDay, setFocusedDay] = useState("");
   const [engagedComponentKeys, setEngagedComponentKeys] = useState(["runtime"]);
   const [activeBreakdownTab, setActiveBreakdownTab] = useState("utilization");
+  const [complexityMetricKey, setComplexityMetricKey] = useState("runtime");
 
   useEffect(() => {
     if (focusedDay && !data.daily.some((day) => day.run_date === focusedDay)) {
@@ -209,8 +224,14 @@ export default function Dashboard({ data }) {
     [breakdownDetails, breakdownProductionDays, engagedComponentKeys]
   );
   const complexityBoxData = useMemo(
-    () => buildComplexityBoxData(breakdownComplexityTiming),
-    [breakdownComplexityTiming]
+    () => buildComplexityBoxData(breakdownComplexityTiming, complexityMetricKey),
+    [breakdownComplexityTiming, complexityMetricKey]
+  );
+  const selectedComplexityMetric = useMemo(
+    () =>
+      COMPLEXITY_METRIC_OPTIONS.find((option) => option.key === complexityMetricKey)
+      || COMPLEXITY_METRIC_OPTIONS[0],
+    [complexityMetricKey]
   );
   const selectedEngagedOptions = useMemo(
     () => ENGAGED_TIME_OPTIONS.filter((option) => engagedComponentKeys.includes(option.key)),
@@ -329,7 +350,7 @@ export default function Dashboard({ data }) {
             active={activeBreakdownTab === "complexity"}
             onClick={() => setActiveBreakdownTab("complexity")}
           >
-            Runtime vs waiting
+            Complexity timing
           </TabButton>
         </div>
 
@@ -367,6 +388,9 @@ export default function Dashboard({ data }) {
         ) : (
           <ComplexityBoxPlotChart
             data={complexityBoxData}
+            metric={selectedComplexityMetric}
+            metricOptions={COMPLEXITY_METRIC_OPTIONS}
+            onMetricChange={setComplexityMetricKey}
             scopeLabel={focusedDay ? `Selected day: ${focusedDay}` : "Selected timeframe"}
           />
         )}
@@ -391,19 +415,18 @@ function TabButton({ active, children, onClick }) {
   );
 }
 
-function ComplexityBoxPlotChart({ data, scopeLabel }) {
+function ComplexityBoxPlotChart({ data, metric, metricOptions, onMetricChange, scopeLabel }) {
   const hasData = data.some((row) => row.count > 0);
   const width = 1160;
   const height = 440;
   const margins = { top: 32, right: 32, bottom: 72, left: 78 };
   const plotWidth = width - margins.left - margins.right;
   const plotHeight = height - margins.top - margins.bottom;
-  const maxValue = Math.max(
-    120,
-    ...data.map((row) => (row.count > 0 ? row.max : 0))
-  );
-  const yMax = Math.ceil(maxValue / 30) * 30;
-  const ticks = buildRuntimeTicks(yMax);
+  const maxValue = Math.max(0, ...data.map((row) => (row.count > 0 ? row.max : 0)));
+  const ticks = buildRuntimeTicks(maxValue);
+  const yMax = ticks[ticks.length - 1] || 10;
+  const yMin = -Math.max(yMax * 0.06, 2);
+  const yRange = yMax - yMin;
   const xInset = 44;
   const xStep = (plotWidth - xInset * 2) / (COMPLEXITY_CODES.length - 1);
   const boxWidth = 34;
@@ -413,19 +436,37 @@ function ComplexityBoxPlotChart({ data, scopeLabel }) {
   }
 
   function yAt(value) {
-    return margins.top + plotHeight - (Number(value || 0) / yMax) * plotHeight;
+    return margins.top + plotHeight - ((Number(value || 0) - yMin) / yRange) * plotHeight;
   }
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-soft">
       <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-slate-950">Runtime vs waiting time</h2>
-          <p className="mt-1 text-sm text-slate-500">Runtime distribution by complexity with edition printing count</p>
+          <h2 className="text-base font-semibold text-slate-950">Complexity timing distribution</h2>
+          <p className="mt-1 text-sm text-slate-500">{metric.label} distribution by complexity with edition printing count</p>
         </div>
-        <span className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
-          {scopeLabel}
-        </span>
+        <div className="flex flex-col gap-2 sm:items-end">
+          <div className="inline-flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
+            {metricOptions.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => onMetricChange(option.key)}
+                className={`min-h-8 rounded-md px-3 text-xs font-semibold transition ${
+                  metric.key === option.key
+                    ? "bg-white text-slate-950 shadow-sm"
+                    : "text-slate-500 hover:bg-white/70 hover:text-slate-900"
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <span className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
+            {scopeLabel}
+          </span>
+        </div>
       </div>
 
       {!hasData ? (
@@ -437,7 +478,7 @@ function ComplexityBoxPlotChart({ data, scopeLabel }) {
           <svg
             className="h-[440px] w-full"
             role="img"
-            aria-label="Box and whisker plot of runtime by complexity with edition printing counts"
+            aria-label={`Box and whisker plot of ${metric.label.toLowerCase()} by complexity with edition printing counts`}
             viewBox={`0 0 ${width} ${height}`}
           >
             <rect x="0" y="0" width={width} height={height} rx="10" fill="#f8fafc" />
@@ -473,21 +514,25 @@ function ComplexityBoxPlotChart({ data, scopeLabel }) {
               const yMedian = yAt(row.median);
               const yQ3 = yAt(row.q3);
               const yMaxValue = yAt(row.max);
+              const countHasSpaceAbove = yMaxValue - 12 >= margins.top + 14;
+              const countY = countHasSpaceAbove
+                ? yMaxValue - 12
+                : Math.min(height - margins.bottom - 14, yMin + 18);
               return (
                 <g key={row.complexity}>
                   <line
                     x1={x}
                     x2={x}
-                    y1={height - margins.bottom - 6}
-                    y2={height - margins.bottom + 6}
-                    stroke="#0f172a"
-                    strokeWidth="2"
+                    y1={height - margins.bottom - 3}
+                    y2={height - margins.bottom + 3}
+                    stroke="#94a3b8"
+                    strokeWidth="1.5"
                   />
                   <text
                     x={x}
                     y={height - margins.bottom + 34}
                     textAnchor="middle"
-                    fontSize="13"
+                    fontSize="12"
                     fontWeight="600"
                     fill="#0f172a"
                   >
@@ -497,11 +542,11 @@ function ComplexityBoxPlotChart({ data, scopeLabel }) {
                   {row.count > 0 && (
                     <g>
                       <title>
-                        {`${row.complexity}: ${formatNumber(row.count)} edition printing${row.count === 1 ? "" : "s"}, median runtime ${formatMinutes(row.median)}, runtime range ${formatMinutes(row.min)}-${formatMinutes(row.max)}`}
+                        {`${row.complexity}: ${formatNumber(row.count)} edition printing${row.count === 1 ? "" : "s"}, median ${metric.label.toLowerCase()} ${formatMinutes(row.median)}, ${metric.label.toLowerCase()} range ${formatMinutes(row.min)}-${formatMinutes(row.max)}`}
                       </title>
                       <text
                         x={x}
-                        y={Math.max(margins.top + 14, yMaxValue - 12)}
+                        y={countY}
                         textAnchor="middle"
                         fontSize="12"
                         fontWeight="700"
@@ -518,7 +563,7 @@ function ComplexityBoxPlotChart({ data, scopeLabel }) {
                         width={boxWidth}
                         height={Math.max(yQ1 - yQ3, 3)}
                         rx="4"
-                        fill="#cbd5e1"
+                        fill={BOX_PLOT_FILL}
                         stroke="#64748b"
                         strokeWidth="1.5"
                       />
@@ -538,7 +583,7 @@ function ComplexityBoxPlotChart({ data, scopeLabel }) {
               fill="#0f172a"
               transform={`rotate(-90 ${margins.left - 52} ${margins.top + plotHeight / 2})`}
             >
-              Runtime (min)
+              {metric.label} (min)
             </text>
             <text
               x={margins.left + plotWidth / 2}
@@ -550,9 +595,9 @@ function ComplexityBoxPlotChart({ data, scopeLabel }) {
             >
               Complexity
             </text>
-            <g transform={`translate(${width - 178}, 18)`}>
-              <rect x="0" y="0" width="12" height="12" rx="2" fill="#cbd5e1" stroke="#64748b" />
-              <text x="20" y="11" fontSize="12" fill="#475569">Runtime distribution</text>
+            <g transform={`translate(${width - 250}, 18)`}>
+              <rect x="0" y="0" width="12" height="12" rx="2" fill={BOX_PLOT_FILL} stroke="#64748b" />
+              <text x="20" y="11" fontSize="12" fill="#475569">{metric.label} distribution</text>
             </g>
           </svg>
         </div>
@@ -677,7 +722,7 @@ function UtilizationBreakdownChart({
           <div className="w-full" style={{ height: chartHeight }}>
             <ResponsiveContainer>
               <BarChart data={data} layout="vertical" margin={{ top: 8, right: 24, left: 16, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" horizontal={false} />
                 <XAxis
                   type="number"
                   domain={[0, 100]}
@@ -838,6 +883,8 @@ function FolderTooltip({ active, payload }) {
 function CapacityTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   const day = payload[0].payload;
+  const capacityFolders = Number(day.capacity_folders_count || 0);
+  const activeFolders = Number(day.active_folders_count || 0);
 
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-3 text-sm shadow-soft">
@@ -849,7 +896,10 @@ function CapacityTooltip({ active, payload, label }) {
         <TooltipRow label="Spare Time" value={formatMinutes(day.buffer_time)} color={COLORS.buffer_time} />
         <div className="border-t border-slate-200 pt-2">
           <p>Available Capacity: {formatMinutes(day.available_capacity)}</p>
-          <p>Active Folders: {formatNumber(day.active_folders_count)}</p>
+          <p>
+            Active Folders: {formatNumber(activeFolders)}
+            {capacityFolders > activeFolders ? ` / ${formatNumber(capacityFolders)}` : ""}
+          </p>
           <p>Utilization: {formatPercent(day.utilization_percentage)}</p>
         </div>
       </div>
@@ -949,13 +999,13 @@ function DetailsTable({ day, details }) {
   );
 }
 
-function buildComplexityBoxData(rows) {
+function buildComplexityBoxData(rows, metricKey) {
   const grouped = new Map(
     COMPLEXITY_CODES.map((complexity) => [
       complexity,
       {
-        runtime: [],
-        waiting: []
+        values: [],
+        count: 0
       }
     ])
   );
@@ -964,44 +1014,39 @@ function buildComplexityBoxData(rows) {
     const complexity = String(row.complexity || "").trim().toUpperCase();
     if (!grouped.has(complexity)) continue;
 
-    const runtime = Number(row.runtime || 0);
-    const waitingTime = Number(row.waiting_time || 0);
+    const metricValue = Number(row[metricKey] || 0);
+    const group = grouped.get(complexity);
 
-    if (Number.isFinite(runtime)) {
-      grouped.get(complexity).runtime.push(runtime);
-    }
-    if (Number.isFinite(waitingTime)) {
-      grouped.get(complexity).waiting.push(waitingTime);
+    group.count += 1;
+    if (Number.isFinite(metricValue)) {
+      group.values.push(metricValue);
     }
   }
 
   return COMPLEXITY_CODES.map((complexity) => {
     const group = grouped.get(complexity);
-    const runtimeValues = [...group.runtime].sort((a, b) => a - b);
-    const waitingValues = group.waiting;
+    const metricValues = [...group.values].sort((a, b) => a - b);
 
-    if (runtimeValues.length === 0) {
+    if (metricValues.length === 0) {
       return {
         complexity,
-        count: 0,
+        count: group.count,
         min: 0,
         q1: 0,
         median: 0,
         q3: 0,
-        max: 0,
-        waitingMean: 0
+        max: 0
       };
     }
 
     return {
       complexity,
-      count: runtimeValues.length,
-      min: cleanNumber(runtimeValues[0]),
-      q1: cleanNumber(percentile(runtimeValues, 0.25)),
-      median: cleanNumber(percentile(runtimeValues, 0.5)),
-      q3: cleanNumber(percentile(runtimeValues, 0.75)),
-      max: cleanNumber(runtimeValues[runtimeValues.length - 1]),
-      waitingMean: cleanNumber(average(waitingValues))
+      count: group.count,
+      min: cleanNumber(metricValues[0]),
+      q1: cleanNumber(percentile(metricValues, 0.25)),
+      median: cleanNumber(percentile(metricValues, 0.5)),
+      q3: cleanNumber(percentile(metricValues, 0.75)),
+      max: cleanNumber(metricValues[metricValues.length - 1])
     };
   });
 }
@@ -1021,17 +1066,19 @@ function percentile(sortedValues, percentileValue) {
   return sortedValues[lowerIndex] * (1 - weight) + sortedValues[upperIndex] * weight;
 }
 
-function average(values) {
-  if (!values.length) return 0;
-  return values.reduce((total, value) => total + Number(value || 0), 0) / values.length;
-}
-
 function buildRuntimeTicks(maxValue) {
-  const step = maxValue <= 240 ? 30 : maxValue <= 480 ? 60 : 120;
-  const upper = Math.ceil(maxValue / step) * step;
+  const safeMax = Math.max(Number(maxValue) || 0, 1);
+  const paddedMax = safeMax * 1.15;
+  const roughStep = paddedMax / 5;
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const normalizedStep = roughStep / magnitude;
+  const stepMultiplier =
+    normalizedStep <= 1 ? 1 : normalizedStep <= 2 ? 2 : normalizedStep <= 5 ? 5 : 10;
+  const step = stepMultiplier * magnitude;
+  const upper = Math.max(step, Math.ceil(paddedMax / step) * step);
 
   return Array.from(
-    { length: Math.floor(upper / step) + 1 },
+    { length: Math.round(upper / step) + 1 },
     (_, index) => index * step
   );
 }
@@ -1061,21 +1108,20 @@ function aggregateResourceUsage(rows, nameKey, selectedProductionDays, component
   return Array.from(grouped.values())
     .map((row) => {
       const runtime = componentKeys.reduce((total, componentKey) => total + Number(row[componentKey] || 0), 0);
-      const utilizationPercentage = row.available_capacity > 0 ? (runtime / row.available_capacity) * 100 : 0;
+      const utilizationPercentage = calculatePercentage(runtime, row.available_capacity);
+      const componentPercentages = calculateStackPercentages(row, componentKeys, row.available_capacity);
 
       const nextRow = {
         ...row,
-        runtime: cleanNumber(runtime),
+        runtime: cleanNumber(Math.min(runtime, row.available_capacity)),
         available_capacity: cleanNumber(row.available_capacity),
-        utilization_percentage: cleanNumber(utilizationPercentage)
+        utilization_percentage: utilizationPercentage
       };
 
       for (const componentKey of componentKeys) {
         const componentMinutes = Number(row[componentKey] || 0);
-        nextRow[componentKey] = cleanNumber(componentMinutes);
-        nextRow[`${componentKey}_percentage`] = cleanNumber(
-          row.available_capacity > 0 ? (componentMinutes / row.available_capacity) * 100 : 0
-        );
+        nextRow[componentKey] = cleanNumber(Math.min(componentMinutes, row.available_capacity));
+        nextRow[`${componentKey}_percentage`] = componentPercentages[componentKey] || 0;
       }
 
       return nextRow;
@@ -1087,6 +1133,51 @@ function aggregateResourceUsage(rows, nameKey, selectedProductionDays, component
 
       return b.utilization_percentage - a.utilization_percentage || b.runtime - a.runtime;
     });
+}
+
+function calculateStackPercentages(row, componentKeys, availableCapacity) {
+  const capacity = Number(availableCapacity || 0);
+  if (capacity <= 0) {
+    return Object.fromEntries(componentKeys.map((componentKey) => [componentKey, 0]));
+  }
+
+  const rawPercentages = componentKeys.map((componentKey) => {
+    const componentMinutes = Math.max(Number(row[componentKey] || 0), 0);
+    return {
+      componentKey,
+      percentage: Math.min((componentMinutes / capacity) * 100, 100)
+    };
+  });
+  const rawTotal = rawPercentages.reduce((total, item) => total + item.percentage, 0);
+  const scale = rawTotal > 100 ? 100 / rawTotal : 1;
+  let remainingPercentage = 100;
+  const normalized = {};
+
+  rawPercentages.forEach((item, index) => {
+    const scaledPercentage = item.percentage * scale;
+    if (index === rawPercentages.length - 1) {
+      normalized[item.componentKey] = cleanNumber(
+        Math.min(Math.max(scaledPercentage, 0), Math.max(remainingPercentage, 0))
+      );
+      return;
+    }
+
+    const roundedPercentage = cleanNumber(
+      Math.min(Math.max(scaledPercentage, 0), Math.max(remainingPercentage, 0))
+    );
+    normalized[item.componentKey] = roundedPercentage;
+    remainingPercentage -= roundedPercentage;
+  });
+
+  return normalized;
+}
+
+function calculatePercentage(numerator, denominator) {
+  const capacity = Number(denominator || 0);
+  if (capacity <= 0) return 0;
+
+  const percentage = (Number(numerator || 0) / capacity) * 100;
+  return cleanNumber(Math.min(Math.max(percentage, 0), 100));
 }
 
 function compareResourceNames(first, second) {
@@ -1136,5 +1227,5 @@ function formatMinutes(value) {
 }
 
 function formatPercent(value) {
-  return `${formatNumber(value)}%`;
+  return `${formatNumber(Math.min(Math.max(Number(value || 0), 0), 100))}%`;
 }
