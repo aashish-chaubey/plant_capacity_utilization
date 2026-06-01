@@ -54,6 +54,8 @@ const ENGAGED_TIME_OPTIONS = [
   }
 ];
 
+const COMPLEXITY_CODES = Array.from({ length: 15 }, (_, index) => `C${index + 1}`);
+
 function prepareDailyChartData(dailyData) {
   if (!dailyData || dailyData.length === 0) return dailyData;
 
@@ -155,6 +157,7 @@ function buildCapacityTicks(rows) {
 export default function Dashboard({ data }) {
   const [focusedDay, setFocusedDay] = useState("");
   const [engagedComponentKeys, setEngagedComponentKeys] = useState(["runtime"]);
+  const [activeBreakdownTab, setActiveBreakdownTab] = useState("utilization");
 
   useEffect(() => {
     if (focusedDay && !data.daily.some((day) => day.run_date === focusedDay)) {
@@ -178,6 +181,14 @@ export default function Dashboard({ data }) {
     [data.tower_details, focusedDay]
   );
 
+  const breakdownComplexityTiming = useMemo(
+    () =>
+      focusedDay
+        ? (data.complexity_timing || []).filter((row) => row.run_date === focusedDay)
+        : data.complexity_timing || [],
+    [data.complexity_timing, focusedDay]
+  );
+
   const breakdownProductionDays = focusedDay ? 1 : data.daily.length;
   
   const dailyChartData = useMemo(
@@ -196,6 +207,10 @@ export default function Dashboard({ data }) {
   const folderBreakdown = useMemo(
     () => aggregateResourceUsage(breakdownDetails, "folder", breakdownProductionDays, engagedComponentKeys),
     [breakdownDetails, breakdownProductionDays, engagedComponentKeys]
+  );
+  const complexityBoxData = useMemo(
+    () => buildComplexityBoxData(breakdownComplexityTiming),
+    [breakdownComplexityTiming]
   );
   const selectedEngagedOptions = useMemo(
     () => ENGAGED_TIME_OPTIONS.filter((option) => engagedComponentKeys.includes(option.key)),
@@ -303,36 +318,246 @@ export default function Dashboard({ data }) {
           )}
         </div>
 
-        <EngagedTimeSelector
-          options={ENGAGED_TIME_OPTIONS}
-          selectedKeys={engagedComponentKeys}
-          onToggle={toggleEngagedComponent}
-        />
-
-        <div className="grid gap-6 xl:grid-cols-2">
-          <UtilizationBreakdownChart
-            title="Tower breakdown"
-            subtitle={focusedDay ? "Tower utilization for selected day" : "Average tower utilization across the selected timeframe"}
-            data={towerBreakdown}
-            nameKey="tower"
-            engagedOptions={selectedEngagedOptions}
-            barSize={10}
-            rowHeight={34}
-            emptyMessage="No tower usage found for this selection."
-          />
-          <UtilizationBreakdownChart
-            title="Folder breakdown"
-            subtitle={focusedDay ? "Folder utilization for selected day" : "Average folder utilization across the selected timeframe"}
-            data={folderBreakdown}
-            nameKey="folder"
-            engagedOptions={selectedEngagedOptions}
-            barSize={24}
-            rowHeight={54}
-            emptyMessage="No folder usage found for this selection."
-          />
+        <div className="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-white p-1 shadow-soft">
+          <TabButton
+            active={activeBreakdownTab === "utilization"}
+            onClick={() => setActiveBreakdownTab("utilization")}
+          >
+            Tower and folder utilization
+          </TabButton>
+          <TabButton
+            active={activeBreakdownTab === "complexity"}
+            onClick={() => setActiveBreakdownTab("complexity")}
+          >
+            Runtime vs waiting
+          </TabButton>
         </div>
+
+        {activeBreakdownTab === "utilization" ? (
+          <>
+            <EngagedTimeSelector
+              options={ENGAGED_TIME_OPTIONS}
+              selectedKeys={engagedComponentKeys}
+              onToggle={toggleEngagedComponent}
+            />
+
+            <div className="grid gap-6 xl:grid-cols-2">
+              <UtilizationBreakdownChart
+                title="Tower breakdown"
+                subtitle={focusedDay ? "Tower utilization for selected day" : "Average tower utilization across the selected timeframe"}
+                data={towerBreakdown}
+                nameKey="tower"
+                engagedOptions={selectedEngagedOptions}
+                barSize={10}
+                rowHeight={34}
+                emptyMessage="No tower usage found for this selection."
+              />
+              <UtilizationBreakdownChart
+                title="Folder breakdown"
+                subtitle={focusedDay ? "Folder utilization for selected day" : "Average folder utilization across the selected timeframe"}
+                data={folderBreakdown}
+                nameKey="folder"
+                engagedOptions={selectedEngagedOptions}
+                barSize={24}
+                rowHeight={54}
+                emptyMessage="No folder usage found for this selection."
+              />
+            </div>
+          </>
+        ) : (
+          <ComplexityBoxPlotChart
+            data={complexityBoxData}
+            scopeLabel={focusedDay ? `Selected day: ${focusedDay}` : "Selected timeframe"}
+          />
+        )}
       </section>
     </div>
+  );
+}
+
+function TabButton({ active, children, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`min-h-9 rounded-md px-4 text-sm font-semibold transition ${
+        active
+          ? "bg-slate-950 text-white shadow-sm"
+          : "text-slate-500 hover:bg-slate-50 hover:text-slate-950"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ComplexityBoxPlotChart({ data, scopeLabel }) {
+  const hasData = data.some((row) => row.count > 0);
+  const width = 1160;
+  const height = 440;
+  const margins = { top: 32, right: 32, bottom: 72, left: 78 };
+  const plotWidth = width - margins.left - margins.right;
+  const plotHeight = height - margins.top - margins.bottom;
+  const maxValue = Math.max(
+    120,
+    ...data.map((row) => (row.count > 0 ? row.max : 0))
+  );
+  const yMax = Math.ceil(maxValue / 30) * 30;
+  const ticks = buildRuntimeTicks(yMax);
+  const xInset = 44;
+  const xStep = (plotWidth - xInset * 2) / (COMPLEXITY_CODES.length - 1);
+  const boxWidth = 34;
+
+  function xAt(index) {
+    return margins.left + xInset + index * xStep;
+  }
+
+  function yAt(value) {
+    return margins.top + plotHeight - (Number(value || 0) / yMax) * plotHeight;
+  }
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-soft">
+      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-950">Runtime vs waiting time</h2>
+          <p className="mt-1 text-sm text-slate-500">Runtime distribution by complexity with edition printing count</p>
+        </div>
+        <span className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
+          {scopeLabel}
+        </span>
+      </div>
+
+      {!hasData ? (
+        <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-slate-200 text-sm text-slate-500">
+          No complexity timing data found for this selection.
+        </div>
+      ) : (
+        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+          <svg
+            className="h-[440px] w-full"
+            role="img"
+            aria-label="Box and whisker plot of runtime by complexity with edition printing counts"
+            viewBox={`0 0 ${width} ${height}`}
+          >
+            <rect x="0" y="0" width={width} height={height} rx="10" fill="#f8fafc" />
+            {ticks.map((tick) => (
+              <g key={tick}>
+                <line
+                  x1={margins.left}
+                  x2={width - margins.right}
+                  y1={yAt(tick)}
+                  y2={yAt(tick)}
+                  stroke="#e2e8f0"
+                  strokeDasharray={tick === 0 ? "" : "4 4"}
+                />
+                <text
+                  x={margins.left - 14}
+                  y={yAt(tick) + 4}
+                  textAnchor="end"
+                  fontSize="12"
+                  fill="#64748b"
+                >
+                  {tick}
+                </text>
+              </g>
+            ))}
+
+            <line x1={margins.left} x2={margins.left} y1={margins.top} y2={height - margins.bottom} stroke="#0f172a" strokeWidth="2" />
+            <line x1={margins.left} x2={width - margins.right} y1={height - margins.bottom} y2={height - margins.bottom} stroke="#0f172a" strokeWidth="2" />
+
+            {data.map((row, index) => {
+              const x = xAt(index);
+              const yMin = yAt(row.min);
+              const yQ1 = yAt(row.q1);
+              const yMedian = yAt(row.median);
+              const yQ3 = yAt(row.q3);
+              const yMaxValue = yAt(row.max);
+              return (
+                <g key={row.complexity}>
+                  <line
+                    x1={x}
+                    x2={x}
+                    y1={height - margins.bottom - 6}
+                    y2={height - margins.bottom + 6}
+                    stroke="#0f172a"
+                    strokeWidth="2"
+                  />
+                  <text
+                    x={x}
+                    y={height - margins.bottom + 34}
+                    textAnchor="middle"
+                    fontSize="13"
+                    fontWeight="600"
+                    fill="#0f172a"
+                  >
+                    {row.complexity}
+                  </text>
+
+                  {row.count > 0 && (
+                    <g>
+                      <title>
+                        {`${row.complexity}: ${formatNumber(row.count)} edition printing${row.count === 1 ? "" : "s"}, median runtime ${formatMinutes(row.median)}, runtime range ${formatMinutes(row.min)}-${formatMinutes(row.max)}`}
+                      </title>
+                      <text
+                        x={x}
+                        y={Math.max(margins.top + 14, yMaxValue - 12)}
+                        textAnchor="middle"
+                        fontSize="12"
+                        fontWeight="700"
+                        fill="#334155"
+                      >
+                        {row.count}
+                      </text>
+                      <line x1={x} x2={x} y1={yMaxValue} y2={yMin} stroke="#94a3b8" strokeWidth="3" />
+                      <line x1={x - boxWidth * 0.35} x2={x + boxWidth * 0.35} y1={yMaxValue} y2={yMaxValue} stroke="#94a3b8" strokeWidth="3" />
+                      <line x1={x - boxWidth * 0.35} x2={x + boxWidth * 0.35} y1={yMin} y2={yMin} stroke="#94a3b8" strokeWidth="3" />
+                      <rect
+                        x={x - boxWidth / 2}
+                        y={yQ3}
+                        width={boxWidth}
+                        height={Math.max(yQ1 - yQ3, 3)}
+                        rx="4"
+                        fill="#cbd5e1"
+                        stroke="#64748b"
+                        strokeWidth="1.5"
+                      />
+                      <line x1={x - boxWidth / 2} x2={x + boxWidth / 2} y1={yMedian} y2={yMedian} stroke="#64748b" strokeWidth="3" />
+                    </g>
+                  )}
+                </g>
+              );
+            })}
+
+            <text
+              x={margins.left - 52}
+              y={margins.top + plotHeight / 2}
+              textAnchor="middle"
+              fontSize="13"
+              fontWeight="700"
+              fill="#0f172a"
+              transform={`rotate(-90 ${margins.left - 52} ${margins.top + plotHeight / 2})`}
+            >
+              Runtime (min)
+            </text>
+            <text
+              x={margins.left + plotWidth / 2}
+              y={height - 16}
+              textAnchor="middle"
+              fontSize="13"
+              fontWeight="700"
+              fill="#0f172a"
+            >
+              Complexity
+            </text>
+            <g transform={`translate(${width - 178}, 18)`}>
+              <rect x="0" y="0" width="12" height="12" rx="2" fill="#cbd5e1" stroke="#64748b" />
+              <text x="20" y="11" fontSize="12" fill="#475569">Runtime distribution</text>
+            </g>
+          </svg>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -721,6 +946,93 @@ function DetailsTable({ day, details }) {
         </table>
       </div>
     </section>
+  );
+}
+
+function buildComplexityBoxData(rows) {
+  const grouped = new Map(
+    COMPLEXITY_CODES.map((complexity) => [
+      complexity,
+      {
+        runtime: [],
+        waiting: []
+      }
+    ])
+  );
+
+  for (const row of rows || []) {
+    const complexity = String(row.complexity || "").trim().toUpperCase();
+    if (!grouped.has(complexity)) continue;
+
+    const runtime = Number(row.runtime || 0);
+    const waitingTime = Number(row.waiting_time || 0);
+
+    if (Number.isFinite(runtime)) {
+      grouped.get(complexity).runtime.push(runtime);
+    }
+    if (Number.isFinite(waitingTime)) {
+      grouped.get(complexity).waiting.push(waitingTime);
+    }
+  }
+
+  return COMPLEXITY_CODES.map((complexity) => {
+    const group = grouped.get(complexity);
+    const runtimeValues = [...group.runtime].sort((a, b) => a - b);
+    const waitingValues = group.waiting;
+
+    if (runtimeValues.length === 0) {
+      return {
+        complexity,
+        count: 0,
+        min: 0,
+        q1: 0,
+        median: 0,
+        q3: 0,
+        max: 0,
+        waitingMean: 0
+      };
+    }
+
+    return {
+      complexity,
+      count: runtimeValues.length,
+      min: cleanNumber(runtimeValues[0]),
+      q1: cleanNumber(percentile(runtimeValues, 0.25)),
+      median: cleanNumber(percentile(runtimeValues, 0.5)),
+      q3: cleanNumber(percentile(runtimeValues, 0.75)),
+      max: cleanNumber(runtimeValues[runtimeValues.length - 1]),
+      waitingMean: cleanNumber(average(waitingValues))
+    };
+  });
+}
+
+function percentile(sortedValues, percentileValue) {
+  if (!sortedValues.length) return 0;
+
+  const position = (sortedValues.length - 1) * percentileValue;
+  const lowerIndex = Math.floor(position);
+  const upperIndex = Math.ceil(position);
+
+  if (lowerIndex === upperIndex) {
+    return sortedValues[lowerIndex];
+  }
+
+  const weight = position - lowerIndex;
+  return sortedValues[lowerIndex] * (1 - weight) + sortedValues[upperIndex] * weight;
+}
+
+function average(values) {
+  if (!values.length) return 0;
+  return values.reduce((total, value) => total + Number(value || 0), 0) / values.length;
+}
+
+function buildRuntimeTicks(maxValue) {
+  const step = maxValue <= 240 ? 30 : maxValue <= 480 ? 60 : 120;
+  const upper = Math.ceil(maxValue / step) * step;
+
+  return Array.from(
+    { length: Math.floor(upper / step) + 1 },
+    (_, index) => index * step
   );
 }
 

@@ -879,6 +879,82 @@ def calculate_tower_day_metrics(
     return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Machine", "Tower"]).reset_index(drop=True)
 
 
+def calculate_complexity_timing_metrics(book_df: pd.DataFrame) -> pd.DataFrame:
+    """Return interval-level runtime and waiting time grouped by complexity code."""
+    columns = [
+        REPORT_DATE_COLUMN,
+        "Complexity",
+        "runtime",
+        "waiting_time",
+    ]
+
+    active_rows = book_df[_has_capacity_keys(book_df)].copy()
+    if active_rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    interval_editions = _filter_interval_editions(active_rows)
+    if interval_editions.empty:
+        return pd.DataFrame(columns=columns)
+
+    interval_editions["Complexity"] = interval_editions.apply(_parse_complexity_code, axis=1)
+    interval_editions = interval_editions[interval_editions["Complexity"].ne("")]
+    if interval_editions.empty:
+        return pd.DataFrame(columns=columns)
+
+    dedupe_columns = [
+        REPORT_DATE_COLUMN,
+        "Issue Id",
+        "Machine",
+        "Folder",
+        "Complexity",
+        "Reflong",
+        "Last Tiff DateTime",
+        "Effective Start DateTime",
+        "Effective End DateTime",
+        "Window Start",
+    ]
+    interval_editions = interval_editions[dedupe_columns].drop_duplicates()
+
+    records: list[dict[str, Any]] = []
+    group_keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+
+    for _, group in interval_editions.groupby(group_keys, dropna=False):
+        group = group.sort_values("Effective Start DateTime")
+        previous_end = pd.Timestamp(group.iloc[0]["Window Start"])
+        last_tiff_times = _extract_last_tiff_times(group)
+
+        for row_index, row in group.iterrows():
+            start_dt = pd.Timestamp(row["Effective Start DateTime"])
+            end_dt = pd.Timestamp(row["Effective End DateTime"])
+            if pd.isna(start_dt) or pd.isna(end_dt) or end_dt <= start_dt:
+                continue
+
+            runtime = max((end_dt - start_dt).total_seconds() / 60, 0.0)
+            last_tiff = last_tiff_times.get(row_index, pd.NaT)
+            waiting_time = 0.0
+
+            if pd.notna(last_tiff):
+                ready_at = min(pd.Timestamp(last_tiff), start_dt)
+                if ready_at > previous_end:
+                    waiting_time = (ready_at - previous_end).total_seconds() / 60
+
+            records.append(
+                {
+                    REPORT_DATE_COLUMN: row[REPORT_DATE_COLUMN],
+                    "Complexity": row["Complexity"],
+                    "runtime": min(max(runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                    "waiting_time": min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
+                }
+            )
+
+            previous_end = max(previous_end, end_dt)
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Complexity"]).reset_index(drop=True)
+
+
 def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_available = float(daily_df["available_capacity"].sum()) if not daily_df.empty else 0.0
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
@@ -900,6 +976,7 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
     down_time_df = parse_down_time(workbook)
     folder_day_df = calculate_folder_day_metrics(book_df, down_time_df)
     tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df)
+    complexity_timing_df = calculate_complexity_timing_metrics(book_df)
     daily_df = calculate_daily_metrics(folder_day_df)
 
     return {
@@ -908,6 +985,7 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
         "daily": _daily_records(daily_df),
         "details": _detail_records(folder_day_df),
         "tower_details": _tower_detail_records(tower_day_df),
+        "complexity_timing": _complexity_timing_records(complexity_timing_df),
         "errors": [],
     }
 
@@ -1140,6 +1218,23 @@ def _split_towers(value: Any) -> list[str]:
     ]
 
 
+def _parse_complexity_code(row: pd.Series) -> str:
+    for column in ("Complexities", "Complexity"):
+        text = _clean_text(row.get(column))
+        if not text:
+            continue
+
+        match = re.search(r"\bC\s*[-_ ]?(\d{1,2})\b", text, flags=re.IGNORECASE)
+        if not match:
+            continue
+
+        complexity_number = int(match.group(1))
+        if 1 <= complexity_number <= 15:
+            return f"C{complexity_number}"
+
+    return ""
+
+
 def _is_blank(value: Any) -> bool:
     if value is None:
         return True
@@ -1247,6 +1342,31 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "waiting_time",
                 "reflong_related_downtime",
                 "late_start_time",
+            ]
+        ]
+    )
+
+
+def _complexity_timing_records(complexity_timing_df: pd.DataFrame) -> list[dict[str, Any]]:
+    if complexity_timing_df.empty:
+        return []
+
+    renamed = complexity_timing_df.rename(
+        columns={
+            REPORT_DATE_COLUMN: "run_date",
+            "Complexity": "complexity",
+        }
+    ).copy()
+
+    renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
+
+    return _rounded_records(
+        renamed[
+            [
+                "run_date",
+                "complexity",
+                "runtime",
+                "waiting_time",
             ]
         ]
     )
