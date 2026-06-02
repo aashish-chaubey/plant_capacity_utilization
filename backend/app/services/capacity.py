@@ -60,10 +60,6 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
     df["Folder"] = df["Folder"].apply(_clean_text)
     df["Issue Id"] = df["Issue Id"].apply(_clean_text)
     df["Reflong"] = df["Reflong"].apply(_clean_text)
-    df["Integrated"] = df.get(
-        "Integrated / Pullout",
-        df.get("Integrated", pd.Series("", index=df.index)),
-    ).apply(_clean_text)
     df["Total Run Time (mnts)"] = df["Total Run Time (mnts)"].apply(_parse_minutes_value)
     df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
     df["Change Over Time (mins)"] = df.get(
@@ -309,50 +305,6 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
             row["Window End"] = window_end
             row["Effective Start DateTime"] = effective_start
             row["Effective End DateTime"] = effective_end
-            kept_rows.append(row)
-
-    if not kept_rows:
-        return pd.DataFrame(columns=[*df.columns, *interval_columns])
-
-    return pd.DataFrame(kept_rows)
-
-
-def _filter_end_time_editions(book_df: pd.DataFrame) -> pd.DataFrame:
-    """Keep editions whose print end time falls inside Issue Date 00:00-04:00."""
-    df = book_df[
-        (book_df[REPORT_DATE_COLUMN].notna()) &
-        (book_df["Issue Date"].notna()) &
-        (book_df["Machine"].ne("")) &
-        (book_df["Folder"].ne("")) &
-        (book_df["Start DateTime"].notna()) &
-        (book_df["End DateTime"].notna())
-    ].copy()
-
-    interval_columns = ["Window Start", "Window End"]
-
-    if df.empty:
-        return pd.DataFrame(columns=[*df.columns, *interval_columns])
-
-    kept_rows = []
-
-    for _, row in df.iterrows():
-        issue_date = row["Issue Date"]
-        start_dt = pd.Timestamp(row["Start DateTime"])
-        end_dt = pd.Timestamp(row["End DateTime"])
-
-        if issue_date is None or pd.isna(start_dt) or pd.isna(end_dt):
-            continue
-
-        if end_dt <= start_dt:
-            continue
-
-        window_start = pd.Timestamp(datetime.combine(issue_date, time(0, 0)))
-        window_end = pd.Timestamp(datetime.combine(issue_date, time(4, 0)))
-
-        if window_start <= end_dt <= window_end:
-            row = row.copy()
-            row["Window Start"] = window_start
-            row["Window End"] = window_end
             kept_rows.append(row)
 
     if not kept_rows:
@@ -975,97 +927,6 @@ def calculate_tower_day_metrics(
     return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Machine", "Tower"]).reset_index(drop=True)
 
 
-def calculate_complexity_timing_metrics(book_df: pd.DataFrame) -> pd.DataFrame:
-    """Return edition-level timing metrics for prints ending in 00:00-04:00."""
-    columns = [
-        REPORT_DATE_COLUMN,
-        "Complexity",
-        "runtime",
-        "waiting_time",
-        "change_over_time",
-        "downtime",
-        "spare_time",
-    ]
-
-    active_rows = book_df[_has_capacity_keys(book_df)].copy()
-    if active_rows.empty:
-        return pd.DataFrame(columns=columns)
-
-    interval_editions = _filter_end_time_editions(active_rows)
-    if interval_editions.empty:
-        return pd.DataFrame(columns=columns)
-
-    interval_editions["Complexity"] = interval_editions.apply(_parse_complexity_code, axis=1)
-    interval_editions = interval_editions[interval_editions["Complexity"].ne("")]
-    interval_editions = interval_editions[
-        ~interval_editions["Integrated"].apply(_is_integrated_edition)
-    ].copy()
-    if interval_editions.empty:
-        return pd.DataFrame(columns=columns)
-
-    records: list[dict[str, Any]] = []
-    group_keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
-
-    for _, group in interval_editions.groupby(group_keys, dropna=False):
-        group = group.sort_values(["Start DateTime", "End DateTime"])
-        previous_end = pd.Timestamp(group.iloc[0]["Window Start"])
-        last_tiff_times = _extract_last_tiff_times(group)
-
-        for (start_dt, end_dt), interval_rows in group.groupby(
-            ["Start DateTime", "End DateTime"],
-            sort=True,
-            dropna=False,
-        ):
-            start_dt = pd.Timestamp(start_dt)
-            end_dt = pd.Timestamp(end_dt)
-            if pd.isna(start_dt) or pd.isna(end_dt) or end_dt <= start_dt:
-                continue
-
-            gap_start = min(max(previous_end, pd.Timestamp(interval_rows.iloc[0]["Window Start"])), start_dt)
-            default_changeover = max((start_dt - gap_start).total_seconds() / 60, 0.0)
-
-            for row_index, row in interval_rows.iterrows():
-                workbook_runtime = _parse_minutes_value(row.get("Total Run Time (mnts)"))
-                runtime = (
-                    workbook_runtime
-                    if workbook_runtime > 0
-                    else max((end_dt - start_dt).total_seconds() / 60, 0.0)
-                )
-                downtime = _parse_minutes_value(row.get("Total Downtime"))
-                last_tiff = last_tiff_times.get(row_index, pd.NaT)
-                waiting_time = 0.0
-                change_over_time = default_changeover
-
-                if pd.notna(last_tiff):
-                    ready_at = min(max(pd.Timestamp(last_tiff), gap_start), start_dt)
-                    waiting_time = max((ready_at - gap_start).total_seconds() / 60, 0.0)
-                    change_over_time = max((start_dt - ready_at).total_seconds() / 60, 0.0)
-
-                spare_time = max(
-                    (pd.Timestamp(row["Window End"]) - end_dt).total_seconds() / 60,
-                    0.0,
-                )
-
-                records.append(
-                    {
-                        REPORT_DATE_COLUMN: row[REPORT_DATE_COLUMN],
-                        "Complexity": row["Complexity"],
-                        "runtime": min(max(runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                        "waiting_time": min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                        "change_over_time": min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                        "downtime": min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                        "spare_time": min(max(spare_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
-                    }
-                )
-
-            previous_end = max(previous_end, end_dt)
-
-    if not records:
-        return pd.DataFrame(columns=columns)
-
-    return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Complexity"]).reset_index(drop=True)
-
-
 def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_available = float(daily_df["available_capacity"].sum()) if not daily_df.empty else 0.0
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
@@ -1087,7 +948,6 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
     down_time_df = parse_down_time(workbook)
     folder_day_df = calculate_folder_day_metrics(book_df, down_time_df)
     tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df)
-    complexity_timing_df = calculate_complexity_timing_metrics(book_df)
     daily_df = calculate_daily_metrics(folder_day_df)
 
     return {
@@ -1096,7 +956,6 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
         "daily": _daily_records(daily_df),
         "details": _detail_records(folder_day_df),
         "tower_details": _tower_detail_records(tower_day_df),
-        "complexity_timing": _complexity_timing_records(complexity_timing_df),
         "errors": [],
     }
 
@@ -1329,27 +1188,6 @@ def _split_towers(value: Any) -> list[str]:
     ]
 
 
-def _parse_complexity_code(row: pd.Series) -> str:
-    for column in ("Complexities", "Complexity"):
-        text = _clean_text(row.get(column))
-        if not text:
-            continue
-
-        match = re.search(r"\bC\s*[-_ ]?(\d{1,2})\b", text, flags=re.IGNORECASE)
-        if not match:
-            continue
-
-        complexity_number = int(match.group(1))
-        if 1 <= complexity_number <= 15:
-            return f"C{complexity_number}"
-
-    return ""
-
-
-def _is_integrated_edition(value: Any) -> bool:
-    return _clean_text(value).casefold() == "integrated"
-
-
 def _is_blank(value: Any) -> bool:
     if value is None:
         return True
@@ -1459,34 +1297,6 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "reflong_related_downtime",
                 "late_start_time",
                 "buffer_time",
-            ]
-        ]
-    )
-
-
-def _complexity_timing_records(complexity_timing_df: pd.DataFrame) -> list[dict[str, Any]]:
-    if complexity_timing_df.empty:
-        return []
-
-    renamed = complexity_timing_df.rename(
-        columns={
-            REPORT_DATE_COLUMN: "run_date",
-            "Complexity": "complexity",
-        }
-    ).copy()
-
-    renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
-
-    return _rounded_records(
-        renamed[
-            [
-                "run_date",
-                "complexity",
-                "runtime",
-                "waiting_time",
-                "change_over_time",
-                "downtime",
-                "spare_time",
             ]
         ]
     )

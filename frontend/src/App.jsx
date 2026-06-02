@@ -338,15 +338,13 @@ function filterCapacityData(result, range) {
   const daily = result.daily.filter((row) => isDateInRange(row.run_date, range));
   const details = result.details.filter((row) => isDateInRange(row.run_date, range));
   const towerDetails = (result.tower_details || []).filter((row) => isDateInRange(row.run_date, range));
-  const complexityTiming = (result.complexity_timing || []).filter((row) => isDateInRange(row.run_date, range));
 
   return {
     ...result,
     summary: calculateSummary(daily),
     daily,
     details,
-    tower_details: towerDetails,
-    complexity_timing: complexityTiming
+    tower_details: towerDetails
   };
 }
 

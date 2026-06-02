@@ -78,6 +78,10 @@ Required sheets:
 - `Book Wise Details`
 - `Down Time`
 
+Optional sheet:
+
+- `General` is used for tower breakdowns. If it is missing, the dashboard still calculates folder and daily capacity, but tower breakdown data is empty.
+
 Required `Book Wise Details` columns:
 
 - `Issue Date`
@@ -105,6 +109,11 @@ Required `Down Time` columns:
 - `Total Downtime`
 - `Run Date`
 
+Required `General` columns for tower breakdowns:
+
+- `IssueID`
+- `Towers used`
+
 Extra sheets and columns are ignored. Column names are matched after trimming whitespace. Sheet names are exact for this MVP.
 
 ## Calculation Assumptions
@@ -125,6 +134,115 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
 - Late start is calculated per capacity unit from expected `00:00` to the earliest parsed print start time, capped at `240` minutes.
 - Spare time is returned as `buffer_time` in the API. Per active folder it is calculated as `240 - runtime - lost_time - downtime`, floored at `0`; daily spare time also includes full 240-minute spare capacity for any plant-capacity folder that was not active that day.
 - Average utilization is weighted: `total_runtime / total_available_capacity * 100`.
+
+## Calculation Workflow
+
+### 1. Workbook parsing
+
+1. The backend reads `Book Wise Details`, `Down Time`, and, when available, `General`.
+2. Column names are trimmed before use.
+3. `Issue Date`, `Run Date`, `Start Date`, `End Date`, `Start Time`, and `End Time` are parsed into date/time values.
+4. `Start DateTime` and `End DateTime` are built from the parsed start/end date and time fields.
+5. `Report Date` is set from `Issue Date`. All dashboard grouping uses `Issue Date`, not `Run Date`.
+6. Machine, folder, issue id, reflong, downtime, and runtime fields are normalized for calculation.
+
+### 2. Print window filtering
+
+1. The production window is fixed at `Issue Date 00:00` to `Issue Date 04:00`.
+2. A `Book Wise Details` row is kept for capacity only if its print interval overlaps that window.
+3. Rows outside the window are discarded before active folders, runtime, downtime, lost time, and spare time are calculated.
+4. For kept rows, the effective print interval is clipped to the window:
+   - effective start = later of actual start and `00:00`
+   - effective end = earlier of actual end and `04:00`
+
+### 3. Folder-day capacity units
+
+1. One folder-day capacity unit is one unique `Issue Date + Machine + Folder`.
+2. Each active folder-day has `240` available minutes.
+3. Active folder-days are derived only after the print-window filter, so a folder is active only if it prints inside `00:00-04:00`.
+
+### 4. Runtime calculation
+
+1. For each folder-day, all effective print intervals are sorted.
+2. Overlapping or touching intervals are merged so duplicate or concurrent edition rows do not double count runtime.
+3. Gross runtime is the sum of merged interval durations.
+4. Net runtime is `gross_runtime - total_downtime`, floored at `0`.
+5. Runtime is capped at `240` minutes per folder-day or tower-day.
+
+### 5. Waiting, LPR, and changeover
+
+1. The first print interval is compared against the window start and the selected `Last Tiff` time.
+2. If the first edition is ready before `00:00`, waiting is `0` and LPR to print start is the time from `00:00` to first print start.
+3. If the first edition becomes ready inside the window, waiting is the time from `00:00` to ready time, and LPR to print start is the time from ready time to first print start.
+4. For later print intervals, the gap between previous print end and next print start is split into waiting and changeover:
+   - waiting is time until the next edition is ready
+   - changeover is time from ready time to next print start
+5. If the next edition was ready before the previous print ended, the full gap is treated as changeover.
+6. Waiting, LPR, and changeover are clamped so they cannot consume more than the real available gap.
+
+### 6. Downtime and reflong downtime
+
+1. `Down Time` rows are matched to print-window rows by `IssueID + Machine + Folder`.
+2. Downtime is included only when the matching issue/folder appears inside the `00:00-04:00` print window.
+3. Reflong downtime is moved out of normal downtime and into lost time only when:
+   - the downtime `IssueID` matches a book-wise `Issue Id`
+   - the matching book-wise row has `Reflong = Yes`
+   - the downtime `Related` field starts with `Reflong`
+4. Normal downtime is `total_downtime - reflong_related_downtime`, floored at `0`.
+
+### 7. Lost time and spare time
+
+1. Lost time is the sum of:
+   - waiting time
+   - LPR to print start
+   - changeover time
+   - reflong-related downtime
+2. Lost time is capped to the remaining folder capacity after runtime and normal downtime.
+3. Spare time is:
+
+```text
+240 - runtime - downtime - lost_time
+```
+
+4. Spare time is floored at `0` and capped at `240`.
+5. The per-folder guardrail is:
+
+```text
+runtime + downtime + lost_time + spare_time = 240
+```
+
+### 8. Daily plant capacity
+
+1. Folder-day rows are aggregated by `Issue Date`.
+2. Daily runtime, downtime, lost time, and spare time are summed from folder-day rows.
+3. The plant's daily capacity uses the maximum active folder count seen in the report.
+4. Example: if any day reaches 5 active folders, every day uses `5 * 240 = 1200` available minutes.
+5. If a day uses fewer than the plant maximum folder count, each unused folder contributes `240` spare minutes to that day.
+6. Daily utilization is:
+
+```text
+runtime / available_capacity * 100
+```
+
+7. Utilization is capped at `100%`.
+
+### 9. Tower breakdown
+
+1. The `General` sheet maps each `IssueID` to one or more towers from `Towers used`.
+2. Book-wise print intervals are expanded from issue-level rows to tower-level rows.
+3. Tower intervals are merged the same way folder intervals are merged.
+4. Tower runtime, waiting time, LPR, changeover, downtime, reflong downtime, and spare time are calculated for each `Issue Date + Machine + Tower`.
+5. Each tower-day has a maximum of `240` available minutes.
+6. Tower spare time is the remaining capacity after the selected time components.
+
+### 10. Timeframe filters and dashboard summaries
+
+1. The backend returns full-report daily, folder, and tower rows.
+2. The frontend filters rows by the selected annual, half-yearly, quarterly, monthly, or custom date range.
+3. Summary KPIs are recalculated from the filtered daily rows.
+4. For selections longer than 31 days, the daily capacity chart is grouped into weekly bars.
+5. Tower and folder utilization charts aggregate selected components across the chosen timeframe.
+6. Chart percentages are rounded and capped so no displayed value exceeds `100%`.
 
 ## Example Response
 

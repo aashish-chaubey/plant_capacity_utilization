@@ -62,15 +62,6 @@ const ENGAGED_TIME_OPTIONS = [
   }
 ];
 
-const COMPLEXITY_CODES = Array.from({ length: 15 }, (_, index) => `C${index + 1}`);
-const COMPLEXITY_METRIC_OPTIONS = [
-  { key: "runtime", label: "Runtime" },
-  { key: "change_over_time", label: "Changeover time" },
-  { key: "downtime", label: "Downtime" },
-  { key: "spare_time", label: "Spare time" }
-];
-const BOX_PLOT_FILL = "#cbd5e1";
-
 function prepareDailyChartData(dailyData) {
   if (!dailyData || dailyData.length === 0) return dailyData;
 
@@ -171,8 +162,6 @@ function buildCapacityTicks(rows) {
 export default function Dashboard({ data }) {
   const [focusedDay, setFocusedDay] = useState("");
   const [engagedComponentKeys, setEngagedComponentKeys] = useState(["runtime"]);
-  const [activeBreakdownTab, setActiveBreakdownTab] = useState("utilization");
-  const [complexityMetricKey, setComplexityMetricKey] = useState("runtime");
 
   useEffect(() => {
     if (focusedDay && !data.daily.some((day) => day.run_date === focusedDay)) {
@@ -196,14 +185,6 @@ export default function Dashboard({ data }) {
     [data.tower_details, focusedDay]
   );
 
-  const breakdownComplexityTiming = useMemo(
-    () =>
-      focusedDay
-        ? (data.complexity_timing || []).filter((row) => row.run_date === focusedDay)
-        : data.complexity_timing || [],
-    [data.complexity_timing, focusedDay]
-  );
-
   const breakdownProductionDays = focusedDay ? 1 : data.daily.length;
   
   const dailyChartData = useMemo(
@@ -222,16 +203,6 @@ export default function Dashboard({ data }) {
   const folderBreakdown = useMemo(
     () => aggregateResourceUsage(breakdownDetails, "folder", breakdownProductionDays, engagedComponentKeys),
     [breakdownDetails, breakdownProductionDays, engagedComponentKeys]
-  );
-  const complexityBoxData = useMemo(
-    () => buildComplexityBoxData(breakdownComplexityTiming, complexityMetricKey),
-    [breakdownComplexityTiming, complexityMetricKey]
-  );
-  const selectedComplexityMetric = useMemo(
-    () =>
-      COMPLEXITY_METRIC_OPTIONS.find((option) => option.key === complexityMetricKey)
-      || COMPLEXITY_METRIC_OPTIONS[0],
-    [complexityMetricKey]
   );
   const selectedEngagedOptions = useMemo(
     () => ENGAGED_TIME_OPTIONS.filter((option) => engagedComponentKeys.includes(option.key)),
@@ -339,270 +310,36 @@ export default function Dashboard({ data }) {
           )}
         </div>
 
-        <div className="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-white p-1 shadow-soft">
-          <TabButton
-            active={activeBreakdownTab === "utilization"}
-            onClick={() => setActiveBreakdownTab("utilization")}
-          >
-            Tower and folder utilization
-          </TabButton>
-          <TabButton
-            active={activeBreakdownTab === "complexity"}
-            onClick={() => setActiveBreakdownTab("complexity")}
-          >
-            Complexity timing
-          </TabButton>
-        </div>
+        <EngagedTimeSelector
+          options={ENGAGED_TIME_OPTIONS}
+          selectedKeys={engagedComponentKeys}
+          onToggle={toggleEngagedComponent}
+        />
 
-        {activeBreakdownTab === "utilization" ? (
-          <>
-            <EngagedTimeSelector
-              options={ENGAGED_TIME_OPTIONS}
-              selectedKeys={engagedComponentKeys}
-              onToggle={toggleEngagedComponent}
-            />
-
-            <div className="grid gap-6 xl:grid-cols-2">
-              <UtilizationBreakdownChart
-                title="Tower breakdown"
-                subtitle={focusedDay ? "Tower utilization for selected day" : "Average tower utilization across the selected timeframe"}
-                data={towerBreakdown}
-                nameKey="tower"
-                engagedOptions={selectedEngagedOptions}
-                barSize={10}
-                rowHeight={34}
-                emptyMessage="No tower usage found for this selection."
-              />
-              <UtilizationBreakdownChart
-                title="Folder breakdown"
-                subtitle={focusedDay ? "Folder utilization for selected day" : "Average folder utilization across the selected timeframe"}
-                data={folderBreakdown}
-                nameKey="folder"
-                engagedOptions={selectedEngagedOptions}
-                barSize={24}
-                rowHeight={54}
-                emptyMessage="No folder usage found for this selection."
-              />
-            </div>
-          </>
-        ) : (
-          <ComplexityBoxPlotChart
-            data={complexityBoxData}
-            metric={selectedComplexityMetric}
-            metricOptions={COMPLEXITY_METRIC_OPTIONS}
-            onMetricChange={setComplexityMetricKey}
-            scopeLabel={focusedDay ? `Selected day: ${focusedDay}` : "Selected timeframe"}
+        <div className="grid gap-6 xl:grid-cols-2">
+          <UtilizationBreakdownChart
+            title="Tower breakdown"
+            subtitle={focusedDay ? "Tower utilization for selected day" : "Average tower utilization across the selected timeframe"}
+            data={towerBreakdown}
+            nameKey="tower"
+            engagedOptions={selectedEngagedOptions}
+            barSize={10}
+            rowHeight={34}
+            emptyMessage="No tower usage found for this selection."
           />
-        )}
+          <UtilizationBreakdownChart
+            title="Folder breakdown"
+            subtitle={focusedDay ? "Folder utilization for selected day" : "Average folder utilization across the selected timeframe"}
+            data={folderBreakdown}
+            nameKey="folder"
+            engagedOptions={selectedEngagedOptions}
+            barSize={24}
+            rowHeight={54}
+            emptyMessage="No folder usage found for this selection."
+          />
+        </div>
       </section>
     </div>
-  );
-}
-
-function TabButton({ active, children, onClick }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`min-h-9 rounded-md px-4 text-sm font-semibold transition ${
-        active
-          ? "bg-slate-950 text-white shadow-sm"
-          : "text-slate-500 hover:bg-slate-50 hover:text-slate-950"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function ComplexityBoxPlotChart({ data, metric, metricOptions, onMetricChange, scopeLabel }) {
-  const hasData = data.some((row) => row.count > 0);
-  const width = 1160;
-  const height = 440;
-  const margins = { top: 32, right: 32, bottom: 72, left: 78 };
-  const plotWidth = width - margins.left - margins.right;
-  const plotHeight = height - margins.top - margins.bottom;
-  const maxValue = Math.max(0, ...data.map((row) => (row.count > 0 ? row.max : 0)));
-  const ticks = buildRuntimeTicks(maxValue);
-  const yMax = ticks[ticks.length - 1] || 10;
-  const yMin = -Math.max(yMax * 0.06, 2);
-  const yRange = yMax - yMin;
-  const xInset = 44;
-  const xStep = (plotWidth - xInset * 2) / (COMPLEXITY_CODES.length - 1);
-  const boxWidth = 34;
-
-  function xAt(index) {
-    return margins.left + xInset + index * xStep;
-  }
-
-  function yAt(value) {
-    return margins.top + plotHeight - ((Number(value || 0) - yMin) / yRange) * plotHeight;
-  }
-
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-soft">
-      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h2 className="text-base font-semibold text-slate-950">Complexity timing distribution</h2>
-          <p className="mt-1 text-sm text-slate-500">{metric.label} distribution by complexity with edition printing count</p>
-        </div>
-        <div className="flex flex-col gap-2 sm:items-end">
-          <div className="inline-flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
-            {metricOptions.map((option) => (
-              <button
-                key={option.key}
-                type="button"
-                onClick={() => onMetricChange(option.key)}
-                className={`min-h-8 rounded-md px-3 text-xs font-semibold transition ${
-                  metric.key === option.key
-                    ? "bg-white text-slate-950 shadow-sm"
-                    : "text-slate-500 hover:bg-white/70 hover:text-slate-900"
-                }`}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          <span className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
-            {scopeLabel}
-          </span>
-        </div>
-      </div>
-
-      {!hasData ? (
-        <div className="flex h-72 items-center justify-center rounded-lg border border-dashed border-slate-200 text-sm text-slate-500">
-          No complexity timing data found for this selection.
-        </div>
-      ) : (
-        <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
-          <svg
-            className="h-[440px] w-full"
-            role="img"
-            aria-label={`Box and whisker plot of ${metric.label.toLowerCase()} by complexity with edition printing counts`}
-            viewBox={`0 0 ${width} ${height}`}
-          >
-            <rect x="0" y="0" width={width} height={height} rx="10" fill="#f8fafc" />
-            {ticks.map((tick) => (
-              <g key={tick}>
-                <line
-                  x1={margins.left}
-                  x2={width - margins.right}
-                  y1={yAt(tick)}
-                  y2={yAt(tick)}
-                  stroke="#e2e8f0"
-                  strokeDasharray={tick === 0 ? "" : "4 4"}
-                />
-                <text
-                  x={margins.left - 14}
-                  y={yAt(tick) + 4}
-                  textAnchor="end"
-                  fontSize="12"
-                  fill="#64748b"
-                >
-                  {tick}
-                </text>
-              </g>
-            ))}
-
-            <line x1={margins.left} x2={margins.left} y1={margins.top} y2={height - margins.bottom} stroke="#0f172a" strokeWidth="2" />
-            <line x1={margins.left} x2={width - margins.right} y1={height - margins.bottom} y2={height - margins.bottom} stroke="#0f172a" strokeWidth="2" />
-
-            {data.map((row, index) => {
-              const x = xAt(index);
-              const yMin = yAt(row.min);
-              const yQ1 = yAt(row.q1);
-              const yMedian = yAt(row.median);
-              const yQ3 = yAt(row.q3);
-              const yMaxValue = yAt(row.max);
-              const countHasSpaceAbove = yMaxValue - 12 >= margins.top + 14;
-              const countY = countHasSpaceAbove
-                ? yMaxValue - 12
-                : Math.min(height - margins.bottom - 14, yMin + 18);
-              return (
-                <g key={row.complexity}>
-                  <line
-                    x1={x}
-                    x2={x}
-                    y1={height - margins.bottom - 3}
-                    y2={height - margins.bottom + 3}
-                    stroke="#94a3b8"
-                    strokeWidth="1.5"
-                  />
-                  <text
-                    x={x}
-                    y={height - margins.bottom + 34}
-                    textAnchor="middle"
-                    fontSize="12"
-                    fontWeight="600"
-                    fill="#0f172a"
-                  >
-                    {row.complexity}
-                  </text>
-
-                  {row.count > 0 && (
-                    <g>
-                      <title>
-                        {`${row.complexity}: ${formatNumber(row.count)} edition printing${row.count === 1 ? "" : "s"}, median ${metric.label.toLowerCase()} ${formatMinutes(row.median)}, ${metric.label.toLowerCase()} range ${formatMinutes(row.min)}-${formatMinutes(row.max)}`}
-                      </title>
-                      <text
-                        x={x}
-                        y={countY}
-                        textAnchor="middle"
-                        fontSize="12"
-                        fontWeight="700"
-                        fill="#334155"
-                      >
-                        {row.count}
-                      </text>
-                      <line x1={x} x2={x} y1={yMaxValue} y2={yMin} stroke="#94a3b8" strokeWidth="3" />
-                      <line x1={x - boxWidth * 0.35} x2={x + boxWidth * 0.35} y1={yMaxValue} y2={yMaxValue} stroke="#94a3b8" strokeWidth="3" />
-                      <line x1={x - boxWidth * 0.35} x2={x + boxWidth * 0.35} y1={yMin} y2={yMin} stroke="#94a3b8" strokeWidth="3" />
-                      <rect
-                        x={x - boxWidth / 2}
-                        y={yQ3}
-                        width={boxWidth}
-                        height={Math.max(yQ1 - yQ3, 3)}
-                        rx="4"
-                        fill={BOX_PLOT_FILL}
-                        stroke="#64748b"
-                        strokeWidth="1.5"
-                      />
-                      <line x1={x - boxWidth / 2} x2={x + boxWidth / 2} y1={yMedian} y2={yMedian} stroke="#64748b" strokeWidth="3" />
-                    </g>
-                  )}
-                </g>
-              );
-            })}
-
-            <text
-              x={margins.left - 52}
-              y={margins.top + plotHeight / 2}
-              textAnchor="middle"
-              fontSize="13"
-              fontWeight="700"
-              fill="#0f172a"
-              transform={`rotate(-90 ${margins.left - 52} ${margins.top + plotHeight / 2})`}
-            >
-              {metric.label} (min)
-            </text>
-            <text
-              x={margins.left + plotWidth / 2}
-              y={height - 16}
-              textAnchor="middle"
-              fontSize="13"
-              fontWeight="700"
-              fill="#0f172a"
-            >
-              Complexity
-            </text>
-            <g transform={`translate(${width - 250}, 18)`}>
-              <rect x="0" y="0" width="12" height="12" rx="2" fill={BOX_PLOT_FILL} stroke="#64748b" />
-              <text x="20" y="11" fontSize="12" fill="#475569">{metric.label} distribution</text>
-            </g>
-          </svg>
-        </div>
-      )}
-    </section>
   );
 }
 
@@ -996,90 +733,6 @@ function DetailsTable({ day, details }) {
         </table>
       </div>
     </section>
-  );
-}
-
-function buildComplexityBoxData(rows, metricKey) {
-  const grouped = new Map(
-    COMPLEXITY_CODES.map((complexity) => [
-      complexity,
-      {
-        values: [],
-        count: 0
-      }
-    ])
-  );
-
-  for (const row of rows || []) {
-    const complexity = String(row.complexity || "").trim().toUpperCase();
-    if (!grouped.has(complexity)) continue;
-
-    const metricValue = Number(row[metricKey] || 0);
-    const group = grouped.get(complexity);
-
-    group.count += 1;
-    if (Number.isFinite(metricValue)) {
-      group.values.push(metricValue);
-    }
-  }
-
-  return COMPLEXITY_CODES.map((complexity) => {
-    const group = grouped.get(complexity);
-    const metricValues = [...group.values].sort((a, b) => a - b);
-
-    if (metricValues.length === 0) {
-      return {
-        complexity,
-        count: group.count,
-        min: 0,
-        q1: 0,
-        median: 0,
-        q3: 0,
-        max: 0
-      };
-    }
-
-    return {
-      complexity,
-      count: group.count,
-      min: cleanNumber(metricValues[0]),
-      q1: cleanNumber(percentile(metricValues, 0.25)),
-      median: cleanNumber(percentile(metricValues, 0.5)),
-      q3: cleanNumber(percentile(metricValues, 0.75)),
-      max: cleanNumber(metricValues[metricValues.length - 1])
-    };
-  });
-}
-
-function percentile(sortedValues, percentileValue) {
-  if (!sortedValues.length) return 0;
-
-  const position = (sortedValues.length - 1) * percentileValue;
-  const lowerIndex = Math.floor(position);
-  const upperIndex = Math.ceil(position);
-
-  if (lowerIndex === upperIndex) {
-    return sortedValues[lowerIndex];
-  }
-
-  const weight = position - lowerIndex;
-  return sortedValues[lowerIndex] * (1 - weight) + sortedValues[upperIndex] * weight;
-}
-
-function buildRuntimeTicks(maxValue) {
-  const safeMax = Math.max(Number(maxValue) || 0, 1);
-  const paddedMax = safeMax * 1.15;
-  const roughStep = paddedMax / 5;
-  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
-  const normalizedStep = roughStep / magnitude;
-  const stepMultiplier =
-    normalizedStep <= 1 ? 1 : normalizedStep <= 2 ? 2 : normalizedStep <= 5 ? 5 : 10;
-  const step = stepMultiplier * magnitude;
-  const upper = Math.max(step, Math.ceil(paddedMax / step) * step);
-
-  return Array.from(
-    { length: Math.round(upper / step) + 1 },
-    (_, index) => index * step
   );
 }
 
