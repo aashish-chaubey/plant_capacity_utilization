@@ -60,6 +60,10 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
     df["Folder"] = df["Folder"].apply(_clean_text)
     df["Issue Id"] = df["Issue Id"].apply(_clean_text)
     df["Reflong"] = df["Reflong"].apply(_clean_text)
+    df["Integrated"] = df.get(
+        "Integrated / Pullout",
+        df.get("Integrated", pd.Series("", index=df.index)),
+    ).apply(_clean_text)
     df["Total Run Time (mnts)"] = df["Total Run Time (mnts)"].apply(_parse_minutes_value)
     df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
     df["Change Over Time (mins)"] = df.get(
@@ -993,6 +997,9 @@ def calculate_complexity_timing_metrics(book_df: pd.DataFrame) -> pd.DataFrame:
 
     interval_editions["Complexity"] = interval_editions.apply(_parse_complexity_code, axis=1)
     interval_editions = interval_editions[interval_editions["Complexity"].ne("")]
+    interval_editions = interval_editions[
+        ~interval_editions["Integrated"].apply(_is_integrated_edition)
+    ].copy()
     if interval_editions.empty:
         return pd.DataFrame(columns=columns)
 
@@ -1337,6 +1344,10 @@ def _parse_complexity_code(row: pd.Series) -> str:
             return f"C{complexity_number}"
 
     return ""
+
+
+def _is_integrated_edition(value: Any) -> bool:
+    return _clean_text(value).casefold() == "integrated"
 
 
 def _is_blank(value: Any) -> bool:
