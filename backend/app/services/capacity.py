@@ -60,6 +60,14 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
     df["Folder"] = df["Folder"].apply(_clean_text)
     df["Issue Id"] = df["Issue Id"].apply(_clean_text)
     df["Reflong"] = df["Reflong"].apply(_clean_text)
+    df["Complexities"] = df.get(
+        "Complexities",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
+    df["Print Order"] = df.get(
+        "Print Order",
+        pd.Series(0, index=df.index),
+    ).apply(_parse_count_value)
     df["Total Run Time (mnts)"] = df["Total Run Time (mnts)"].apply(_parse_minutes_value)
     df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
     df["Change Over Time (mins)"] = df.get(
@@ -130,6 +138,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
 
     # Step 4: runtime/lost/buffer calculations use only interval rows.
     calculated_metrics = _calculate_interval_metrics_by_folder_day(interval_editions)
+    runtime_segments = _calculate_runtime_segments_by_folder_day(interval_editions)
 
     # Step 5: downtime is also limited to issues present in interval rows.
     down_grouped = _aggregate_down_time_by_capacity_unit_filtered(
@@ -140,6 +149,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
 
     metrics = (
         active_units.merge(calculated_metrics, on=keys, how="left")
+        .merge(runtime_segments, on=keys, how="left")
         .merge(down_grouped, on=keys, how="left")
     )
 
@@ -170,6 +180,10 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     metrics["runtime"] = (
         metrics["gross_runtime"] - metrics["total_downtime"]
     ).clip(lower=0)
+    metrics["runtime_segments"] = metrics.apply(
+        lambda row: _scale_runtime_segments(row.get("runtime_segments"), row["runtime"]),
+        axis=1,
+    )
 
     calculated_lost_time = (
         metrics["waiting_time"]
@@ -209,6 +223,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
             "waiting_time",
             "reflong_related_downtime",
             "late_start_time",
+            "runtime_segments",
         ]
     ]
 
@@ -590,6 +605,149 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
     return pd.DataFrame(results)
 
 
+def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataFrame:
+    keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+    columns = [*keys, "runtime_segments"]
+
+    if book_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    segment_rows = []
+    dedupe_columns = [
+        REPORT_DATE_COLUMN,
+        "Machine",
+        "Folder",
+        "Issue Id",
+        "Complexities",
+        "Effective Start DateTime",
+        "Effective End DateTime",
+        "Print Order",
+        "Total Run Time (mnts)",
+        "Reflong"
+    ]
+    df = book_df.drop_duplicates(
+        subset=[column for column in dedupe_columns if column in book_df.columns]
+    ).copy()
+
+    for (report_date, machine, folder), group in df.groupby(keys, dropna=False):
+        category_totals: dict[str, dict[str, Any]] = {}
+
+        for _, row in group.iterrows():
+            classification = _categorize_complexity(row.get("Complexities"))
+            runtime_minutes = _parse_minutes_value(row.get("Total Run Time (mnts)"))
+            print_order = _parse_count_value(row.get("Print Order"))
+
+            if runtime_minutes <= 0:
+                continue
+
+            key = classification["key"]
+            current = category_totals.setdefault(
+                key,
+                {
+                    "key": key,
+                    "label": classification["label"],
+                    "type": classification["type"],
+                    "is_complex": classification["is_complex"],
+                    "runtime_minutes": 0.0,
+                    "print_order": 0.0,
+                    "speed_runtime_minutes": 0.0,
+                    "speed_print_order": 0.0,
+                },
+            )
+            current["runtime_minutes"] += runtime_minutes
+            current["print_order"] += print_order
+
+            is_reflong = _clean_text(row.get("Reflong")).casefold() == "yes"
+            if not is_reflong:
+                current["speed_runtime_minutes"] += runtime_minutes
+                current["speed_print_order"] += print_order
+
+        segments = []
+        for segment in category_totals.values():
+            runtime_minutes = float(segment["runtime_minutes"])
+            print_order = float(segment["print_order"])
+            speed_runtime_minutes = float(segment["speed_runtime_minutes"])
+            speed_print_order = float(segment["speed_print_order"])
+            segments.append(
+                {
+                    "key": segment["key"],
+                    "label": segment["label"],
+                    "type": segment["type"],
+                    "is_complex": segment["is_complex"],
+                    "minutes": _clean_number(runtime_minutes),
+                    "source_runtime_minutes": _clean_number(runtime_minutes),
+                    "print_order": _clean_number(print_order),
+                    "effective_speed": _clean_number(
+                        _calculate_effective_speed(speed_print_order, speed_runtime_minutes)
+                    ),
+                }
+            )
+
+        segment_rows.append(
+            {
+                REPORT_DATE_COLUMN: report_date,
+                "Machine": machine,
+                "Folder": folder,
+                "runtime_segments": sorted(
+                    segments,
+                    key=lambda item: ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"].index(
+                        item["key"] if item["key"] in ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"] else "unknown"
+                    ),
+                ),
+            }
+        )
+
+    if not segment_rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(segment_rows)
+
+
+def _scale_runtime_segments(value: Any, runtime_minutes: float) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or runtime_minutes <= 0:
+        return []
+
+    source_total = sum(float(segment.get("source_runtime_minutes") or segment.get("minutes") or 0) for segment in value)
+    if source_total <= 0:
+        return []
+
+    scale = float(runtime_minutes) / source_total
+    scaled_segments = []
+
+    for segment in value:
+        source_minutes = float(segment.get("source_runtime_minutes") or segment.get("minutes") or 0)
+        if source_minutes <= 0:
+            continue
+
+        scaled = dict(segment)
+        scaled["minutes"] = _clean_number(source_minutes * scale)
+        scaled_segments.append(scaled)
+
+    return _normalize_segment_minutes(scaled_segments, runtime_minutes)
+
+
+def _normalize_segment_minutes(segments: list[dict[str, Any]], target_minutes: float) -> list[dict[str, Any]]:
+    if not segments:
+        return []
+
+    remaining = _clean_number(target_minutes)
+    normalized = []
+
+    for index, segment in enumerate(segments):
+        next_segment = dict(segment)
+        if index == len(segments) - 1:
+            next_segment["minutes"] = _clean_number(max(float(remaining), 0.0))
+        else:
+            minutes = min(float(segment.get("minutes") or 0), float(remaining))
+            next_segment["minutes"] = _clean_number(max(minutes, 0.0))
+            remaining = _clean_number(float(remaining) - float(next_segment["minutes"]))
+
+        if next_segment["minutes"] > 0:
+            normalized.append(next_segment)
+
+    return normalized
+
+
 def _extract_last_tiff_times(group: pd.DataFrame) -> dict[int, pd.Timestamp]:
     """Extract Last Tiff times for each edition, handling Reflong cases.
     
@@ -930,16 +1088,81 @@ def calculate_tower_day_metrics(
 def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_available = float(daily_df["available_capacity"].sum()) if not daily_df.empty else 0.0
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
+    total_buffer_time = float(daily_df["buffer_time"].sum()) if not daily_df.empty else 0.0
 
     return {
         "total_available_capacity": _clean_number(total_available),
         "total_runtime": _clean_number(total_runtime),
         "total_lost_time": _clean_number(daily_df["lost_time"].sum() if not daily_df.empty else 0),
         "total_downtime": _clean_number(daily_df["downtime"].sum() if not daily_df.empty else 0),
-        "total_buffer_time": _clean_number(daily_df["buffer_time"].sum() if not daily_df.empty else 0),
+        "total_buffer_time": _clean_number(total_buffer_time),
         "average_utilization_percentage": _clean_number(_percentage(total_runtime, total_available)),
+        "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, total_available)),
         "active_folder_days": int(daily_df["active_folders_count"].sum()) if not daily_df.empty else 0,
     }
+
+
+def _categorize_complexity(complexity_code: str) -> dict[str, Any]:
+    """Categorize complexity code into type and whether it's complex.
+
+    Returns dict with:
+    - type: "SNP" or "GNP"
+    - is_complex: True or False
+    """
+    if not complexity_code or pd.isna(complexity_code):
+        return {"key": "unknown", "label": "Unknown", "type": "Unknown", "is_complex": False}
+
+    code = str(complexity_code).strip()
+    match = re.search(r"\bC(\d{1,2})\b", code, flags=re.IGNORECASE)
+    if match:
+        code = f"C{int(match.group(1))}"
+
+    # C1-C3: SNP
+    if code in ["C1", "C2", "C3"]:
+        return {"key": "snp", "label": "SNP", "type": "SNP", "is_complex": False}
+
+    # C4: SNP - Complex
+    if code == "C4":
+        return {"key": "snp_complex", "label": "SNP Complex", "type": "SNP", "is_complex": True}
+
+    # C5-C8: GNP
+    if code in ["C5", "C6", "C7", "C8"]:
+        return {"key": "gnp", "label": "GNP", "type": "GNP", "is_complex": False}
+
+    # C9-C15: GNP - Complex
+    if code in ["C9", "C10", "C11", "C12", "C13", "C14", "C15"]:
+        return {"key": "gnp_complex", "label": "GNP Complex", "type": "GNP", "is_complex": True}
+
+    return {"key": "unknown", "label": "Unknown", "type": "Unknown", "is_complex": False}
+
+
+def _calculate_effective_speed(print_order: float, runtime_minutes: float) -> float:
+    """Calculate effective speed in copies per hour (cph).
+
+    Formula: Print Order / runtime (in hours)
+    Example: 2,20,000 copies in 110 minutes = 120k cph
+    """
+    if runtime_minutes <= 0:
+        return 0.0
+
+    runtime_hours = runtime_minutes / 60.0
+    if runtime_hours <= 0:
+        return 0.0
+
+    # Parse print order if it's a string
+    try:
+        if isinstance(print_order, str):
+            print_order = float(print_order.replace(",", ""))
+        else:
+            print_order = float(print_order)
+    except (ValueError, TypeError):
+        return 0.0
+
+    if print_order <= 0:
+        return 0.0
+
+    cph = print_order / runtime_hours
+    return cph
 
 
 def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
@@ -1148,6 +1371,21 @@ def _parse_minutes_value(value: Any) -> float:
     return max(float(numeric), 0.0)
 
 
+def _parse_count_value(value: Any) -> float:
+    if _is_blank(value):
+        return 0.0
+
+    if isinstance(value, (int, float)) and isfinite(float(value)):
+        return max(float(value), 0.0)
+
+    text = str(value).replace(",", "").strip()
+    numeric = pd.to_numeric(text, errors="coerce")
+    if pd.isna(numeric):
+        return 0.0
+
+    return max(float(numeric), 0.0)
+
+
 def _clean_text(value: Any) -> str:
     if _is_blank(value):
         return ""
@@ -1262,6 +1500,7 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "waiting_time",
                 "reflong_related_downtime",
                 "late_start_time",
+                "runtime_segments",
             ]
         ]
     )
@@ -1330,6 +1569,7 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
             "waiting_time",
             "reflong_related_downtime",
             "late_start_time",
+            "runtime_segments",
         ]
     )
 

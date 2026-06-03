@@ -19,7 +19,7 @@ export default function UploadPanel({ onUpload, loading, compact = false }) {
     <section
       className={`rounded-lg border bg-white shadow-soft transition ${
         dragging ? "border-blue-400 ring-2 ring-blue-100" : "border-slate-200"
-      } ${compact ? "p-4" : "p-6"}`}
+      } ${compact ? "p-3" : "p-5"}`}
       onDragOver={(event) => {
         event.preventDefault();
         setDragging(true);

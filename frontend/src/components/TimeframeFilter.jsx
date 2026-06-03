@@ -24,7 +24,7 @@ export default function TimeframeFilter({
   const isCustom = mode === "custom";
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-soft">
+    <section className="rounded-lg border border-slate-200 bg-white px-3 py-3 shadow-soft">
       <div className="flex flex-col gap-3">
         <div className="flex min-w-0 items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">

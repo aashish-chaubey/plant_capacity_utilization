@@ -143,7 +143,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#f6f8fb] text-slate-900">
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+        <div className="mx-auto flex w-full max-w-[1800px] flex-col gap-3 px-3 py-4 sm:px-4 lg:flex-row lg:items-center lg:justify-between xl:px-5 2xl:px-6">
           <div>
             <h1 className="text-2xl font-semibold tracking-normal text-slate-950">
               Plant Capacity Utilization
@@ -158,8 +158,8 @@ export default function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        <div className={result ? "grid gap-5 xl:grid-cols-[0.8fr_1.2fr]" : ""}>
+      <main className="mx-auto w-full max-w-[1800px] px-3 py-5 sm:px-4 xl:px-5 2xl:px-6">
+        <div className={result ? "grid gap-4 xl:grid-cols-[0.75fr_1.25fr]" : ""}>
           <UploadPanel onUpload={handleUpload} loading={loading} compact={Boolean(result)} />
 
           {result && (
@@ -351,16 +351,19 @@ function filterCapacityData(result, range) {
 function calculateSummary(dailyRows) {
   const totalAvailable = sumBy(dailyRows, "available_capacity");
   const totalRuntime = sumBy(dailyRows, "runtime");
+  const totalBufferTime = sumBy(dailyRows, "buffer_time");
   const rawPercentage = totalAvailable > 0 ? (totalRuntime / totalAvailable) * 100 : 0;
   const cappedPercentage = Math.min(rawPercentage, 100);
+  const spareCapacityPercentage = totalAvailable > 0 ? Math.min((totalBufferTime / totalAvailable) * 100, 100) : 0;
 
   return {
     total_available_capacity: cleanNumber(totalAvailable),
     total_runtime: cleanNumber(totalRuntime),
     total_lost_time: cleanNumber(sumBy(dailyRows, "lost_time")),
     total_downtime: cleanNumber(sumBy(dailyRows, "downtime")),
-    total_buffer_time: cleanNumber(sumBy(dailyRows, "buffer_time")),
+    total_buffer_time: cleanNumber(totalBufferTime),
     average_utilization_percentage: cleanNumber(cappedPercentage),
+    spare_capacity_percentage: cleanNumber(spareCapacityPercentage),
     active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count"))
   };
 }
