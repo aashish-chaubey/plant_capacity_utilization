@@ -14,3 +14,5 @@ data/~$*.xlsx
 .ipynb_checkpoints/
 *.ipynb
 
+# Ignore environment variable files
+.env

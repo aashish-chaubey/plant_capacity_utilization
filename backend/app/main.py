@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from io import BytesIO
+from typing import Any
 
 import pandas as pd
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from app.services.capacity import build_capacity_response
+from app.services.intelligence import build_capacity_intelligence
 
 
 app = FastAPI(title="Plant Capacity Utilization API", version="0.1.0")
@@ -18,6 +21,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class IntelligenceRequest(BaseModel):
+    summary: dict[str, Any] = {}
+    daily: list[dict[str, Any]] = []
+    details: list[dict[str, Any]] = []
+    tower_details: list[dict[str, Any]] = []
+    scope_label: str = ""
 
 
 @app.get("/api/health")
@@ -48,4 +59,20 @@ async def upload_production_report(file: UploadFile = File(...)) -> dict:
             "daily": [],
             "details": [],
             "errors": [f"Processing failed: {exc}"],
+        }
+
+
+@app.post("/api/intelligence")
+def capacity_intelligence(request: IntelligenceRequest) -> dict[str, Any]:
+    try:
+        return {
+            "valid": True,
+            "intelligence": build_capacity_intelligence(request.model_dump()),
+            "errors": [],
+        }
+    except Exception as exc:
+        return {
+            "valid": False,
+            "intelligence": None,
+            "errors": [f"Intelligence generation failed: {exc}"],
         }

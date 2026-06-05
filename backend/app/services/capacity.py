@@ -155,6 +155,8 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
 
     numeric_columns = [
         "gross_runtime",
+        "scheduled_runtime",
+        "overlap_minutes",
         "runtime",
         "late_start_time",
         "waiting_time",
@@ -215,6 +217,8 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
             "Folder",
             "available_capacity",
             "gross_runtime",
+            "scheduled_runtime",
+            "overlap_minutes",
             "runtime",
             "lost_time",
             "downtime",
@@ -515,6 +519,8 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             columns=[
                 *keys,
                 "gross_runtime",
+                "scheduled_runtime",
+                "overlap_minutes",
                 "runtime",
                 "late_start_time",
                 "waiting_time",
@@ -548,6 +554,8 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                     "Machine": machine,
                     "Folder": folder,
                     "gross_runtime": 0.0,
+                    "scheduled_runtime": 0.0,
+                    "overlap_minutes": 0.0,
                     "runtime": 0.0,
                     "late_start_time": 0.0,
                     "waiting_time": 0.0,
@@ -569,6 +577,13 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
         )
 
         gross_runtime = 0.0
+        scheduled_runtime = 0.0
+
+        for start_dt, end_dt in raw_intervals:
+            duration_minutes = (end_dt - start_dt).total_seconds() / 60
+
+            if duration_minutes > 0:
+                scheduled_runtime += duration_minutes
 
         for start_dt, end_dt in merged_intervals:
             duration_minutes = (end_dt - start_dt).total_seconds() / 60
@@ -582,6 +597,8 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
         )
 
         gross_runtime = min(max(gross_runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
+        scheduled_runtime = max(scheduled_runtime, 0.0)
+        overlap_minutes = max(scheduled_runtime - gross_runtime, 0.0)
         late_start_minutes = min(max(late_start_minutes, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         waiting_time = min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         adjusted_change_over = min(max(adjusted_change_over, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
@@ -593,6 +610,8 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                 "Machine": machine,
                 "Folder": folder,
                 "gross_runtime": gross_runtime,
+                "scheduled_runtime": scheduled_runtime,
+                "overlap_minutes": overlap_minutes,
                 # Temporary value. Net runtime is recalculated after downtime is merged.
                 "runtime": gross_runtime,
                 "late_start_time": late_start_minutes,
@@ -724,6 +743,87 @@ def _scale_runtime_segments(value: Any, runtime_minutes: float) -> list[dict[str
         scaled_segments.append(scaled)
 
     return _normalize_segment_minutes(scaled_segments, runtime_minutes)
+
+
+def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: float) -> list[dict[str, Any]]:
+    if rows.empty or runtime_minutes <= 0:
+        return []
+
+    category_totals: dict[str, dict[str, Any]] = {}
+    dedupe_columns = [
+        "Issue Id",
+        "Complexities",
+        "Effective Start DateTime",
+        "Effective End DateTime",
+        "Print Order",
+        "Total Run Time (mnts)",
+        "Reflong",
+    ]
+    df = rows.drop_duplicates(
+        subset=[column for column in dedupe_columns if column in rows.columns]
+    ).copy()
+
+    for _, row in df.iterrows():
+        classification = _categorize_complexity(row.get("Complexities"))
+        source_runtime_minutes = _parse_minutes_value(row.get("Total Run Time (mnts)"))
+        print_order = _parse_count_value(row.get("Print Order"))
+
+        if source_runtime_minutes <= 0:
+            continue
+
+        key = classification["key"]
+        current = category_totals.setdefault(
+            key,
+            {
+                "key": key,
+                "label": classification["label"],
+                "type": classification["type"],
+                "is_complex": classification["is_complex"],
+                "runtime_minutes": 0.0,
+                "print_order": 0.0,
+                "speed_runtime_minutes": 0.0,
+                "speed_print_order": 0.0,
+            },
+        )
+        current["runtime_minutes"] += source_runtime_minutes
+        current["print_order"] += print_order
+
+        is_reflong = _clean_text(row.get("Reflong")).casefold() == "yes"
+        if not is_reflong:
+            current["speed_runtime_minutes"] += source_runtime_minutes
+            current["speed_print_order"] += print_order
+
+    segments = []
+    for segment in category_totals.values():
+        source_runtime_minutes = float(segment["runtime_minutes"])
+        if source_runtime_minutes <= 0:
+            continue
+
+        segments.append(
+            {
+                "key": segment["key"],
+                "label": segment["label"],
+                "type": segment["type"],
+                "is_complex": segment["is_complex"],
+                "minutes": _clean_number(source_runtime_minutes),
+                "source_runtime_minutes": _clean_number(source_runtime_minutes),
+                "print_order": _clean_number(segment["print_order"]),
+                "effective_speed": _clean_number(
+                    _calculate_effective_speed(
+                        float(segment["speed_print_order"]),
+                        float(segment["speed_runtime_minutes"]),
+                    )
+                ),
+            }
+        )
+
+    segments = sorted(
+        segments,
+        key=lambda item: ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"].index(
+            item["key"] if item["key"] in ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"] else "unknown"
+        ),
+    )
+    return _scale_runtime_segments(segments, runtime_minutes)
 
 
 def _normalize_segment_minutes(segments: list[dict[str, Any]], target_minutes: float) -> list[dict[str, Any]]:
@@ -920,6 +1020,7 @@ def calculate_tower_day_metrics(
         "reflong_related_downtime",
         "late_start_time",
         "buffer_time",
+        "runtime_segments",
     ]
 
     if general_df.empty:
@@ -948,6 +1049,9 @@ def calculate_tower_day_metrics(
             "Effective End DateTime",
             "Window Start",
             "Window End",
+            "Complexities",
+            "Print Order",
+            "Total Run Time (mnts)",
         ]
     ].drop_duplicates()
 
@@ -1044,6 +1148,7 @@ def calculate_tower_day_metrics(
             max(runtime - downtime - reflong_related_downtime, 0.0),
             CAPACITY_MINUTES_PER_FOLDER_DAY,
         )
+        runtime_segments = _calculate_runtime_segments_for_rows(group, runtime_minutes)
         downtime_minutes = min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         changeover_minutes = min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         waiting_minutes = min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
@@ -1076,6 +1181,7 @@ def calculate_tower_day_metrics(
                 "reflong_related_downtime": reflong_minutes,
                 "late_start_time": late_start_minutes,
                 "buffer_time": buffer_minutes,
+                "runtime_segments": runtime_segments,
             }
         )
 
@@ -1492,6 +1598,8 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "folder",
                 "available_capacity",
                 "gross_runtime",
+                "scheduled_runtime",
+                "overlap_minutes",
                 "runtime",
                 "lost_time",
                 "downtime",
@@ -1536,6 +1644,7 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "reflong_related_downtime",
                 "late_start_time",
                 "buffer_time",
+                "runtime_segments",
             ]
         ]
     )
@@ -1561,6 +1670,8 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
             "Folder",
             "available_capacity",
             "gross_runtime",
+            "scheduled_runtime",
+            "overlap_minutes",
             "runtime",
             "lost_time",
             "downtime",

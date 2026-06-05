@@ -18,6 +18,9 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [errors, setErrors] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [intelligence, setIntelligence] = useState(null);
+  const [intelligenceLoading, setIntelligenceLoading] = useState(false);
+  const [intelligenceError, setIntelligenceError] = useState("");
   const [fileName, setFileName] = useState("");
   const [timeframe, setTimeframe] = useState(createDefaultTimeframe);
 
@@ -73,11 +76,69 @@ export default function App() {
     [result, timeframeRange]
   );
 
+  useEffect(() => {
+    if (!filteredResult?.daily?.length) {
+      setIntelligence(null);
+      setIntelligenceLoading(false);
+      setIntelligenceError("");
+      return;
+    }
+
+    const controller = new AbortController();
+    setIntelligenceLoading(true);
+    setIntelligenceError("");
+
+    async function loadIntelligence() {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/intelligence`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            summary: filteredResult.summary,
+            daily: filteredResult.daily,
+            details: filteredResult.details,
+            tower_details: filteredResult.tower_details || [],
+            scope_label: timeframeRange?.label || "Selected timeframe"
+          }),
+          signal: controller.signal
+        });
+
+        if (!response.ok) {
+          throw new Error(`Intelligence failed with status ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (!payload.valid) {
+          throw new Error(payload.errors?.[0] || "Intelligence generation failed.");
+        }
+
+        setIntelligence(payload.intelligence);
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        setIntelligence(null);
+        setIntelligenceError(error.message || "Unable to load capacity intelligence.");
+      } finally {
+        if (!controller.signal.aborted) {
+          setIntelligenceLoading(false);
+        }
+      }
+    }
+
+    loadIntelligence();
+
+    return () => controller.abort();
+  }, [filteredResult, timeframeRange?.label]);
+
   async function handleUpload(file) {
     if (!file) return;
 
     setLoading(true);
     setErrors([]);
+    setIntelligence(null);
+    setIntelligenceError("");
+    setIntelligenceLoading(false);
     setFileName(file.name);
     setTimeframe(createDefaultTimeframe());
 
@@ -97,6 +158,7 @@ export default function App() {
       const payload = await response.json();
       if (!payload.valid) {
         setResult(null);
+        setIntelligence(null);
         setErrors(payload.errors || ["The workbook could not be processed."]);
         return;
       }
@@ -104,6 +166,7 @@ export default function App() {
       setResult(payload);
     } catch (error) {
       setResult(null);
+      setIntelligence(null);
       setErrors([error.message || "Unable to connect to the backend API."]);
     } finally {
       setLoading(false);
@@ -195,7 +258,14 @@ export default function App() {
           </section>
         )}
 
-        {filteredResult?.daily?.length > 0 && <Dashboard data={filteredResult} />}
+        {filteredResult?.daily?.length > 0 && (
+          <Dashboard
+            data={filteredResult}
+            intelligence={intelligence}
+            intelligenceLoading={intelligenceLoading}
+            intelligenceError={intelligenceError}
+          />
+        )}
 
         {filteredResult && filteredResult.daily.length === 0 && errors.length === 0 && (
           <section className="mt-6 rounded-lg border border-slate-200 bg-white p-6 text-slate-700 shadow-soft">

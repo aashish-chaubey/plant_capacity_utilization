@@ -10,56 +10,8 @@ import {
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import CapacityIntelligenceWidget from "./CapacityIntelligenceWidget.jsx";
 import KpiCard from "./KpiCard.jsx";
-
-const COLORS = {
-  runtime: "#2563eb",
-  lost_time: "#f59e0b",
-  downtime: "#dc2626",
-  buffer_time: "#cbd5e1",
-  reflong_related_downtime: "#fede1c",
-  waiting_time: "#ffce00",
-  change_over_time: "#ffa701",
-  late_start_time: "#ff8d02"
-};
-
-const ENGAGED_TIME_OPTIONS = [
-  {
-    key: "runtime",
-    label: "Print runtime",
-    color: COLORS.runtime
-  },
-  {
-    key: "downtime",
-    label: "Downtime / breakdown",
-    color: COLORS.downtime
-  },
-  {
-    key: "reflong_related_downtime",
-    label: "Reflong time",
-    color: COLORS.reflong_related_downtime
-  },
-  {
-    key: "waiting_time",
-    label: "Waiting time",
-    color: COLORS.waiting_time
-  },
-  {
-    key: "change_over_time",
-    label: "Changeover time",
-    color: COLORS.change_over_time
-  },
-  {
-    key: "late_start_time",
-    label: "LPR to print start",
-    color: COLORS.late_start_time
-  },
-  {
-    key: "buffer_time",
-    label: "Spare time",
-    color: COLORS.buffer_time
-  }
-];
 
 const CAPACITY_WINDOW_MINUTES = 240;
 const CAPACITY_PAGE_SIZE = 7;
@@ -117,9 +69,19 @@ const RUNTIME_SEGMENT_STYLES = {
 
 const FOLDER_ALIAS_COLORS = ["#2563eb", "#7c3aed", "#dc2626", "#d97706", "#059669", "#0f766e", "#475569"];
 
-export default function Dashboard({ data }) {
+const BREAKDOWN_STACKS = [
+  { key: "waiting_time", label: "Wait time", color: CAPACITY_SPLIT_COLORS.waiting_time },
+  { key: "loss_time", label: "Loss time", color: CAPACITY_SPLIT_COLORS.loss_time },
+  { key: "downtime", label: "Downtime / breakdown", color: CAPACITY_SPLIT_COLORS.downtime },
+  { key: "runtime_snp", label: "Run Time: SNP", color: RUNTIME_SEGMENT_STYLES.snp.color },
+  { key: "runtime_gnp", label: "Run Time: GNP", color: RUNTIME_SEGMENT_STYLES.gnp.color },
+  { key: "spare_time", label: "Spare time", color: CAPACITY_SPLIT_COLORS.spare_time }
+];
+const DEFAULT_BREAKDOWN_KEYS = BREAKDOWN_STACKS.map((stack) => stack.key);
+
+export default function Dashboard({ data, intelligence, intelligenceLoading, intelligenceError }) {
   const [focusedDay, setFocusedDay] = useState("");
-  const [engagedComponentKeys, setEngagedComponentKeys] = useState(["runtime"]);
+  const [selectedBreakdownKeys, setSelectedBreakdownKeys] = useState(DEFAULT_BREAKDOWN_KEYS);
 
   useEffect(() => {
     if (focusedDay && !data.daily.some((day) => day.run_date === focusedDay)) {
@@ -146,27 +108,33 @@ export default function Dashboard({ data }) {
   const breakdownProductionDays = focusedDay ? 1 : data.daily.length;
 
   const towerBreakdown = useMemo(
-    () => aggregateResourceUsage(breakdownTowerDetails, "tower", breakdownProductionDays, engagedComponentKeys, "natural"),
-    [breakdownTowerDetails, breakdownProductionDays, engagedComponentKeys]
+    () => aggregateResourceCapacitySplit(breakdownTowerDetails, "tower", breakdownProductionDays),
+    [breakdownTowerDetails, breakdownProductionDays]
   );
   const folderBreakdown = useMemo(
-    () => aggregateResourceUsage(breakdownDetails, "folder", breakdownProductionDays, engagedComponentKeys),
-    [breakdownDetails, breakdownProductionDays, engagedComponentKeys]
+    () => aggregateResourceCapacitySplit(breakdownDetails, "folder", breakdownProductionDays),
+    [breakdownDetails, breakdownProductionDays]
   );
-  const selectedEngagedOptions = useMemo(
-    () => ENGAGED_TIME_OPTIONS.filter((option) => engagedComponentKeys.includes(option.key)),
-    [engagedComponentKeys]
+  const totalActiveFolderCapacity = useMemo(
+    () => calculateTotalActiveFolderCapacity(data.daily),
+    [data.daily]
+  );
+  const selectedBreakdownStacks = useMemo(
+    () => BREAKDOWN_STACKS.filter((stack) => selectedBreakdownKeys.includes(stack.key)),
+    [selectedBreakdownKeys]
   );
 
   const breakdownScope = focusedDay ? focusedDay : "Selected timeframe";
 
-  function toggleEngagedComponent(componentKey) {
-    setEngagedComponentKeys((current) => {
+  function toggleBreakdownComponent(componentKey) {
+    setSelectedBreakdownKeys((current) => {
       if (current.includes(componentKey)) {
         return current.length === 1 ? current : current.filter((key) => key !== componentKey);
       }
 
-      return [...current, componentKey];
+      return BREAKDOWN_STACKS
+        .map((stack) => stack.key)
+        .filter((key) => key === componentKey || current.includes(key));
     });
   }
 
@@ -181,7 +149,7 @@ export default function Dashboard({ data }) {
       formatPercent(data.summary.spare_capacity_percentage ?? calculatePercentage(data.summary.total_buffer_time, data.summary.total_available_capacity)),
       "slate"
     ],
-    ["Active Folder-Days", formatNumber(data.summary.active_folder_days), "slate"]
+    ["Active Folders", `${formatNumber(data.summary.active_folder_days)}/${formatNumber(totalActiveFolderCapacity)}`, "slate"]
   ];
 
   return (
@@ -231,35 +199,43 @@ export default function Dashboard({ data }) {
           )}
         </div>
 
-        <EngagedTimeSelector
-          options={ENGAGED_TIME_OPTIONS}
-          selectedKeys={engagedComponentKeys}
-          onToggle={toggleEngagedComponent}
+        <BreakdownComponentSelector
+          options={BREAKDOWN_STACKS}
+          selectedKeys={selectedBreakdownKeys}
+          onToggle={toggleBreakdownComponent}
         />
 
         <div className="grid gap-4 xl:grid-cols-2">
           <UtilizationBreakdownChart
-            title="Tower breakdown"
-            subtitle={focusedDay ? "Tower utilization for selected day" : "Average tower utilization across the selected timeframe"}
+            title="Tower utilization"
+            subtitle={focusedDay ? "Tower capacity split for selected day" : "Average tower capacity split across the selected timeframe"}
             data={towerBreakdown}
             nameKey="tower"
-            engagedOptions={selectedEngagedOptions}
-            barSize={10}
+            selectedStacks={selectedBreakdownStacks}
+            barSize={20}
             rowHeight={34}
             emptyMessage="No tower usage found for this selection."
+            showPlannedNights={!focusedDay}
           />
           <UtilizationBreakdownChart
-            title="Folder breakdown"
-            subtitle={focusedDay ? "Folder utilization for selected day" : "Average folder utilization across the selected timeframe"}
+            title="Folder utilization"
+            subtitle={focusedDay ? "Folder capacity split for selected day" : "Average folder capacity split across the selected timeframe"}
             data={folderBreakdown}
             nameKey="folder"
-            engagedOptions={selectedEngagedOptions}
+            selectedStacks={selectedBreakdownStacks}
             barSize={24}
             rowHeight={54}
             emptyMessage="No folder usage found for this selection."
+            showPlannedNights={!focusedDay}
           />
         </div>
       </section>
+
+      <CapacityIntelligenceWidget
+        intelligence={intelligence}
+        loading={intelligenceLoading}
+        error={intelligenceError}
+      />
     </div>
   );
 }
@@ -741,13 +717,13 @@ function CapacityDaySummary({ summary, style, onClose }) {
   );
 }
 
-function EngagedTimeSelector({ options, selectedKeys, onToggle }) {
+function BreakdownComponentSelector({ options, selectedKeys, onToggle }) {
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-soft">
       <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-slate-950">Engaged time includes</h3>
-          <p className="mt-1 text-xs text-slate-500">Select one or more components to define utilization in the breakdown charts.</p>
+          <h3 className="text-sm font-semibold text-slate-950">Breakdown includes</h3>
+          <p className="mt-1 text-xs text-slate-500">Select main capacity components shown in tower and folder bars.</p>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:flex xl:flex-wrap xl:justify-end">
           {options.map((option) => {
@@ -787,16 +763,41 @@ function UtilizationBreakdownChart({
   subtitle,
   data,
   nameKey,
-  engagedOptions,
+  selectedStacks,
   barSize,
   rowHeight,
-  emptyMessage
+  emptyMessage,
+  showPlannedNights
 }) {
   const chartHeight = Math.max(320, data.length * rowHeight + 56);
+  const isTowerChart = nameKey === "tower";
+  const towerGroups = useMemo(
+    () => isTowerChart ? buildTowerMachineGroups(data) : [],
+    [data, isTowerChart]
+  );
+  const yAxisWidth = isTowerChart ? 126 : 140;
 
   const CustomYAxisTick = (props) => {
     const { x, y, payload } = props;
     const parts = payload.value.split("\n");
+
+    if (isTowerChart && parts.length === 2) {
+      return (
+        <g transform={`translate(${x},${y})`}>
+          <text
+            x={0}
+            y={0}
+            dy={4}
+            textAnchor="end"
+            fill="#B12C00"
+            fontSize={11}
+            fontWeight="600"
+          >
+            {parts[1]}
+          </text>
+        </g>
+      );
+    }
 
     if (parts.length === 2) {
       return (
@@ -854,13 +855,23 @@ function UtilizationBreakdownChart({
         </div>
       ) : (
         <div className="rounded-lg border border-slate-100 bg-slate-50 p-1.5">
-          <div className="w-full" style={{ height: chartHeight }}>
+          <div className="relative w-full" style={{ height: chartHeight }}>
+            {isTowerChart && (
+              <TowerMachineGroupOverlay
+                groups={towerGroups}
+                chartHeight={chartHeight}
+                rowHeight={rowHeight}
+                yAxisWidth={yAxisWidth}
+              />
+            )}
             <ResponsiveContainer>
               <BarChart data={data} layout="vertical" margin={{ top: 8, right: 24, left: 16, bottom: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" horizontal={false} />
                 <XAxis
                   type="number"
                   domain={[0, 100]}
+                  ticks={[0, 25, 50, 75, 100]}
+                  allowDecimals={false}
                   tickFormatter={(value) => `${value}%`}
                   tick={{ fill: "#475569", fontSize: 12 }}
                   tickLine={false}
@@ -869,22 +880,24 @@ function UtilizationBreakdownChart({
                 <YAxis
                   type="category"
                   dataKey={nameKey}
-                  width={140}
+                  width={yAxisWidth}
                   interval={0}
                   tick={<CustomYAxisTick />}
                   tickLine={false}
                   axisLine={{ stroke: "#cbd5e1" }}
                 />
-                <Tooltip content={<UtilizationTooltip nameKey={nameKey} engagedOptions={engagedOptions} />} cursor={{ fill: "rgba(15, 23, 42, 0.06)" }} />
-                {engagedOptions.map((option, index) => (
+                <Tooltip content={<UtilizationTooltip nameKey={nameKey} selectedStacks={selectedStacks} showPlannedNights={showPlannedNights} />} cursor={{ fill: "rgba(15, 23, 42, 0.06)" }} />
+                {selectedStacks.map((option, index) => (
                   <Bar
                     key={option.key}
                     dataKey={`${option.key}_percentage`}
                     name={option.label}
                     stackId="engaged"
                     fill={option.color}
+                    stroke="#f8fafc"
+                    strokeWidth={1.25}
                     barSize={barSize}
-                    radius={index === engagedOptions.length - 1 ? [0, 4, 4, 0] : [0, 0, 0, 0]}
+                    radius={index === selectedStacks.length - 1 ? [0, 4, 4, 0] : [0, 0, 0, 0]}
                   />
                 ))}
               </BarChart>
@@ -896,39 +909,193 @@ function UtilizationBreakdownChart({
   );
 }
 
-function UtilizationTooltip({ active, payload, nameKey, engagedOptions }) {
+function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlannedNights }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload;
+  const selectedKeys = new Set(selectedStacks.map((stack) => stack.key));
+  const lossSubcomponents = [
+    ["Reflong time", row.reflong_related_downtime],
+    ["Changeover time", row.change_over_time],
+    ["LPR to print start", row.late_start_time]
+  ];
 
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-3 text-sm shadow-soft">
       <p className="font-semibold text-slate-950">{row[nameKey]}</p>
       <div className="mt-2 space-y-1 text-slate-600">
-        {engagedOptions.map((option) => (
+        {selectedKeys.has("waiting_time") && (
           <TooltipRow
-            key={option.key}
-            label={option.label}
-            value={`${formatMinutes(row[option.key])} (${formatPercent(row[`${option.key}_percentage`])})`}
-            color={option.color}
+            label="Wait time"
+            value={`${formatMinutes(row.waiting_time)} (${formatPercent(row.waiting_time_percentage)})`}
+            color={CAPACITY_SPLIT_COLORS.waiting_time}
           />
-        ))}
-        <div className="border-t border-slate-200 pt-2">
-          <p>Engaged: {formatMinutes(row.runtime)}</p>
-          <p>Available: {formatMinutes(row.available_capacity)}</p>
-          <p>Utilization: {formatPercent(row.utilization_percentage)}</p>
-        </div>
+        )}
+        {selectedKeys.has("runtime_snp") && (
+          <TooltipRow
+            label="Run Time: SNP"
+            value={`${formatMinutes(row.runtime_snp)} (${formatPercent(row.runtime_snp_percentage)})`}
+            color={RUNTIME_SEGMENT_STYLES.snp.color}
+          />
+        )}
+        {selectedKeys.has("runtime_gnp") && (
+          <TooltipRow
+            label="Run Time: GNP"
+            value={`${formatMinutes(row.runtime_gnp)} (${formatPercent(row.runtime_gnp_percentage)})`}
+            color={RUNTIME_SEGMENT_STYLES.gnp.color}
+          />
+        )}
+        {selectedKeys.has("downtime") && (
+          <TooltipRow
+            label="Downtime / breakdown"
+            value={`${formatMinutes(row.downtime)} (${formatPercent(row.downtime_percentage)})`}
+            color={CAPACITY_SPLIT_COLORS.downtime}
+          />
+        )}
+        {selectedKeys.has("loss_time") && (
+          <>
+            <TooltipRow
+              label="Loss time"
+              value={`${formatMinutes(row.loss_time)} (${formatPercent(row.loss_time_percentage)})`}
+              color={CAPACITY_SPLIT_COLORS.loss_time}
+            />
+            <div className="space-y-0.5 pl-5 text-xs text-slate-500">
+              {lossSubcomponents.map(([label, value]) => (
+                <div key={label} className="flex items-center justify-between gap-4">
+                  <span>{label}</span>
+                  <span className="font-bold text-slate-700">
+                    {formatMinutes(value)} ({formatPercent(calculatePercentage(value, row.available_capacity))})
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+        {selectedKeys.has("spare_time") && (
+          <TooltipRow
+            label="Spare time"
+            value={`${formatMinutes(row.spare_time)} (${formatPercent(row.spare_time_percentage)})`}
+            color={CAPACITY_SPLIT_COLORS.spare_time}
+          />
+        )}
+        {showPlannedNights && (
+          <div className="border-t border-slate-200 pt-2 text-slate-700">
+            Planned nights: <span className="font-semibold text-slate-950">{formatNumber(row.planned_nights)}/{formatNumber(row.total_nights)}</span>
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function TowerMachineGroupOverlay({ groups, chartHeight, rowHeight, yAxisWidth }) {
+  if (!groups.length) return null;
+
+  const plotTop = 8;
+  const bracketX = yAxisWidth - 42;
+
+  return (
+    <div className="pointer-events-none absolute left-4 top-0 z-10" style={{ width: yAxisWidth, height: chartHeight }}>
+      {groups.map((group) => {
+        const top = plotTop + group.startIndex * rowHeight;
+        const height = Math.max(group.count * rowHeight, rowHeight);
+        const center = top + height / 2;
+        const canShowVertical = height >= Math.max(group.machine.length * 7, 54);
+
+        return (
+          <div key={group.machine}>
+            {canShowVertical ? (
+              <div
+                className="absolute flex items-center justify-center text-[11px] font-bold leading-none text-[#628141]"
+                style={{
+                  left: bracketX - 24,
+                  top: top + 8,
+                  width: 16,
+                  height: Math.max(height - 16, 16),
+                  writingMode: "vertical-rl",
+                  transform: "rotate(180deg)",
+                }}
+              >
+                {group.machine}
+              </div>
+            ) : (
+              <div
+                className="absolute truncate text-right text-[11px] font-bold leading-tight text-[#628141]"
+                style={{
+                  left: 0,
+                  top: center - 8,
+                  width: bracketX - 10,
+                }}
+              >
+                {group.machine}
+              </div>
+            )}
+            <div
+              className="absolute border-l-2 border-[#628141]"
+              style={{
+                left: bracketX,
+                top: top + 4,
+                height: Math.max(height - 8, 12),
+              }}
+            />
+            <div
+              className="absolute border-t-2 border-[#628141]"
+              style={{
+                left: bracketX,
+                top: top + 4,
+                width: 8,
+              }}
+            />
+            <div
+              className="absolute border-t-2 border-[#628141]"
+              style={{
+                left: bracketX,
+                top: top + height - 4,
+                width: 8,
+              }}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function buildTowerMachineGroups(rows) {
+  const groups = [];
+  let currentGroup = null;
+
+  rows.forEach((row, index) => {
+    const [machine] = splitResourceLabel(row.tower);
+
+    if (!currentGroup || currentGroup.machine !== machine) {
+      currentGroup = {
+        machine,
+        startIndex: index,
+        count: 0,
+      };
+      groups.push(currentGroup);
+    }
+
+    currentGroup.count += 1;
+  });
+
+  return groups;
+}
+
+function splitResourceLabel(value) {
+  const parts = String(value || "")
+    .split("\n")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  return [parts[0] || "", parts[1] || parts[0] || ""];
 }
 
 function TooltipRow({ label, value, color }) {
   return (
     <div className="flex items-center gap-2">
       <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} />
-      <span>
-        {label}: {value}
-      </span>
+      <span>{label}: <span className="font-bold text-slate-950">{value}</span></span>
     </div>
   );
 }
@@ -943,7 +1110,7 @@ function buildCapacitySplitModel(dailyRows, detailRows) {
   ).sort(compareResourceNames);
   const folders = folderKeys.map((folderKey, index) => ({
     key: folderKey,
-    alias: `M${index + 1}`,
+    alias: `F${index + 1}`,
     shortName: getFolderShortName(folderKey),
     color: FOLDER_ALIAS_COLORS[index % FOLDER_ALIAS_COLORS.length]
   }));
@@ -1230,7 +1397,7 @@ function formatDayLabel(dateStr) {
   return date.toLocaleDateString("en-US", { day: "2-digit", month: "short" });
 }
 
-function aggregateResourceUsage(rows, nameKey, selectedProductionDays, componentKeys, sortMode = "utilization") {
+function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
   if (!selectedProductionDays || rows.length === 0) return [];
 
   const grouped = new Map();
@@ -1242,11 +1409,40 @@ function aggregateResourceUsage(rows, nameKey, selectedProductionDays, component
     const current = grouped.get(name) || {
       [nameKey]: name,
       runtime: 0,
-      available_capacity: selectedProductionDays * 240
+      runtime_snp: 0,
+      runtime_gnp: 0,
+      downtime: 0,
+      raw_lost_time: 0,
+      waiting_time: 0,
+      change_over_time: 0,
+      reflong_related_downtime: 0,
+      late_start_time: 0,
+      available_capacity: selectedProductionDays * CAPACITY_WINDOW_MINUTES,
+      plannedDates: new Set()
     };
 
-    for (const componentKey of componentKeys) {
-      current[componentKey] = (current[componentKey] || 0) + Number(row[componentKey] || 0);
+    const runtime = Number(row.runtime || 0);
+    const downtime = Number(row.downtime || 0);
+    const waitingTime = Number(row.waiting_time || 0);
+    const changeOverTime = Number(row.change_over_time || 0);
+    const reflongTime = Number(row.reflong_related_downtime || 0);
+    const lateStartTime = Number(row.late_start_time || 0);
+    const rawLostTime = Number(row.lost_time || 0);
+    const runtimeBuckets = calculateRuntimeTypeBuckets(row);
+    const activeMinutes = runtime + downtime + waitingTime + changeOverTime + reflongTime + lateStartTime;
+
+    current.runtime += runtime;
+    current.runtime_snp += runtimeBuckets.runtime_snp;
+    current.runtime_gnp += runtimeBuckets.runtime_gnp;
+    current.downtime += downtime;
+    current.raw_lost_time += rawLostTime;
+    current.waiting_time += waitingTime;
+    current.change_over_time += changeOverTime;
+    current.reflong_related_downtime += reflongTime;
+    current.late_start_time += lateStartTime;
+
+    if (activeMinutes > 0 && row.run_date) {
+      current.plannedDates.add(row.run_date);
     }
 
     grouped.set(name, current);
@@ -1254,69 +1450,214 @@ function aggregateResourceUsage(rows, nameKey, selectedProductionDays, component
 
   return Array.from(grouped.values())
     .map((row) => {
-      const runtime = componentKeys.reduce((total, componentKey) => total + Number(row[componentKey] || 0), 0);
-      const utilizationPercentage = calculatePercentage(runtime, row.available_capacity);
-      const componentPercentages = calculateStackPercentages(row, componentKeys, row.available_capacity);
+      const lossSubcomponentTotal = (
+        row.waiting_time
+        + row.change_over_time
+        + row.reflong_related_downtime
+        + row.late_start_time
+      );
+      const lossTotal = row.raw_lost_time > 0 ? row.raw_lost_time : lossSubcomponentTotal;
+      const scaledLoss = scaleLossSubcomponents(
+        {
+          waiting_time: row.waiting_time,
+          change_over_time: row.change_over_time,
+          reflong_related_downtime: row.reflong_related_downtime,
+          late_start_time: row.late_start_time
+        },
+        lossTotal
+      );
+      const plannedCapacity = row.plannedDates.size * CAPACITY_WINDOW_MINUTES;
+      const capacityValues = normalizeBreakdownCapacityValues({
+        waiting_time: scaledLoss.waiting_time,
+        loss_time: Math.max(lossTotal - scaledLoss.waiting_time, 0),
+        downtime: row.downtime,
+        runtime_snp: row.runtime_snp,
+        runtime_gnp: row.runtime_gnp
+      }, plannedCapacity);
+      const finalNonWaitLoss = scaleLossSubcomponents(
+        {
+          change_over_time: scaledLoss.change_over_time,
+          reflong_related_downtime: scaledLoss.reflong_related_downtime,
+          late_start_time: scaledLoss.late_start_time
+        },
+        capacityValues.loss_time
+      );
+      const percentages = calculateBreakdownPercentages(capacityValues, row.available_capacity);
+      const lossTimeTotal = capacityValues.waiting_time + capacityValues.loss_time;
 
-      const nextRow = {
+      return {
         ...row,
-        runtime: cleanNumber(Math.min(runtime, row.available_capacity)),
+        runtime_snp: cleanNumber(capacityValues.runtime_snp),
+        runtime_gnp: cleanNumber(capacityValues.runtime_gnp),
+        runtime: cleanNumber(capacityValues.runtime_snp + capacityValues.runtime_gnp),
+        downtime: cleanNumber(capacityValues.downtime),
+        waiting_time: cleanNumber(capacityValues.waiting_time),
+        loss_time: cleanNumber(capacityValues.loss_time),
+        spare_time: cleanNumber(capacityValues.spare_time),
+        change_over_time: cleanNumber(finalNonWaitLoss.change_over_time),
+        reflong_related_downtime: cleanNumber(finalNonWaitLoss.reflong_related_downtime),
+        late_start_time: cleanNumber(finalNonWaitLoss.late_start_time),
+        loss_time_total: cleanNumber(lossTimeTotal),
         available_capacity: cleanNumber(row.available_capacity),
-        utilization_percentage: utilizationPercentage
+        planned_capacity: cleanNumber(plannedCapacity),
+        planned_nights: row.plannedDates.size,
+        total_nights: selectedProductionDays,
+        waiting_time_percentage: percentages.waiting_time,
+        loss_time_percentage: percentages.loss_time,
+        downtime_percentage: percentages.downtime,
+        runtime_snp_percentage: percentages.runtime_snp,
+        runtime_gnp_percentage: percentages.runtime_gnp,
+        runtime_percentage: cleanNumber((percentages.runtime_snp || 0) + (percentages.runtime_gnp || 0)),
+        spare_time_percentage: percentages.spare_time,
+        loss_time_total_percentage: cleanNumber(percentages.waiting_time + percentages.loss_time)
       };
-
-      for (const componentKey of componentKeys) {
-        const componentMinutes = Number(row[componentKey] || 0);
-        nextRow[componentKey] = cleanNumber(Math.min(componentMinutes, row.available_capacity));
-        nextRow[`${componentKey}_percentage`] = componentPercentages[componentKey] || 0;
-      }
-
-      return nextRow;
     })
-    .sort((a, b) => {
-      if (sortMode === "natural") {
-        return compareResourceNames(a[nameKey], b[nameKey]);
-      }
-
-      return b.utilization_percentage - a.utilization_percentage || b.runtime - a.runtime;
-    });
+    .sort((a, b) => compareResourceNames(a[nameKey], b[nameKey]));
 }
 
-function calculateStackPercentages(row, componentKeys, availableCapacity) {
-  const capacity = Number(availableCapacity || 0);
-  if (capacity <= 0) {
-    return Object.fromEntries(componentKeys.map((componentKey) => [componentKey, 0]));
+function calculateTotalActiveFolderCapacity(dailyRows) {
+  if (!dailyRows?.length) return 0;
+
+  const totalCapacityFolders = dailyRows.reduce(
+    (total, row) => total + Number(row.capacity_folders_count || 0),
+    0
+  );
+
+  if (totalCapacityFolders > 0) {
+    return cleanNumber(totalCapacityFolders);
   }
 
-  const rawPercentages = componentKeys.map((componentKey) => {
-    const componentMinutes = Math.max(Number(row[componentKey] || 0), 0);
-    return {
-      componentKey,
-      percentage: Math.min((componentMinutes / capacity) * 100, 100)
-    };
-  });
-  const rawTotal = rawPercentages.reduce((total, item) => total + item.percentage, 0);
-  const scale = rawTotal > 100 ? 100 / rawTotal : 1;
-  let remainingPercentage = 100;
-  const normalized = {};
+  const maxActiveFolders = Math.max(
+    ...dailyRows.map((row) => Number(row.active_folders_count || 0))
+  );
 
-  rawPercentages.forEach((item, index) => {
-    const scaledPercentage = item.percentage * scale;
-    if (index === rawPercentages.length - 1) {
-      normalized[item.componentKey] = cleanNumber(
-        Math.min(Math.max(scaledPercentage, 0), Math.max(remainingPercentage, 0))
-      );
-      return;
+  return cleanNumber(maxActiveFolders * dailyRows.length);
+}
+
+function calculateRuntimeTypeBuckets(row) {
+  const runtime = Math.max(Number(row.runtime || 0), 0);
+  const segments = Array.isArray(row.runtime_segments) ? row.runtime_segments : [];
+  const buckets = {
+    runtime_snp: 0,
+    runtime_gnp: 0
+  };
+
+  for (const segment of segments) {
+    const minutes = Math.max(Number(segment.minutes || 0), 0);
+    if (minutes <= 0) continue;
+
+    const typeText = `${segment.type || ""} ${segment.key || ""} ${segment.label || ""}`.toLowerCase();
+    if (typeText.includes("snp")) {
+      buckets.runtime_snp += minutes;
+    } else {
+      buckets.runtime_gnp += minutes;
     }
+  }
 
-    const roundedPercentage = cleanNumber(
-      Math.min(Math.max(scaledPercentage, 0), Math.max(remainingPercentage, 0))
+  const segmentTotal = buckets.runtime_snp + buckets.runtime_gnp;
+  if (runtime <= 0) {
+    return buckets;
+  }
+
+  if (segmentTotal <= 0) {
+    return {
+      runtime_snp: 0,
+      runtime_gnp: runtime
+    };
+  }
+
+  const scale = runtime / segmentTotal;
+  return {
+    runtime_snp: buckets.runtime_snp * scale,
+    runtime_gnp: buckets.runtime_gnp * scale
+  };
+}
+
+function scaleLossSubcomponents(lossParts, lossTotal) {
+  const subcomponentTotal = Object.values(lossParts).reduce((total, value) => total + Math.max(Number(value || 0), 0), 0);
+  const targetTotal = Math.max(Number(lossTotal || 0), 0);
+
+  if (subcomponentTotal <= 0 || targetTotal <= 0 || subcomponentTotal <= targetTotal) {
+    return Object.fromEntries(
+      Object.entries(lossParts).map(([key, value]) => [key, Math.max(Number(value || 0), 0)])
     );
-    normalized[item.componentKey] = roundedPercentage;
-    remainingPercentage -= roundedPercentage;
-  });
+  }
+
+  const scale = targetTotal / subcomponentTotal;
+  return Object.fromEntries(
+    Object.entries(lossParts).map(([key, value]) => [key, Math.max(Number(value || 0), 0) * scale])
+  );
+}
+
+function normalizeBreakdownCapacityValues(values, availableCapacity) {
+  const capacity = Math.max(Number(availableCapacity || 0), 0);
+  const normalized = {
+    waiting_time: Math.max(Number(values.waiting_time || 0), 0),
+    loss_time: Math.max(Number(values.loss_time || 0), 0),
+    downtime: Math.max(Number(values.downtime || 0), 0),
+    runtime_snp: Math.max(Number(values.runtime_snp || 0), 0),
+    runtime_gnp: Math.max(Number(values.runtime_gnp || 0), 0),
+    spare_time: 0
+  };
+  const used = normalized.waiting_time + normalized.loss_time + normalized.downtime + normalized.runtime_snp + normalized.runtime_gnp;
+
+  if (capacity <= 0) {
+    return normalized;
+  }
+
+  if (used > capacity) {
+    const scale = capacity / used;
+    normalized.waiting_time *= scale;
+    normalized.loss_time *= scale;
+    normalized.downtime *= scale;
+    normalized.runtime_snp *= scale;
+    normalized.runtime_gnp *= scale;
+  }
+
+  const adjustedUsed = normalized.waiting_time + normalized.loss_time + normalized.downtime + normalized.runtime_snp + normalized.runtime_gnp;
+  normalized.spare_time = Math.max(capacity - adjustedUsed, 0);
 
   return normalized;
+}
+
+function calculateBreakdownPercentages(values, availableCapacity) {
+  const capacity = Number(availableCapacity || 0);
+
+  if (capacity <= 0) {
+    return Object.fromEntries(BREAKDOWN_STACKS.map((stack) => [stack.key, 0]));
+  }
+
+  const rawPercentages = BREAKDOWN_STACKS.map((stack) => {
+    const rawPercentage = (Math.max(Number(values[stack.key] || 0), 0) / capacity) * 100;
+    return {
+      key: stack.key,
+      percentage: Math.min(Math.max(rawPercentage, 0), 100)
+    };
+  });
+  const rawTotal = rawPercentages.reduce((total, row) => total + row.percentage, 0);
+  const scale = rawTotal > 100 ? 100 / rawTotal : 1;
+  const percentages = {};
+  let roundedTotal = 0;
+
+  rawPercentages.forEach((row) => {
+    const rounded = cleanNumber(row.percentage * scale);
+    percentages[row.key] = rounded;
+    roundedTotal = cleanNumber(roundedTotal + rounded);
+  });
+
+  if (roundedTotal > 100) {
+    let overage = cleanNumber(roundedTotal - 100);
+
+    for (const stack of [...BREAKDOWN_STACKS].reverse()) {
+      if (overage <= 0) break;
+
+      const reduction = Math.min(percentages[stack.key] || 0, overage);
+      percentages[stack.key] = cleanNumber((percentages[stack.key] || 0) - reduction);
+      overage = cleanNumber(overage - reduction);
+    }
+  }
+
+  return percentages;
 }
 
 function calculatePercentage(numerator, denominator) {
