@@ -269,8 +269,9 @@ def _expand_twin_folder_rows(
 
     for index, row in df.iterrows():
         targets: list[str] = []
+        is_twin_production_type = _clean_text(row.get("Production Type")) == TWIN_FOLDER_MODE
 
-        if _clean_text(row.get("Production Type")) == TWIN_FOLDER_MODE:
+        if is_twin_production_type:
             targets = _twin_folder_targets_for_row(row, twin_lookup)
 
         if not targets and issue_twin_targets and issue_column in df.columns:
@@ -278,6 +279,9 @@ def _expand_twin_folder_rows(
             targets = issue_twin_targets.get(issue_key, [])
 
         if not targets:
+            if is_twin_production_type:
+                df.at[index, TWIN_FOLDER_MODE_COLUMN] = True
+                df.at[index, TWIN_FOLDER_GROUP_COLUMN] = _twin_folder_group_key(row, [])
             continue
 
         twin_group_key = _twin_folder_group_key(row, targets)

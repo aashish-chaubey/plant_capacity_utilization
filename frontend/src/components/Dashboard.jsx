@@ -278,7 +278,17 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
   const actualGroupWidth = barWidth * folderCount + barGap * (folderCount - 1);
   const viewRows = rows.filter((row) => visibleDays.includes(row.run_date));
   const twinMarkers = buildTwinFolderMarkers(rows, visibleDays);
-  const selectedHighlightColor = "#475569";
+  const twinMarkerFolderKeys = new Set(
+    twinMarkers.flatMap((m) =>
+      Array.from(m.folderIndexes).map((fi) => `${m.run_date}||${fi}`)
+    )
+  );
+  const soloTwinFolderKeys = new Set(
+    viewRows
+      .filter((row) => row.twin_folder_mode && !twinMarkerFolderKeys.has(`${row.run_date}||${row.folderIndex}`))
+      .map((row) => `${row.run_date}||${row.folderIndex}`)
+  );
+const selectedHighlightColor = "#475569";
   const selectedDaySummary = useMemo(
     () => buildCapacityDaySummary(summaryPopover?.day, rows, folders.length),
     [folders.length, rows, summaryPopover?.day]
@@ -674,6 +684,22 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
                       <circle cx={startX} cy={connectorY} r="2.6" fill="#2563eb" opacity="0.9" />
                       <circle cx={endX} cy={connectorY} r="2.6" fill="#2563eb" opacity="0.9" />
                     </g>
+                  );
+                })}
+                {folders.map((folder, folderIndex) => {
+                  if (!soloTwinFolderKeys.has(`${day}||${folderIndex}`)) return null;
+                  const cx = xFor(dayIndex, folderIndex) + barWidth / 2;
+                  const dotY = margins.top + plotHeight + 36;
+                  return (
+                    <circle
+                      key={`solo-twin-${day}-${folderIndex}`}
+                      cx={cx}
+                      cy={dotY}
+                      r="3"
+                      fill="#2563eb"
+                      opacity="0.9"
+                      pointerEvents="none"
+                    />
                   );
                 })}
                 <text
