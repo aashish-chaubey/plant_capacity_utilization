@@ -23,14 +23,51 @@ export default function App() {
   const [intelligenceError, setIntelligenceError] = useState("");
   const [fileName, setFileName] = useState("");
   const [timeframe, setTimeframe] = useState(createDefaultTimeframe);
+  const [selectedPlant, setSelectedPlant] = useState("");
+  const [selectedFolders, setSelectedFolders] = useState([]);
 
-  const periodOptions = useMemo(
-    () => buildPeriodOptions(result?.daily || []),
+  const plantOptions = useMemo(
+    () => buildPlantOptions(result),
     [result]
+  );
+  const folderOptions = useMemo(
+    () => buildFolderOptions(result, selectedPlant),
+    [result, selectedPlant]
+  );
+  const scopedResult = useMemo(
+    () => filterCapacityDataByScope(result, selectedPlant, selectedFolders),
+    [result, selectedFolders, selectedPlant]
+  );
+  const periodOptions = useMemo(
+    () => buildPeriodOptions(scopedResult?.daily || []),
+    [scopedResult]
   );
 
   useEffect(() => {
-    if (!result?.daily?.length) return;
+    if (!result) {
+      setSelectedPlant("");
+      setSelectedFolders([]);
+      return;
+    }
+
+    setSelectedPlant((current) => {
+      if (current && plantOptions.some((option) => option.value === current)) {
+        return current;
+      }
+
+      return plantOptions.length === 1 ? plantOptions[0].value : "";
+    });
+  }, [plantOptions, result]);
+
+  useEffect(() => {
+    setSelectedFolders((current) => {
+      const validFolders = new Set(folderOptions.map((option) => option.value));
+      return current.filter((folder) => validFolders.has(folder));
+    });
+  }, [folderOptions]);
+
+  useEffect(() => {
+    if (!scopedResult?.daily?.length) return;
 
     setTimeframe((current) => {
       const nextPeriods = { ...current.periods };
@@ -47,7 +84,7 @@ export default function App() {
         }
       }
 
-      const bounds = getDateBounds(result.daily);
+      const bounds = getDateBounds(scopedResult.daily);
       const customStart = current.customStart || bounds.start;
       const customEnd = current.customEnd || bounds.end;
 
@@ -64,16 +101,16 @@ export default function App() {
         customEnd
       };
     });
-  }, [periodOptions, result]);
+  }, [periodOptions, scopedResult]);
 
   const timeframeRange = useMemo(
-    () => resolveTimeframeRange(timeframe, periodOptions, result?.daily || []),
-    [periodOptions, result, timeframe]
+    () => resolveTimeframeRange(timeframe, periodOptions, scopedResult?.daily || []),
+    [periodOptions, scopedResult, timeframe]
   );
 
   const filteredResult = useMemo(
-    () => filterCapacityData(result, timeframeRange),
-    [result, timeframeRange]
+    () => filterCapacityData(scopedResult, timeframeRange),
+    [scopedResult, timeframeRange]
   );
 
   useEffect(() => {
@@ -141,6 +178,8 @@ export default function App() {
     setIntelligenceLoading(false);
     setFileName(file.name);
     setTimeframe(createDefaultTimeframe());
+    setSelectedPlant("");
+    setSelectedFolders([]);
 
     const formData = new FormData();
     formData.append("file", file);
@@ -203,6 +242,26 @@ export default function App() {
     }));
   }
 
+  function handlePlantChange(plantName) {
+    setSelectedPlant(plantName);
+    setSelectedFolders([]);
+    setTimeframe(createDefaultTimeframe());
+  }
+
+  function handleFolderToggle(folderName) {
+    setSelectedFolders((current) => (
+      current.includes(folderName)
+        ? current.filter((folder) => folder !== folderName)
+        : [...current, folderName]
+    ));
+    setTimeframe(createDefaultTimeframe());
+  }
+
+  function handleClearFolders() {
+    setSelectedFolders([]);
+    setTimeframe(createDefaultTimeframe());
+  }
+
   return (
     <div className="min-h-screen bg-[#f6f8fb] text-slate-900">
       <header className="border-b border-slate-200 bg-white">
@@ -226,6 +285,18 @@ export default function App() {
           <UploadPanel onUpload={handleUpload} loading={loading} compact={Boolean(result)} />
 
           {result && (
+            <ScopeFilter
+              plantOptions={plantOptions}
+              selectedPlant={selectedPlant}
+              folderOptions={folderOptions}
+              selectedFolders={selectedFolders}
+              onPlantChange={handlePlantChange}
+              onFolderToggle={handleFolderToggle}
+              onClearFolders={handleClearFolders}
+            />
+          )}
+
+          {result && selectedPlant && (
             <TimeframeFilter
               mode={timeframe.mode}
               periodKey={timeframe.periods[timeframe.mode] || ""}
@@ -258,7 +329,16 @@ export default function App() {
           </section>
         )}
 
-        {filteredResult?.daily?.length > 0 && (
+        {result && plantOptions.length > 1 && !selectedPlant && errors.length === 0 && (
+          <section className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-6 text-amber-900 shadow-soft">
+            <h2 className="text-base font-semibold">Select a plant to continue</h2>
+            <p className="mt-1 text-sm">
+              This upload contains multiple plants. Choose one plant first; folder filtering is optional after that.
+            </p>
+          </section>
+        )}
+
+        {selectedPlant && filteredResult?.daily?.length > 0 && (
           <Dashboard
             data={filteredResult}
             intelligence={intelligence}
@@ -267,7 +347,7 @@ export default function App() {
           />
         )}
 
-        {filteredResult && filteredResult.daily.length === 0 && errors.length === 0 && (
+        {selectedPlant && filteredResult && filteredResult.daily.length === 0 && errors.length === 0 && (
           <section className="mt-6 rounded-lg border border-slate-200 bg-white p-6 text-slate-700 shadow-soft">
             <h2 className="text-base font-semibold text-slate-950">No rows in this timeframe</h2>
             <p className="mt-1 text-sm text-slate-500">
@@ -277,6 +357,81 @@ export default function App() {
         )}
       </main>
     </div>
+  );
+}
+
+function ScopeFilter({
+  plantOptions,
+  selectedPlant,
+  folderOptions,
+  selectedFolders,
+  onPlantChange,
+  onFolderToggle,
+  onClearFolders
+}) {
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-soft">
+      <div className="grid gap-4 lg:grid-cols-[minmax(220px,0.35fr)_1fr]">
+        <div>
+          <label htmlFor="plant-select" className="text-xs font-semibold uppercase tracking-normal text-slate-500">
+            Plant
+          </label>
+          <select
+            id="plant-select"
+            value={selectedPlant}
+            onChange={(event) => onPlantChange(event.target.value)}
+            className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="">Select plant</option>
+            {plantOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs font-semibold uppercase tracking-normal text-slate-500">Folders</p>
+            {selectedFolders.length > 0 && (
+              <button
+                type="button"
+                onClick={onClearFolders}
+                className="text-xs font-semibold text-blue-700 transition hover:text-blue-900"
+              >
+                Clear folders
+              </button>
+            )}
+          </div>
+          {!selectedPlant ? (
+            <p className="mt-2 text-sm text-slate-500">Select a plant first.</p>
+          ) : folderOptions.length === 0 ? (
+            <p className="mt-2 text-sm text-slate-500">No folders found for this plant.</p>
+          ) : (
+            <div className="mt-2 flex max-h-28 flex-wrap gap-2 overflow-auto pr-1">
+              {folderOptions.map((option) => (
+                <label
+                  key={option.value}
+                  className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-semibold text-slate-700"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedFolders.includes(option.value)}
+                    onChange={() => onFolderToggle(option.value)}
+                    className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>{option.label}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          <p className="mt-2 text-xs text-slate-500">
+            {selectedFolders.length > 0 ? `${selectedFolders.length} folder${selectedFolders.length === 1 ? "" : "s"} selected` : "All folders selected"}
+          </p>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -293,6 +448,107 @@ function createDefaultTimeframe() {
     customStart: "",
     customEnd: ""
   };
+}
+
+function buildPlantOptions(result) {
+  if (!result) return [];
+
+  return Array.from(
+    new Set((result.details || []).map((row) => row.plant_name).filter(Boolean))
+  )
+    .sort((first, second) => first.localeCompare(second))
+    .map((plantName) => ({ value: plantName, label: plantName }));
+}
+
+function buildFolderOptions(result, selectedPlant) {
+  if (!result || !selectedPlant) return [];
+
+  return Array.from(
+    new Set(
+      (result.details || [])
+        .filter((row) => row.plant_name === selectedPlant)
+        .map((row) => row.folder)
+        .filter(Boolean)
+    )
+  )
+    .sort((first, second) => first.localeCompare(second))
+    .map((folderName) => ({
+      value: folderName,
+      label: formatResourceLabel(folderName)
+    }));
+}
+
+function filterCapacityDataByScope(result, selectedPlant, selectedFolders) {
+  if (!result || !selectedPlant) return null;
+
+  const selectedFolderSet = new Set(selectedFolders);
+  const plantDetails = (result.details || []).filter((row) => row.plant_name === selectedPlant);
+  const dateUniverse = Array.from(new Set(plantDetails.map((row) => row.run_date).filter(Boolean))).sort();
+  const details = selectedFolderSet.size > 0
+    ? plantDetails.filter((row) => selectedFolderSet.has(row.folder))
+    : plantDetails;
+  const towerDetails = (result.tower_details || [])
+    .filter((row) => row.plant_name === selectedPlant)
+    .filter((row) => selectedFolderSet.size === 0 || selectedFolderSet.has(row.folder));
+  const fixedCapacityFolders = selectedFolderSet.size > 0 ? selectedFolderSet.size : null;
+  const daily = buildDailyRowsFromDetails(details, dateUniverse, fixedCapacityFolders);
+
+  return {
+    ...result,
+    summary: calculateSummary(daily),
+    daily,
+    details,
+    tower_details: towerDetails
+  };
+}
+
+function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolders = null) {
+  const dates = (dateUniverse?.length ? dateUniverse : Array.from(
+    new Set((detailRows || []).map((row) => row.run_date).filter(Boolean))
+  )).sort();
+
+  if (!dates.length) return [];
+
+  const detailsByDate = new Map();
+  for (const row of detailRows || []) {
+    if (!row.run_date) continue;
+    const rows = detailsByDate.get(row.run_date) || [];
+    rows.push(row);
+    detailsByDate.set(row.run_date, rows);
+  }
+
+  const maxActiveFolders = Math.max(
+    0,
+    ...dates.map((runDate) => new Set((detailsByDate.get(runDate) || []).map((row) => row.folder)).size)
+  );
+  const capacityFoldersCount = Math.max(Number(fixedCapacityFolders || 0), maxActiveFolders);
+
+  if (capacityFoldersCount <= 0) return [];
+
+  return dates.map((runDate) => {
+    const rows = detailsByDate.get(runDate) || [];
+    const activeFoldersCount = new Set(rows.map((row) => row.folder)).size;
+    const activeAvailableCapacity = sumBy(rows, "available_capacity");
+    const availableCapacity = capacityFoldersCount * 240;
+    const runtime = sumBy(rows, "runtime");
+    const lostTime = sumBy(rows, "lost_time");
+    const downtime = sumBy(rows, "downtime");
+    const bufferTime = sumBy(rows, "buffer_time");
+    const idleTime = Math.max(availableCapacity - activeAvailableCapacity, 0);
+
+    return {
+      run_date: runDate,
+      active_folders_count: activeFoldersCount,
+      capacity_folders_count: capacityFoldersCount,
+      available_capacity: cleanNumber(availableCapacity),
+      runtime: cleanNumber(runtime),
+      lost_time: cleanNumber(lostTime),
+      downtime: cleanNumber(downtime),
+      buffer_time: cleanNumber(bufferTime),
+      idle_time: cleanNumber(idleTime),
+      utilization_percentage: cleanNumber(availableCapacity > 0 ? Math.min((runtime / availableCapacity) * 100, 100) : 0)
+    };
+  });
 }
 
 function buildPeriodOptions(dailyRows) {
@@ -422,9 +678,11 @@ function calculateSummary(dailyRows) {
   const totalAvailable = sumBy(dailyRows, "available_capacity");
   const totalRuntime = sumBy(dailyRows, "runtime");
   const totalBufferTime = sumBy(dailyRows, "buffer_time");
+  const totalIdleTime = sumBy(dailyRows, "idle_time");
   const rawPercentage = totalAvailable > 0 ? (totalRuntime / totalAvailable) * 100 : 0;
   const cappedPercentage = Math.min(rawPercentage, 100);
   const spareCapacityPercentage = totalAvailable > 0 ? Math.min((totalBufferTime / totalAvailable) * 100, 100) : 0;
+  const idleCapacityPercentage = totalAvailable > 0 ? Math.min((totalIdleTime / totalAvailable) * 100, 100) : 0;
 
   return {
     total_available_capacity: cleanNumber(totalAvailable),
@@ -432,8 +690,10 @@ function calculateSummary(dailyRows) {
     total_lost_time: cleanNumber(sumBy(dailyRows, "lost_time")),
     total_downtime: cleanNumber(sumBy(dailyRows, "downtime")),
     total_buffer_time: cleanNumber(totalBufferTime),
+    total_idle_time: cleanNumber(totalIdleTime),
     average_utilization_percentage: cleanNumber(cappedPercentage),
     spare_capacity_percentage: cleanNumber(spareCapacityPercentage),
+    idle_capacity_percentage: cleanNumber(idleCapacityPercentage),
     active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count"))
   };
 }
@@ -452,6 +712,14 @@ function getDateBounds(dailyRows) {
 
 function isDateInRange(value, range) {
   return Boolean(value && value >= range.start && value <= range.end);
+}
+
+function formatResourceLabel(value) {
+  return String(value || "")
+    .split("\n")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(" / ");
 }
 
 function sumBy(rows, key) {

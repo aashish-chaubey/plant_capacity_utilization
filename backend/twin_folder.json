@@ -1,0 +1,17 @@
+{
+  "Bommasandra": {
+    "Regioman-A": ["Folder A", "Folder B"],
+    "Regioman-B": ["Folder C", "Folder D"]
+  },
+  "Chemmencherry": {
+    "Regioman": ["Folder 1", "Folder 2"]
+  },
+  "Kandivali": {
+    "Colorman-B": ["COLOR  B", "COLOR  C"],
+    "Colorman-D": ["COLOR  D", "COLOR  E"]
+  },
+  "Sahibabad": {
+    "Colorman-C": ["COLOR  D", "COLOR  E"],
+    "Colorman-D": ["COLOR  F", "COLOR  G"]
+  }
+}

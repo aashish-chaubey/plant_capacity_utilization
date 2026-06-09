@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, time, timedelta
 from math import isfinite
 from numbers import Real
+from pathlib import Path
 import re
 import warnings
 from typing import Any
@@ -23,6 +25,11 @@ GENERAL_SHEET = "General"
 BOOK_WISE_SHEET = "Book Wise Details"
 DOWN_TIME_SHEET = "Down Time"
 REPORT_DATE_COLUMN = "Report Date"
+TWIN_FOLDER_MODE = ">||>"
+TWIN_FOLDER_CONFIG_FILENAMES = ("twin_folders.json", "twin_folder.json")
+TWIN_FOLDER_MODE_COLUMN = "Twin Folder Mode"
+TWIN_FOLDER_GROUP_COLUMN = "Twin Folder Group"
+UV_TOWER_CONFIG_FILENAME = "uv_towers.json"
 
 
 def parse_general(workbook: pd.ExcelFile) -> pd.DataFrame:
@@ -58,6 +65,14 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
 
     df["Machine"] = df["Machine"].apply(_clean_text)
     df["Folder"] = df["Folder"].apply(_clean_text)
+    df["Plant Name"] = df.get(
+        "Plant Name",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
+    df["Production Type"] = df.get(
+        "Production Type",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
     df["Issue Id"] = df["Issue Id"].apply(_clean_text)
     df["Reflong"] = df["Reflong"].apply(_clean_text)
     df["Complexities"] = df.get(
@@ -97,11 +112,331 @@ def parse_down_time(workbook: pd.ExcelFile) -> pd.DataFrame:
     df["Run Date"] = df["Run Date"].apply(_parse_date_value)
     df["Machine"] = df["Machine"].apply(_clean_text)
     df["Folder"] = df["Folder"].apply(_clean_text)
+    df["Plant Name"] = df.get(
+        "Plant Name",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
+    df["Production Type"] = df.get(
+        "Production Type",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
     df["IssueID"] = df["IssueID"].apply(_clean_text)
     df["Related"] = df["Related"].apply(_clean_text)
     df["Reason"] = df["Reason"].apply(_clean_text)
     df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
     return df
+
+
+def _load_twin_folder_lookup() -> dict[str, dict[str, list[str]]]:
+    backend_dir = Path(__file__).resolve().parents[2]
+
+    for filename in TWIN_FOLDER_CONFIG_FILENAMES:
+        path = backend_dir / filename
+        if not path.exists():
+            continue
+
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                raw_config = json.load(file)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Unable to read twin folder config from {path.name}: {exc}") from exc
+
+        return _normalize_twin_folder_lookup(raw_config)
+
+    return {}
+
+
+def _load_uv_tower_lookup() -> dict[str, dict[str, set[str]]]:
+    path = Path(__file__).resolve().parents[2] / UV_TOWER_CONFIG_FILENAME
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            raw_config = json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Unable to read UV tower config from {path.name}: {exc}") from exc
+
+    return _normalize_uv_tower_lookup(raw_config)
+
+
+def _normalize_uv_tower_lookup(raw_config: Any) -> dict[str, dict[str, set[str]]]:
+    if not isinstance(raw_config, dict):
+        return {}
+
+    normalized: dict[str, dict[str, set[str]]] = {}
+
+    for plant, machine_map in raw_config.items():
+        if not isinstance(machine_map, dict):
+            continue
+
+        plant_key = _canonical_text(plant)
+        if not plant_key:
+            continue
+
+        normalized[plant_key] = {}
+
+        for machine, towers in machine_map.items():
+            if not isinstance(towers, list):
+                continue
+
+            machine_key = _canonical_text(machine)
+            clean_towers = {_canonical_tower_name(tower) for tower in towers if _clean_text(tower)}
+
+            if machine_key and clean_towers:
+                normalized[plant_key][machine_key] = clean_towers
+
+    return normalized
+
+
+def _is_uv_tower(
+    plant_name: Any,
+    machine: Any,
+    tower: Any,
+    uv_tower_lookup: dict[str, dict[str, set[str]]],
+) -> bool:
+    if not uv_tower_lookup:
+        return False
+
+    plant_key = _canonical_text(plant_name)
+    machine_key = _canonical_text(machine)
+    tower_key = _canonical_tower_name(tower)
+
+    if not machine_key or not tower_key:
+        return False
+
+    machine_maps = []
+    if plant_key:
+        machine_map = uv_tower_lookup.get(plant_key, {})
+        if machine_map:
+            machine_maps.append(machine_map)
+    else:
+        machine_maps = list(uv_tower_lookup.values())
+
+    return any(tower_key in machine_map.get(machine_key, set()) for machine_map in machine_maps)
+
+
+def _normalize_twin_folder_lookup(raw_config: Any) -> dict[str, dict[str, list[str]]]:
+    if not isinstance(raw_config, dict):
+        return {}
+
+    normalized: dict[str, dict[str, list[str]]] = {}
+
+    for plant, machine_map in raw_config.items():
+        if not isinstance(machine_map, dict):
+            continue
+
+        plant_key = _canonical_text(plant)
+        if not plant_key:
+            continue
+
+        normalized[plant_key] = {}
+
+        for machine, folders in machine_map.items():
+            if not isinstance(folders, list):
+                continue
+
+            machine_key = _canonical_text(machine)
+            clean_folders = [_clean_text(folder) for folder in folders if _clean_text(folder)]
+
+            if machine_key and len(clean_folders) >= 2:
+                normalized[plant_key][machine_key] = clean_folders
+
+    return normalized
+
+
+def _expand_twin_folder_rows(
+    df: pd.DataFrame,
+    twin_lookup: dict[str, dict[str, list[str]]],
+    issue_column: str,
+    issue_twin_targets: dict[tuple[str, str, str], list[str]] | None = None,
+) -> pd.DataFrame:
+    if df.empty or "Machine" not in df.columns or "Folder" not in df.columns:
+        return df
+
+    df = df.copy()
+    row_columns = list(df.columns)
+    if TWIN_FOLDER_MODE_COLUMN not in df.columns:
+        df[TWIN_FOLDER_MODE_COLUMN] = False
+    if TWIN_FOLDER_GROUP_COLUMN not in df.columns:
+        df[TWIN_FOLDER_GROUP_COLUMN] = ""
+
+    seen_signatures = {
+        _row_signature(row, row_columns)
+        for _, row in df.iterrows()
+    }
+    cloned_rows = []
+
+    for index, row in df.iterrows():
+        targets: list[str] = []
+
+        if _clean_text(row.get("Production Type")) == TWIN_FOLDER_MODE:
+            targets = _twin_folder_targets_for_row(row, twin_lookup)
+
+        if not targets and issue_twin_targets and issue_column in df.columns:
+            issue_key = _issue_folder_key(row, issue_column)
+            targets = issue_twin_targets.get(issue_key, [])
+
+        if not targets:
+            continue
+
+        twin_group_key = _twin_folder_group_key(row, targets)
+        df.at[index, TWIN_FOLDER_MODE_COLUMN] = True
+        df.at[index, TWIN_FOLDER_GROUP_COLUMN] = twin_group_key
+
+        for target_folder in targets:
+            if _canonical_text(target_folder) == _canonical_text(row.get("Folder")):
+                continue
+
+            cloned = row.copy()
+            cloned["Folder"] = target_folder
+            cloned[TWIN_FOLDER_MODE_COLUMN] = True
+            cloned[TWIN_FOLDER_GROUP_COLUMN] = twin_group_key
+            signature = _row_signature(cloned, row_columns)
+
+            if signature in seen_signatures:
+                continue
+
+            seen_signatures.add(signature)
+            cloned_rows.append(cloned)
+
+    if not cloned_rows:
+        return df
+
+    return pd.concat([df, pd.DataFrame(cloned_rows)], ignore_index=True, sort=False)
+
+
+def _twin_folder_group_key(row: pd.Series, target_folders: list[str]) -> str:
+    group_folders = sorted(
+        {
+            _canonical_text(folder)
+            for folder in [_clean_text(row.get("Folder")), *target_folders]
+            if _clean_text(folder)
+        }
+    )
+    return "||".join(
+        [
+            _canonical_text(row.get("Plant Name")),
+            _canonical_text(row.get("Machine")),
+            *group_folders,
+        ]
+    )
+
+
+def _build_issue_twin_targets(
+    book_df: pd.DataFrame,
+    twin_lookup: dict[str, dict[str, list[str]]],
+) -> dict[tuple[str, str, str], list[str]]:
+    if book_df.empty or not twin_lookup:
+        return {}
+
+    required_columns = {"Issue Id", "Machine", "Folder", "Production Type"}
+    if not required_columns.issubset(book_df.columns):
+        return {}
+
+    lookup: dict[tuple[str, str, str], list[str]] = {}
+
+    for _, row in book_df.iterrows():
+        if _clean_text(row.get("Production Type")) != TWIN_FOLDER_MODE:
+            continue
+
+        issue_key = _issue_folder_key(row, "Issue Id")
+        if not issue_key[0]:
+            continue
+
+        targets = _twin_folder_targets_for_row(row, twin_lookup)
+        if not targets:
+            continue
+
+        existing_targets = lookup.setdefault(issue_key, [])
+        for target in targets:
+            if target not in existing_targets:
+                existing_targets.append(target)
+
+    return lookup
+
+
+def _twin_folder_targets_for_row(
+    row: pd.Series,
+    twin_lookup: dict[str, dict[str, list[str]]],
+) -> list[str]:
+    if not twin_lookup:
+        return []
+
+    plant_key = _canonical_text(row.get("Plant Name"))
+    machine_key = _canonical_text(row.get("Machine"))
+    folder_key = _canonical_text(row.get("Folder"))
+
+    if not machine_key or not folder_key:
+        return []
+
+    machine_maps = []
+    if plant_key:
+        plant_mapping = twin_lookup.get(plant_key, {})
+        if plant_mapping:
+            machine_maps.append(plant_mapping)
+    else:
+        machine_maps = list(twin_lookup.values())
+
+    targets: list[str] = []
+
+    for machine_map in machine_maps:
+        folders = machine_map.get(machine_key, [])
+        if not any(_canonical_text(folder) == folder_key for folder in folders):
+            continue
+
+        for folder in folders:
+            if _canonical_text(folder) != folder_key and folder not in targets:
+                targets.append(folder)
+
+    return targets
+
+
+def _issue_folder_key(row: pd.Series, issue_column: str) -> tuple[str, str, str]:
+    return (
+        _clean_text(row.get(issue_column)),
+        _canonical_text(row.get("Machine")),
+        _canonical_text(row.get("Folder")),
+    )
+
+
+def _row_signature(row: pd.Series, columns: list[str]) -> tuple[tuple[str, str], ...]:
+    return tuple((column, _signature_text(row.get(column))) for column in columns)
+
+
+def _signature_text(value: Any) -> str:
+    if _is_blank(value):
+        return ""
+
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+
+    return _clean_text(value)
+
+
+def _is_reflong_print(value: Any) -> bool:
+    return _clean_text(value).casefold() == "yes"
+
+
+def _is_reflong_related(value: Any) -> bool:
+    return _clean_text(value).casefold().startswith("reflong")
+
+
+def _drop_reflong_print_rows(book_df: pd.DataFrame) -> pd.DataFrame:
+    if book_df.empty or "Reflong" not in book_df.columns:
+        return book_df.copy()
+
+    return book_df[~book_df["Reflong"].apply(_is_reflong_print)].copy()
+
+
+def _drop_reflong_down_time_rows(down_time_df: pd.DataFrame) -> pd.DataFrame:
+    if down_time_df.empty or "Related" not in down_time_df.columns:
+        return down_time_df.copy()
+
+    return down_time_df[~down_time_df["Related"].apply(_is_reflong_related)].copy()
 
 
 def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFrame) -> pd.DataFrame:
@@ -112,10 +447,10 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     - Discard all other print jobs before deriving active folders.
     - All downstream calculations use only this interval-filtered data.
     """
-    keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+    keys = [REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"]
 
     # Step 1: basic usable rows.
-    active_rows = book_df[_has_capacity_keys(book_df)].copy()
+    active_rows = _drop_reflong_print_rows(book_df[_has_capacity_keys(book_df)]).copy()
 
     if active_rows.empty:
         return _empty_folder_day_metrics()
@@ -126,6 +461,11 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
 
     if interval_editions.empty:
         return _empty_folder_day_metrics()
+
+    if TWIN_FOLDER_MODE_COLUMN not in interval_editions.columns:
+        interval_editions[TWIN_FOLDER_MODE_COLUMN] = False
+    if TWIN_FOLDER_GROUP_COLUMN not in interval_editions.columns:
+        interval_editions[TWIN_FOLDER_GROUP_COLUMN] = ""
 
     # Step 3: active folders are derived only from interval rows.
     # This prevents folders/jobs outside 00:00-04:00 from appearing.
@@ -139,6 +479,17 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     # Step 4: runtime/lost/buffer calculations use only interval rows.
     calculated_metrics = _calculate_interval_metrics_by_folder_day(interval_editions)
     runtime_segments = _calculate_runtime_segments_by_folder_day(interval_editions)
+    twin_folder_info = (
+        interval_editions.groupby(keys, dropna=False)
+        .agg(
+            twin_folder_mode=(TWIN_FOLDER_MODE_COLUMN, "any"),
+            twin_folder_group=(
+                TWIN_FOLDER_GROUP_COLUMN,
+                lambda values: next((_clean_text(value) for value in values if _clean_text(value)), ""),
+            ),
+        )
+        .reset_index()
+    )
 
     # Step 5: downtime is also limited to issues present in interval rows.
     down_grouped = _aggregate_down_time_by_capacity_unit_filtered(
@@ -150,6 +501,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     metrics = (
         active_units.merge(calculated_metrics, on=keys, how="left")
         .merge(runtime_segments, on=keys, how="left")
+        .merge(twin_folder_info, on=keys, how="left")
         .merge(down_grouped, on=keys, how="left")
     )
 
@@ -209,10 +561,13 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     metrics["buffer_time"] = (
         metrics["available_capacity"] - fixed_used_minutes
     ).clip(lower=0, upper=CAPACITY_MINUTES_PER_FOLDER_DAY)
+    metrics["twin_folder_mode"] = metrics["twin_folder_mode"].fillna(False).astype(bool)
+    metrics["twin_folder_group"] = metrics["twin_folder_group"].fillna("").apply(_clean_text)
 
     return metrics[
         [
             REPORT_DATE_COLUMN,
+            "Plant Name",
             "Machine",
             "Folder",
             "available_capacity",
@@ -228,6 +583,8 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
             "reflong_related_downtime",
             "late_start_time",
             "runtime_segments",
+            "twin_folder_mode",
+            "twin_folder_group",
         ]
     ]
 
@@ -280,13 +637,14 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
     - 23:50 previous day to 00:20 Issue Date contributes 20 minutes.
     - 04:00 to 04:30 contributes 0 minutes and is excluded.
     """
-    df = book_df[
-        (book_df[REPORT_DATE_COLUMN].notna()) &
-        (book_df["Issue Date"].notna()) &
-        (book_df["Machine"].ne("")) &
-        (book_df["Folder"].ne("")) &
-        (book_df["Start DateTime"].notna()) &
-        (book_df["End DateTime"].notna())
+    source_df = _drop_reflong_print_rows(book_df)
+    df = source_df[
+        (source_df[REPORT_DATE_COLUMN].notna()) &
+        (source_df["Issue Date"].notna()) &
+        (source_df["Machine"].ne("")) &
+        (source_df["Folder"].ne("")) &
+        (source_df["Start DateTime"].notna()) &
+        (source_df["End DateTime"].notna())
     ].copy()
 
     interval_columns = [
@@ -342,9 +700,9 @@ def _aggregate_down_time_by_capacity_unit_filtered(
     Down Time does not have Issue Date, so Report Date is mapped from Book Wise Details
     using IssueID + Machine + Folder.
 
-    Reflong is classified only for the exact matched interval edition group.
+    Reflong-related downtime is ignored because reflong print rows are excluded.
     """
-    keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+    keys = [REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"]
 
     down_rows = down_time_df[
         (down_time_df["IssueID"].ne("")) &
@@ -370,19 +728,11 @@ def _aggregate_down_time_by_capacity_unit_filtered(
                     df["Folder"],
                 )
             ),
-            reflong_yes=lambda df: (
-                df["Reflong"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.casefold()
-                .eq("yes")
-            ),
         )
         .groupby("lookup_key", dropna=False)
         .agg(
             report_date=(REPORT_DATE_COLUMN, "first"),
-            reflong_yes=("reflong_yes", "any"),
+            plant_name=("Plant Name", "first"),
         )
         .to_dict(orient="index")
     )
@@ -403,9 +753,9 @@ def _aggregate_down_time_by_capacity_unit_filtered(
     down_rows[REPORT_DATE_COLUMN] = down_rows["lookup_key"].map(
         lambda key: interval_lookup.get(key, {}).get("report_date")
     )
-
-    down_rows["book_reflong_yes"] = down_rows["lookup_key"].map(
-        lambda key: interval_lookup.get(key, {}).get("reflong_yes", False)
+    down_rows["Plant Name"] = down_rows.apply(
+        lambda row: row["Plant Name"] or interval_lookup.get(row["lookup_key"], {}).get("plant_name", ""),
+        axis=1,
     )
 
     down_rows = down_rows[down_rows[REPORT_DATE_COLUMN].notna()].copy()
@@ -413,19 +763,12 @@ def _aggregate_down_time_by_capacity_unit_filtered(
     if down_rows.empty:
         return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
 
-    down_rows["related_starts_reflong"] = (
-        down_rows["Related"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.casefold()
-        .str.startswith("reflong")
-    )
+    down_rows = _drop_reflong_down_time_rows(down_rows)
 
-    down_rows["reflong_related_downtime"] = down_rows["Total Downtime"].where(
-        down_rows["book_reflong_yes"] & down_rows["related_starts_reflong"],
-        0.0,
-    )
+    if down_rows.empty:
+        return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
+
+    down_rows["reflong_related_downtime"] = 0.0
 
     return (
         down_rows.groupby(keys, dropna=False)
@@ -439,42 +782,38 @@ def _aggregate_down_time_by_capacity_unit_filtered(
 
 def _aggregate_down_time_by_tower(
     down_time_df: pd.DataFrame,
-    issue_tower_lookup: dict[str, list[str]],
-    issue_machine_lookup: dict[str, str],
-    issue_date_lookup: dict[str, date],
-    issue_reflong_lookup: dict[str, bool],
-) -> dict[tuple[date, str, str], dict[str, float]]:
-    totals: dict[tuple[date, str, str], dict[str, float]] = {}
+    issue_tower_lookup: dict[tuple[str, str, str], list[str]],
+    issue_plant_lookup: dict[tuple[str, str, str], str],
+    issue_date_lookup: dict[tuple[str, str, str], date],
+) -> dict[tuple[date, str, str, str, str], dict[str, float]]:
+    totals: dict[tuple[date, str, str, str, str], dict[str, float]] = {}
 
     if down_time_df.empty:
         return totals
 
     for _, row in down_time_df.iterrows():
         issue_id = _clean_text(row.get("IssueID"))
-        towers = issue_tower_lookup.get(issue_id, [])
-        machine = issue_machine_lookup.get(issue_id, "")
-        report_date = issue_date_lookup.get(issue_id)
+        machine = _clean_text(row.get("Machine"))
+        folder = _clean_text(row.get("Folder"))
+        lookup_key = (issue_id, machine, folder)
+        towers = issue_tower_lookup.get(lookup_key, [])
+        report_date = issue_date_lookup.get(lookup_key)
+        plant_name = _clean_text(row.get("Plant Name")) or issue_plant_lookup.get(lookup_key, "")
 
-        if not issue_id or not towers or not machine or not report_date:
+        if not issue_id or not towers or not machine or not folder or not report_date:
             continue
 
         total_downtime = _parse_minutes_value(row.get("Total Downtime"))
         if total_downtime <= 0:
             continue
 
-        is_reflong_related = (
-            issue_reflong_lookup.get(issue_id, False)
-            and _clean_text(row.get("Related")).casefold().startswith("reflong")
-        )
+        if _is_reflong_related(row.get("Related")):
+            continue
 
         for tower in towers:
-            key = (report_date, machine, tower)
+            key = (report_date, plant_name, machine, folder, tower)
             totals.setdefault(key, {"downtime": 0.0, "reflong_related_downtime": 0.0})
-
-            if is_reflong_related:
-                totals[key]["reflong_related_downtime"] += total_downtime
-            else:
-                totals[key]["downtime"] += total_downtime
+            totals[key]["downtime"] += total_downtime
 
     return totals
 
@@ -510,7 +849,7 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
 
     Final net runtime is calculated later after downtime is subtracted.
     """
-    keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+    keys = [REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"]
 
     df = book_df.copy()
 
@@ -531,7 +870,7 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
 
     results = []
 
-    for (report_date, machine, folder), group in df.groupby(keys, dropna=False):
+    for (report_date, plant_name, machine, folder), group in df.groupby(keys, dropna=False):
         # Sort by Effective Start DateTime but preserve original index for Last Tiff mapping
         group = group.sort_values("Effective Start DateTime")
         
@@ -551,6 +890,7 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             results.append(
                 {
                     REPORT_DATE_COLUMN: report_date,
+                    "Plant Name": plant_name,
                     "Machine": machine,
                     "Folder": folder,
                     "gross_runtime": 0.0,
@@ -607,6 +947,7 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
         results.append(
             {
                 REPORT_DATE_COLUMN: report_date,
+                "Plant Name": plant_name,
                 "Machine": machine,
                 "Folder": folder,
                 "gross_runtime": gross_runtime,
@@ -625,7 +966,7 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
 
 
 def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataFrame:
-    keys = [REPORT_DATE_COLUMN, "Machine", "Folder"]
+    keys = [REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"]
     columns = [*keys, "runtime_segments"]
 
     if book_df.empty:
@@ -634,6 +975,7 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
     segment_rows = []
     dedupe_columns = [
         REPORT_DATE_COLUMN,
+        "Plant Name",
         "Machine",
         "Folder",
         "Issue Id",
@@ -647,8 +989,9 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
     df = book_df.drop_duplicates(
         subset=[column for column in dedupe_columns if column in book_df.columns]
     ).copy()
+    df = _drop_reflong_print_rows(df)
 
-    for (report_date, machine, folder), group in df.groupby(keys, dropna=False):
+    for (report_date, plant_name, machine, folder), group in df.groupby(keys, dropna=False):
         category_totals: dict[str, dict[str, Any]] = {}
 
         for _, row in group.iterrows():
@@ -676,10 +1019,8 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             current["runtime_minutes"] += runtime_minutes
             current["print_order"] += print_order
 
-            is_reflong = _clean_text(row.get("Reflong")).casefold() == "yes"
-            if not is_reflong:
-                current["speed_runtime_minutes"] += runtime_minutes
-                current["speed_print_order"] += print_order
+            current["speed_runtime_minutes"] += runtime_minutes
+            current["speed_print_order"] += print_order
 
         segments = []
         for segment in category_totals.values():
@@ -705,6 +1046,7 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
         segment_rows.append(
             {
                 REPORT_DATE_COLUMN: report_date,
+                "Plant Name": plant_name,
                 "Machine": machine,
                 "Folder": folder,
                 "runtime_segments": sorted(
@@ -762,6 +1104,7 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
     df = rows.drop_duplicates(
         subset=[column for column in dedupe_columns if column in rows.columns]
     ).copy()
+    df = _drop_reflong_print_rows(df)
 
     for _, row in df.iterrows():
         classification = _categorize_complexity(row.get("Complexities"))
@@ -788,10 +1131,8 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
         current["runtime_minutes"] += source_runtime_minutes
         current["print_order"] += print_order
 
-        is_reflong = _clean_text(row.get("Reflong")).casefold() == "yes"
-        if not is_reflong:
-            current["speed_runtime_minutes"] += source_runtime_minutes
-            current["speed_print_order"] += print_order
+        current["speed_runtime_minutes"] += source_runtime_minutes
+        current["speed_print_order"] += print_order
 
     segments = []
     for segment in category_totals.values():
@@ -985,13 +1326,13 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
 
     capacity_folders_count = int(daily["active_folders_count"].max())
     fixed_daily_capacity = capacity_folders_count * CAPACITY_MINUTES_PER_FOLDER_DAY
-    unused_folder_capacity = (
+    idle_time = (
         fixed_daily_capacity - daily["available_capacity"]
     ).clip(lower=0)
 
     daily["capacity_folders_count"] = capacity_folders_count
     daily["available_capacity"] = fixed_daily_capacity
-    daily["buffer_time"] = daily["buffer_time"] + unused_folder_capacity
+    daily["idle_time"] = idle_time
 
     daily["utilization_percentage"] = daily.apply(
         lambda row: _percentage(row["runtime"], row["available_capacity"]),
@@ -1005,11 +1346,14 @@ def calculate_tower_day_metrics(
     book_df: pd.DataFrame,
     down_time_df: pd.DataFrame,
     general_df: pd.DataFrame,
+    uv_tower_lookup: dict[str, dict[str, set[str]]] | None = None,
 ) -> pd.DataFrame:
     """Calculate engaged minutes for each tower in the Issue Date 00:00-04:00 window."""
     columns = [
         REPORT_DATE_COLUMN,
+        "Plant Name",
         "Machine",
+        "Folder",
         "Tower",
         "available_capacity",
         "gross_runtime",
@@ -1021,6 +1365,7 @@ def calculate_tower_day_metrics(
         "late_start_time",
         "buffer_time",
         "runtime_segments",
+        "uv_tower",
     ]
 
     if general_df.empty:
@@ -1038,11 +1383,15 @@ def calculate_tower_day_metrics(
     if interval_editions.empty:
         return pd.DataFrame(columns=columns)
 
+    uv_tower_lookup = uv_tower_lookup or {}
+
     interval_editions = interval_editions[
         [
             REPORT_DATE_COLUMN,
+            "Plant Name",
             "Issue Id",
             "Machine",
+            "Folder",
             "Reflong",
             "Last Tiff DateTime",
             "Effective Start DateTime",
@@ -1055,20 +1404,21 @@ def calculate_tower_day_metrics(
         ]
     ].drop_duplicates()
 
-    tower_intervals: dict[tuple[date, str, str], list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
-    tower_rows: dict[tuple[date, str, str], list[dict[str, Any]]] = {}
-    issue_tower_lookup: dict[str, list[str]] = {}
-    issue_machine_lookup: dict[str, str] = {}
-    issue_date_lookup: dict[str, date] = {}
-    issue_reflong_lookup: dict[str, bool] = {}
+    tower_intervals: dict[tuple[date, str, str, str, str], list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+    tower_rows: dict[tuple[date, str, str, str, str], list[dict[str, Any]]] = {}
+    issue_tower_lookup: dict[tuple[str, str, str], list[str]] = {}
+    issue_plant_lookup: dict[tuple[str, str, str], str] = {}
+    issue_date_lookup: dict[tuple[str, str, str], date] = {}
 
     for _, row in interval_editions.iterrows():
         report_date = row[REPORT_DATE_COLUMN]
+        plant_name = row["Plant Name"]
         issue_id = row["Issue Id"]
         machine = row["Machine"]
+        folder = row["Folder"]
         towers = tower_lookup.get(issue_id, [])
 
-        if not report_date or not towers or not machine:
+        if not report_date or not towers or not machine or not folder:
             continue
 
         interval = (
@@ -1076,30 +1426,26 @@ def calculate_tower_day_metrics(
             pd.Timestamp(row["Effective End DateTime"]),
         )
 
-        issue_date_lookup.setdefault(issue_id, report_date)
-        issue_reflong_lookup[issue_id] = (
-            issue_reflong_lookup.get(issue_id, False)
-            or _clean_text(row["Reflong"]).casefold() == "yes"
-        )
-        issue_tower_lookup.setdefault(issue_id, towers)
-        issue_machine_lookup.setdefault(issue_id, machine)
+        issue_key = (issue_id, machine, folder)
+        issue_date_lookup.setdefault(issue_key, report_date)
+        issue_plant_lookup.setdefault(issue_key, plant_name)
+        issue_tower_lookup.setdefault(issue_key, towers)
 
         for tower in towers:
-            tower_key = (report_date, machine, tower)
+            tower_key = (report_date, plant_name, machine, folder, tower)
             tower_intervals.setdefault(tower_key, []).append(interval)
             tower_rows.setdefault(tower_key, []).append(row.to_dict())
 
     tower_down_time = _aggregate_down_time_by_tower(
         down_time_df,
         issue_tower_lookup,
-        issue_machine_lookup,
+        issue_plant_lookup,
         issue_date_lookup,
-        issue_reflong_lookup,
     )
 
     records = []
 
-    for (report_date, machine, tower), intervals in tower_intervals.items():
+    for (report_date, plant_name, machine, folder, tower), intervals in tower_intervals.items():
         merged_intervals = _merge_print_intervals(intervals)
         runtime = sum(
             (end_dt - start_dt).total_seconds() / 60
@@ -1109,7 +1455,7 @@ def calculate_tower_day_metrics(
         waiting_time = 0.0
         late_start_time = 0.0
 
-        group = pd.DataFrame(tower_rows.get((report_date, machine, tower), []))
+        group = pd.DataFrame(tower_rows.get((report_date, plant_name, machine, folder, tower), []))
         if merged_intervals:
             # Determine window_start - either from group or construct default
             window_start = None
@@ -1139,7 +1485,7 @@ def calculate_tower_day_metrics(
                 change_over_time = _calculate_changeover_minutes(merged_intervals)
 
         downtime_parts = tower_down_time.get(
-            (report_date, machine, tower),
+            (report_date, plant_name, machine, folder, tower),
             {"downtime": 0.0, "reflong_related_downtime": 0.0},
         )
         downtime = float(downtime_parts["downtime"])
@@ -1170,7 +1516,9 @@ def calculate_tower_day_metrics(
         records.append(
             {
                 REPORT_DATE_COLUMN: report_date,
+                "Plant Name": plant_name,
                 "Machine": machine,
+                "Folder": folder,
                 "Tower": tower,
                 "available_capacity": CAPACITY_MINUTES_PER_FOLDER_DAY,
                 "gross_runtime": min(max(runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY),
@@ -1182,19 +1530,21 @@ def calculate_tower_day_metrics(
                 "late_start_time": late_start_minutes,
                 "buffer_time": buffer_minutes,
                 "runtime_segments": runtime_segments,
+                "uv_tower": _is_uv_tower(plant_name, machine, tower, uv_tower_lookup),
             }
         )
 
     if not records:
         return pd.DataFrame(columns=columns)
 
-    return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Machine", "Tower"]).reset_index(drop=True)
+    return pd.DataFrame(records).sort_values([REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder", "Tower"]).reset_index(drop=True)
 
 
 def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_available = float(daily_df["available_capacity"].sum()) if not daily_df.empty else 0.0
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
     total_buffer_time = float(daily_df["buffer_time"].sum()) if not daily_df.empty else 0.0
+    total_idle_time = float(daily_df["idle_time"].sum()) if not daily_df.empty and "idle_time" in daily_df else 0.0
 
     return {
         "total_available_capacity": _clean_number(total_available),
@@ -1202,8 +1552,10 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
         "total_lost_time": _clean_number(daily_df["lost_time"].sum() if not daily_df.empty else 0),
         "total_downtime": _clean_number(daily_df["downtime"].sum() if not daily_df.empty else 0),
         "total_buffer_time": _clean_number(total_buffer_time),
+        "total_idle_time": _clean_number(total_idle_time),
         "average_utilization_percentage": _clean_number(_percentage(total_runtime, total_available)),
         "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, total_available)),
+        "idle_capacity_percentage": _clean_number(_percentage(total_idle_time, total_available)),
         "active_folder_days": int(daily_df["active_folders_count"].sum()) if not daily_df.empty else 0,
     }
 
@@ -1273,10 +1625,20 @@ def _calculate_effective_speed(print_order: float, runtime_minutes: float) -> fl
 
 def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
     general_df = parse_general(workbook)
-    book_df = parse_book_wise_details(workbook)
-    down_time_df = parse_down_time(workbook)
-    folder_day_df = calculate_folder_day_metrics(book_df, down_time_df)
-    tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df)
+    book_df = _drop_reflong_print_rows(parse_book_wise_details(workbook))
+    down_time_df = _drop_reflong_down_time_rows(parse_down_time(workbook))
+    twin_lookup = _load_twin_folder_lookup()
+    uv_tower_lookup = _load_uv_tower_lookup()
+    issue_twin_targets = _build_issue_twin_targets(book_df, twin_lookup)
+    folder_book_df = _expand_twin_folder_rows(book_df, twin_lookup, "Issue Id")
+    folder_down_time_df = _expand_twin_folder_rows(
+        down_time_df,
+        twin_lookup,
+        "IssueID",
+        issue_twin_targets,
+    )
+    folder_day_df = calculate_folder_day_metrics(folder_book_df, folder_down_time_df)
+    tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df, uv_tower_lookup)
     daily_df = calculate_daily_metrics(folder_day_df)
 
     return {
@@ -1308,25 +1670,12 @@ def _has_capacity_keys(df: pd.DataFrame) -> pd.Series:
 
 def _aggregate_down_time_by_capacity_unit(book_df: pd.DataFrame, down_time_df: pd.DataFrame) -> pd.DataFrame:
     keys = ["Run Date", "Machine", "Folder"]
-    down_rows = down_time_df[_has_capacity_keys(down_time_df)].copy()
+    down_rows = _drop_reflong_down_time_rows(down_time_df[_has_capacity_keys(down_time_df)]).copy()
 
     if down_rows.empty:
         return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
 
-    issue_reflong_lookup = (
-        book_df[book_df["Issue Id"].ne("")]
-        .assign(reflong_yes=book_df["Reflong"].apply(lambda value: value.strip().casefold() == "yes"))
-        .groupby("Issue Id")["reflong_yes"]
-        .any()
-        .to_dict()
-    )
-
-    down_rows["book_reflong_yes"] = down_rows["IssueID"].map(issue_reflong_lookup).fillna(False)
-    down_rows["related_starts_reflong"] = down_rows["Related"].str.casefold().str.startswith("reflong")
-    down_rows["reflong_related_downtime"] = down_rows["Total Downtime"].where(
-        down_rows["book_reflong_yes"] & down_rows["related_starts_reflong"],
-        0.0,
-    )
+    down_rows["reflong_related_downtime"] = 0.0
 
     return (
         down_rows.groupby(keys, dropna=False)
@@ -1502,6 +1851,20 @@ def _clean_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _canonical_text(value: Any) -> str:
+    return " ".join(_clean_text(value).split()).casefold()
+
+
+def _canonical_tower_name(value: Any) -> str:
+    text = re.sub(r"[^a-z0-9]+", "", _clean_text(value).casefold())
+    match = re.fullmatch(r"([a-z]+)0*(\d+)", text)
+
+    if match:
+        return f"{match.group(1)}{int(match.group(2))}"
+
+    return text
+
+
 def _build_issue_tower_lookup(general_df: pd.DataFrame) -> dict[str, list[str]]:
     lookup: dict[str, list[str]] = {}
 
@@ -1582,6 +1945,7 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
     renamed = folder_day_df.rename(
         columns={
             REPORT_DATE_COLUMN: "run_date",
+            "Plant Name": "plant_name",
             "Machine": "machine",
             "Folder": "folder",
         }
@@ -1595,6 +1959,7 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
         renamed[
             [
                 "run_date",
+                "plant_name",
                 "folder",
                 "available_capacity",
                 "gross_runtime",
@@ -1609,6 +1974,8 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "reflong_related_downtime",
                 "late_start_time",
                 "runtime_segments",
+                "twin_folder_mode",
+                "twin_folder_group",
             ]
         ]
     )
@@ -1621,12 +1988,15 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
     renamed = tower_day_df.rename(
         columns={
             REPORT_DATE_COLUMN: "run_date",
+            "Plant Name": "plant_name",
             "Machine": "machine",
+            "Folder": "folder",
             "Tower": "tower",
         }
     ).copy()
 
     renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
+    renamed["folder"] = renamed["machine"] + "\n" + renamed["folder"]
     # Combine machine and tower into a single tower identifier with newline for better display
     renamed["tower"] = renamed["machine"] + "\n" + renamed["tower"]
 
@@ -1634,6 +2004,8 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
         renamed[
             [
                 "run_date",
+                "plant_name",
+                "folder",
                 "tower",
                 "available_capacity",
                 "gross_runtime",
@@ -1645,6 +2017,7 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "late_start_time",
                 "buffer_time",
                 "runtime_segments",
+                "uv_tower",
             ]
         ]
     )
@@ -1655,7 +2028,7 @@ def _rounded_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     for record in df.to_dict(orient="records"):
         records.append(
             {
-                key: _clean_number(value) if isinstance(value, Real) else value
+                key: _clean_number(value) if isinstance(value, Real) and not isinstance(value, bool) else value
                 for key, value in record.items()
             }
         )
@@ -1666,6 +2039,7 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
             REPORT_DATE_COLUMN,
+            "Plant Name",
             "Machine",
             "Folder",
             "available_capacity",
@@ -1681,6 +2055,8 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
             "reflong_related_downtime",
             "late_start_time",
             "runtime_segments",
+            "twin_folder_mode",
+            "twin_folder_group",
         ]
     )
 
@@ -1696,6 +2072,7 @@ def _empty_daily_metrics() -> pd.DataFrame:
             "lost_time",
             "downtime",
             "buffer_time",
+            "idle_time",
             "utilization_percentage",
         ]
     )

@@ -86,6 +86,10 @@ def _build_deterministic_intelligence(
             "total_available_capacity": _clean_number(summary.get("total_available_capacity")),
             "total_runtime": _clean_number(summary.get("total_runtime")),
             "total_lost_time": _clean_number(summary.get("total_lost_time")),
+            "total_spare_time": _clean_number(summary.get("total_buffer_time")),
+            "total_idle_time": _clean_number(summary.get("total_idle_time")),
+            "spare_capacity_percentage": _clean_number(summary.get("spare_capacity_percentage")),
+            "idle_capacity_percentage": _clean_number(summary.get("idle_capacity_percentage")),
             "average_speed_cph": complexity_speed["overall"]["average_speed_cph"],
             "simple_speed_cph": complexity_speed["overall"]["simple_speed_cph"],
             "complex_speed_cph": complexity_speed["overall"]["complex_speed_cph"],
@@ -289,9 +293,12 @@ def _build_folder_utilization_analysis(
         runtime = sum(_number(row.get("runtime")) for row in rows)
         lost_time = sum(_number(row.get("lost_time")) for row in rows)
         downtime = sum(_number(row.get("downtime")) for row in rows)
-        buffer_time = max(possible_capacity - runtime - lost_time - downtime, 0)
+        buffer_time = sum(_number(row.get("buffer_time")) for row in rows)
+        if buffer_time <= 0 and rows:
+            buffer_time = max(active_capacity - runtime - lost_time - downtime, 0)
         active_days = len({row.get("run_date") for row in rows if row.get("run_date")})
         idle_days = max(production_days - active_days, 0)
+        idle_time = max(possible_capacity - active_capacity, 0)
         daily_runtime_percentages = _daily_folder_runtime_percentages(rows, dates)
         variability = pstdev(daily_runtime_percentages) if len(daily_runtime_percentages) > 1 else 0.0
         utilization = _percentage(runtime, possible_capacity)
@@ -307,6 +314,7 @@ def _build_folder_utilization_analysis(
                 "lost_time_minutes": _clean_number(lost_time),
                 "downtime_minutes": _clean_number(downtime),
                 "buffer_time_minutes": _clean_number(buffer_time),
+                "idle_time_minutes": _clean_number(idle_time),
                 "possible_capacity_minutes": _clean_number(possible_capacity),
                 "active_capacity_minutes": _clean_number(active_capacity),
                 "utilization_percentage": utilization,
@@ -507,6 +515,7 @@ def _build_llm_summary(intelligence: dict[str, Any]) -> tuple[dict[str, Any], di
                 "and GNP Complex is the complex variant within GNP. Focus only on interesting, non-obvious executive insights: "
                 "complexity impact on machine/folder speed, high-level folder utilization comparison, and meaningful loss-time drivers. "
                 "Avoid redundant threshold-style statements. Return concise JSON with keys: headline, key_summary_points, recommended_actions. "
+                "Treat spare time and idle time as separate facts; spare is active-folder remaining time, idle is unscheduled capacity. "
                 "key_summary_points and recommended_actions must be arrays of short, concrete strings."
             ),
         },

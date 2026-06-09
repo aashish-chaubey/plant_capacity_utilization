@@ -97,6 +97,11 @@ Required `Book Wise Details` columns:
 - `Issue Id`
 - `Run Date`
 
+Optional `Book Wise Details` columns used for twin folder mode:
+
+- `Production Type`
+- `Plant Name`
+
 Required `Down Time` columns:
 
 - `IssueID`
@@ -122,6 +127,8 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
 - `Run Date` is still parsed and required for compatibility with the report format, but dashboard grouping is based on `Issue Date`.
 - A capacity unit is one unique `Issue Date + Machine + Folder`.
 - A folder is active on a day if it has at least one print interval overlapping `Issue Date` 00:00-04:00.
+- Rows with `Production Type = >||>` are treated as twin folder runs when their plant, machine, and folder match `backend/twin_folder.json` or `backend/twin_folders.json`.
+- In twin folder mode, the configured companion folder receives a copied row before folder capacity is calculated, so both folders share the same runtime, downtime, waiting, reflong, loss, and spare-time treatment.
 - Each active capacity unit has `240` available minutes for the fixed `00:00-04:00` window.
 - Daily plant capacity uses the maximum active folder count observed for that plant/report. For example, if the plant reaches 5 active folders on any day, every daily bar uses `5 * 240 = 1200` available minutes.
 - Runtime is calculated from merged print intervals inside the 00:00-04:00 window, so overlapping or duplicate edition rows are not double counted.
@@ -132,7 +139,8 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
   - the matched book-wise row has `Reflong = Yes`
   - `Down Time`.`Related` starts with `Reflong`, case-insensitive
 - Late start is calculated per capacity unit from expected `00:00` to the earliest parsed print start time, capped at `240` minutes.
-- Spare time is returned as `buffer_time` in the API. Per active folder it is calculated as `240 - runtime - lost_time - downtime`, floored at `0`; daily spare time also includes full 240-minute spare capacity for any plant-capacity folder that was not active that day.
+- Spare time is returned as `buffer_time` in the API. Per active folder it is calculated as `240 - runtime - lost_time - downtime`, floored at `0`.
+- Idle time is returned separately as `idle_time`. It is unused plant-capacity window time from folders that were not scheduled on that day, and is not added to spare time.
 - Average utilization is weighted: `total_runtime / total_available_capacity * 100`.
 
 ## Calculation Workflow
@@ -145,6 +153,7 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
 4. `Start DateTime` and `End DateTime` are built from the parsed start/end date and time fields.
 5. `Report Date` is set from `Issue Date`. All dashboard grouping uses `Issue Date`, not `Run Date`.
 6. Machine, folder, issue id, reflong, downtime, and runtime fields are normalized for calculation.
+7. Plant name and production type are normalized so twin folder mode can be matched against the local twin-folder mapping.
 
 ### 2. Print window filtering
 
@@ -160,6 +169,7 @@ Extra sheets and columns are ignored. Column names are matched after trimming wh
 1. One folder-day capacity unit is one unique `Issue Date + Machine + Folder`.
 2. Each active folder-day has `240` available minutes.
 3. Active folder-days are derived only after the print-window filter, so a folder is active only if it prints inside `00:00-04:00`.
+4. For configured `>||>` twin folder rows, the source folder row is copied to each configured companion folder before active folder-days are derived.
 
 ### 4. Runtime calculation
 
@@ -217,7 +227,7 @@ runtime + downtime + lost_time + spare_time = 240
 2. Daily runtime, downtime, lost time, and spare time are summed from folder-day rows.
 3. The plant's daily capacity uses the maximum active folder count seen in the report.
 4. Example: if any day reaches 5 active folders, every day uses `5 * 240 = 1200` available minutes.
-5. If a day uses fewer than the plant maximum folder count, each unused folder contributes `240` spare minutes to that day.
+5. If a day uses fewer than the plant maximum folder count, each unused folder contributes `240` idle minutes to that day.
 6. Daily utilization is:
 
 ```text
@@ -255,7 +265,10 @@ runtime / available_capacity * 100
     "total_lost_time": 900,
     "total_downtime": 300,
     "total_buffer_time": 1700,
+    "total_idle_time": 480,
     "average_utilization_percentage": 59.72,
+    "spare_capacity_percentage": 23.61,
+    "idle_capacity_percentage": 6.67,
     "active_folder_days": 30
   },
   "daily": [
@@ -267,7 +280,8 @@ runtime / available_capacity * 100
       "runtime": 185,
       "lost_time": 40,
       "downtime": 6,
-      "buffer_time": 969,
+      "buffer_time": 489,
+      "idle_time": 480,
       "utilization_percentage": 15.42
     }
   ],

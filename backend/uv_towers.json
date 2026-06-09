@@ -1,0 +1,51 @@
+{
+  "Sahibabad": {
+    "Colorman-C": ["PU-5"],
+    "Colorman-D": ["PU-5"],
+    "Geoman-B": ["PU-4"],
+    "Geoman-A": ["PU-2"]
+  },
+  "Bommasandra": {
+    "Regioman-A": ["PU-05"],
+    "Regioman-B": ["PU-13"]
+  },
+  "Kandivali": {
+    "Colorman-D": ["PU-5"],
+    "Colorman-B": ["PU-5"],
+    "Hiline-2": ["T-24"]
+  },
+  "Nacharam": {
+    "Hiline-2": ["T-04"],
+    "Hiline-1": ["T4"],
+    "HILINE45": ["T4"]
+  },
+  "Airoli": {
+    "Colorman-B": ["PU-15"],
+    "Colorman-A": ["PU-5"],
+    "Cromoman-C": ["PU-24"]
+  },
+  "Chemmencherry": {
+    "Regioman": ["PU-05", "PU-01"]
+  },
+  "Vejalpur": {
+    "Hiline": ["Tower-4"],
+    "Cityline-1": ["T4"]
+  },
+  "Bhosari": {
+    "Regioman": ["PU-31", "PU-35"]
+  },
+  "Manesar": {
+    "TKS1": ["T-1"]
+  },
+  "Chinhat": {
+    "Hiline-1": ["T4"],
+    "Hiline-2": ["T4"]
+  },
+  "Saltlake": {
+    "Regioman": ["PU-1"],
+    "Cromoman": ["PU-34"]
+  },
+  "Trivandrum": {
+    "Citiline": ["T4"]
+  }
+}

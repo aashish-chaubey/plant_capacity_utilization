@@ -208,9 +208,9 @@ function formatImpact(value) {
 
 function formatSpeed(value) {
   const speed = Number(value || 0);
-  if (speed <= 0) return "0 cph";
-  if (speed >= 1000) return `${formatNumber(speed / 1000)}k cph`;
-  return `${formatNumber(speed)} cph`;
+  if (speed <= 0) return "0 CPH";
+  if (speed >= 1000) return `${formatNumber(speed / 1000)}k CPH`;
+  return `${formatNumber(speed)} CPH`;
 }
 
 function formatNumber(value) {

@@ -8,6 +8,7 @@ dist/
 .vite/
 
 .DS_Store
+data/
 data/~$*.xlsx
 
 # Ignore Jupyter Notebook checkpoints
