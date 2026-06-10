@@ -11,6 +11,8 @@ import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import CapacityIntelligenceWidget from "./CapacityIntelligenceWidget.jsx";
+import DelayedPrintFinishWidget from "./DelayedPrintFinishWidget.jsx";
+import LossTimeThresholdWidget from "./LossTimeThresholdWidget.jsx";
 import KpiCard from "./KpiCard.jsx";
 
 const CAPACITY_WINDOW_MINUTES = 240;
@@ -34,7 +36,7 @@ const CAPACITY_SPLIT_LEGEND = [
   { key: "runtime_gnp", label: "Run Time: GNP", color: "#88AA88" },
   { key: "complex_prints", label: "Complex prints", marker: "triangle" },
   { key: "spare_time", label: "Spare Time", color: CAPACITY_SPLIT_COLORS.spare_time },
-  { key: "idle_time", label: "Idle (not scheduled)", color: CAPACITY_SPLIT_COLORS.idle_time, pattern: "idle" }
+  { key: "idle_time", label: "Unplanned Time", color: CAPACITY_SPLIT_COLORS.idle_time, pattern: "idle" }
 ];
 
 const RUNTIME_SEGMENT_STYLES = {
@@ -107,10 +109,20 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
 
   const breakdownProductionDays = focusedDay ? 1 : data.daily.length;
 
-  const towerBreakdown = useMemo(
-    () => aggregateResourceCapacitySplit(breakdownTowerDetails, "tower", breakdownProductionDays),
-    [breakdownTowerDetails, breakdownProductionDays]
-  );
+  const towerBreakdown = useMemo(() => {
+    const rows = aggregateResourceCapacitySplit(breakdownTowerDetails, "tower", breakdownProductionDays);
+    return rows.map((row) => {
+      if (row.uv_tower) return row;
+      // GNP production runs only on UV towers — absorb GNP minutes into SNP for non-UV rows
+      return {
+        ...row,
+        runtime_snp: row.runtime_snp + row.runtime_gnp,
+        runtime_snp_percentage: cleanNumber((row.runtime_snp_percentage || 0) + (row.runtime_gnp_percentage || 0)),
+        runtime_gnp: 0,
+        runtime_gnp_percentage: 0,
+      };
+    });
+  }, [breakdownTowerDetails, breakdownProductionDays]);
   const folderBreakdown = useMemo(
     () => aggregateResourceCapacitySplit(breakdownDetails, "folder", breakdownProductionDays),
     [breakdownDetails, breakdownProductionDays]
@@ -139,18 +151,18 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
   }
 
   const kpis = [
-    ["Total Available Capacity", formatMinutes(data.summary.total_available_capacity), "blue"],
-    ["Total Runtime", formatMinutes(data.summary.total_runtime), "green"],
-    ["Total Lost Time", formatMinutes(data.summary.total_lost_time), "amber"],
-    ["Total Downtime", formatMinutes(data.summary.total_downtime), "red"],
-    ["Total Spare Time", formatMinutes(data.summary.total_buffer_time), "slate"],
-    ["Total Idle Time", formatMinutes(data.summary.total_idle_time), "slate"],
+    ["Available Time", formatMinutes(data.summary.total_available_capacity), "blue"],
+    ["Unplanned Time", formatMinutes(data.summary.total_idle_time), "slate"],
+    ["Runtime", formatMinutes(data.summary.total_runtime), "green"],
+    ["Lost Time", formatMinutes(data.summary.total_lost_time), "amber"],
+    ["Downtime", formatMinutes(data.summary.total_downtime), "red"],
+    ["Spare Time", formatMinutes(data.summary.total_buffer_time), "slate"],
     [
       "Spare Capacity",
       formatPercent(data.summary.spare_capacity_percentage ?? calculatePercentage(data.summary.total_buffer_time, data.summary.total_available_capacity)),
       "slate"
     ],
-    ["Active Folders", `${formatNumber(data.summary.active_folder_days)}/${formatNumber(totalActiveFolderCapacity)}`, "slate"]
+    ["Folder-Nights", `${formatNumber(data.summary.active_folder_days)}/${formatNumber(totalActiveFolderCapacity)}`, "slate"]
   ];
 
   return (
@@ -237,6 +249,10 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
         loading={intelligenceLoading}
         error={intelligenceError}
       />
+
+      <LossTimeThresholdWidget details={data.details} />
+
+      <DelayedPrintFinishWidget details={data.details} />
     </div>
   );
 }
@@ -973,11 +989,13 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
           value={`${formatMinutes(row.runtime_snp)} (${formatPercent(row.runtime_snp_percentage)})`}
           color={RUNTIME_SEGMENT_STYLES.snp.color}
         />
-        <TooltipRow
-          label="Run Time: GNP"
-          value={`${formatMinutes(row.runtime_gnp)} (${formatPercent(row.runtime_gnp_percentage)})`}
-          color={RUNTIME_SEGMENT_STYLES.gnp.color}
-        />
+        {row.runtime_gnp > 0 && (
+          <TooltipRow
+            label="Run Time: GNP"
+            value={`${formatMinutes(row.runtime_gnp)} (${formatPercent(row.runtime_gnp_percentage)})`}
+            color={RUNTIME_SEGMENT_STYLES.gnp.color}
+          />
+        )}
         <TooltipRow
           label="Downtime / breakdown"
           value={`${formatMinutes(row.downtime)} (${formatPercent(row.downtime_percentage)})`}
@@ -1250,7 +1268,7 @@ function buildCapacitySegments(values) {
     },
     {
       key: "idle_time",
-      label: "Idle (not scheduled)",
+      label: "Unplanned Time",
       value: values.idle_time,
       color: CAPACITY_SPLIT_COLORS.idle_time
     }

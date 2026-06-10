@@ -518,6 +518,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
         "waiting_time",
         "change_over_time",
         "natural_buffer_time",
+        "overrun_minutes",
         "total_downtime",
         "reflong_related_downtime",
     ]
@@ -586,6 +587,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
             "waiting_time",
             "reflong_related_downtime",
             "late_start_time",
+            "overrun_minutes",
             "runtime_segments",
             "twin_folder_mode",
             "twin_folder_group",
@@ -905,6 +907,7 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                     "waiting_time": 0.0,
                     "change_over_time": 0.0,
                     "natural_buffer_time": CAPACITY_MINUTES_PER_FOLDER_DAY,
+                    "overrun_minutes": 0.0,
                 }
             )
             continue
@@ -940,6 +943,17 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             0.0,
         )
 
+        # Actual (unclipped) last End DateTime to detect whether printing crossed 04:00.
+        actual_end_times = [
+            pd.Timestamp(value)
+            for value in group["End DateTime"]
+            if pd.notna(value)
+        ]
+        overrun_minutes = 0.0
+        if actual_end_times:
+            actual_last_end = max(actual_end_times)
+            overrun_minutes = max((actual_last_end - pd.Timestamp(window_end)).total_seconds() / 60, 0.0)
+
         gross_runtime = min(max(gross_runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         scheduled_runtime = max(scheduled_runtime, 0.0)
         overlap_minutes = max(scheduled_runtime - gross_runtime, 0.0)
@@ -963,6 +977,7 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                 "waiting_time": waiting_time,
                 "change_over_time": adjusted_change_over,
                 "natural_buffer_time": natural_buffer_time,
+                "overrun_minutes": overrun_minutes,
             }
         )
 
@@ -1977,6 +1992,7 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "waiting_time",
                 "reflong_related_downtime",
                 "late_start_time",
+                "overrun_minutes",
                 "runtime_segments",
                 "twin_folder_mode",
                 "twin_folder_group",
