@@ -1,9 +1,9 @@
-import { AlertCircle, BarChart2, FileSpreadsheet, Loader2, RotateCcw, UploadCloud, X } from "lucide-react";
+import { AlertCircle, BarChart2, Check, ChevronDown, FileSpreadsheet, Loader2, RotateCcw, UploadCloud, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import Dashboard from "./components/Dashboard.jsx";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const PERIOD_MODES = ["annual", "half", "quarter", "month"];
 const MODE_LABELS = {
   annual: "Annual",
@@ -19,8 +19,34 @@ const TIMEFRAME_TABS = [
   ["custom", "Custom"]
 ];
 
+function normalizeApiBaseUrl(value) {
+  return String(value || "").replace(/\/+$/, "");
+}
+
+async function readApiError(response, fallbackMessage) {
+  try {
+    const payload = await response.clone().json();
+    const details = Array.isArray(payload?.errors)
+      ? payload.errors.filter(Boolean).join(" ")
+      : payload?.detail || payload?.message;
+    if (details) return `${fallbackMessage}: ${details}`;
+  } catch {
+    // Fall through to text parsing.
+  }
+
+  try {
+    const text = (await response.text()).trim();
+    if (text) return `${fallbackMessage}: ${text.slice(0, 300)}`;
+  } catch {
+    // Fall through to the default message.
+  }
+
+  return fallbackMessage;
+}
+
 export default function App() {
   const fileInputRef = useRef(null);
+  const folderMenuRef = useRef(null);
   const [result, setResult] = useState(null);
   const [errors, setErrors] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -31,6 +57,7 @@ export default function App() {
   const [timeframe, setTimeframe] = useState(createDefaultTimeframe);
   const [selectedPlant, setSelectedPlant] = useState("");
   const [selectedFolders, setSelectedFolders] = useState([]);
+  const [folderMenuOpen, setFolderMenuOpen] = useState(false);
 
   const plantOptions = useMemo(() => buildPlantOptions(result), [result]);
   const folderOptions = useMemo(
@@ -64,6 +91,26 @@ export default function App() {
       return current.filter((folder) => validFolders.has(folder));
     });
   }, [folderOptions]);
+
+  useEffect(() => {
+    if (!folderMenuOpen) return undefined;
+
+    function handlePointerDown(event) {
+      if (folderMenuRef.current?.contains(event.target)) return;
+      setFolderMenuOpen(false);
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape") setFolderMenuOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [folderMenuOpen]);
 
   useEffect(() => {
     if (!scopedResult?.daily?.length) return;
@@ -123,7 +170,9 @@ export default function App() {
           }),
           signal: controller.signal
         });
-        if (!response.ok) throw new Error(`Intelligence failed with status ${response.status}`);
+        if (!response.ok) {
+          throw new Error(await readApiError(response, `Intelligence failed with status ${response.status}`));
+        }
         const payload = await response.json();
         if (!payload.valid) throw new Error(payload.errors?.[0] || "Intelligence generation failed.");
         setIntelligence(payload.intelligence);
@@ -160,7 +209,9 @@ export default function App() {
         method: "POST",
         body: formData
       });
-      if (!response.ok) throw new Error(`Upload failed with status ${response.status}`);
+      if (!response.ok) {
+        throw new Error(await readApiError(response, `Upload failed with status ${response.status}`));
+      }
       const payload = await response.json();
       if (!payload.valid) {
         setResult(null);
@@ -201,6 +252,7 @@ export default function App() {
   function handlePlantChange(plantName) {
     setSelectedPlant(plantName);
     setSelectedFolders([]);
+    setFolderMenuOpen(false);
     setTimeframe(createDefaultTimeframe());
   }
 
@@ -215,10 +267,12 @@ export default function App() {
 
   function handleClearFolders() {
     setSelectedFolders([]);
+    setFolderMenuOpen(false);
     setTimeframe(createDefaultTimeframe());
   }
 
   const showControlStrip = Boolean(result && selectedPlant);
+  const folderSelectionLabel = formatFolderSelectionLabel(selectedFolders);
 
   return (
     <div className="min-h-screen bg-[#f6f8fb] text-slate-900">
@@ -296,40 +350,81 @@ export default function App() {
               )}
 
               {/* ── Folders ── */}
-              <div className="flex min-w-0 flex-1 items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+              <div
+                ref={folderMenuRef}
+                className="relative flex min-w-[220px] shrink-0 items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"
+              >
                 <span className="shrink-0 pt-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
                   Folders
                 </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {folderOptions.map((option) => {
-                    const active = selectedFolders.includes(option.value);
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        onClick={() => handleFolderToggle(option.value)}
-                        className={`h-8 rounded-full border px-3 text-xs font-semibold transition ${
-                          active
-                            ? "border-blue-500 bg-blue-600 text-white shadow-sm"
-                            : "border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                {selectedFolders.length === 0 ? (
-                  <span className="shrink-0 pt-1 text-xs text-slate-400">All</span>
-                ) : (
+                <button
+                  type="button"
+                  onClick={() => setFolderMenuOpen((open) => !open)}
+                  className="flex h-8 w-[180px] items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-2.5 text-left text-sm font-semibold text-slate-800 outline-none transition hover:border-blue-200 hover:bg-blue-50 focus:border-blue-400 focus:ring-1 focus:ring-blue-200"
+                  aria-haspopup="listbox"
+                  aria-expanded={folderMenuOpen}
+                >
+                  <span className="min-w-0 truncate">{folderSelectionLabel}</span>
+                  <ChevronDown
+                    className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition ${folderMenuOpen ? "rotate-180" : ""}`}
+                    aria-hidden="true"
+                  />
+                </button>
+                {selectedFolders.length > 0 && (
                   <button
                     type="button"
                     onClick={handleClearFolders}
-                    className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-red-50 hover:text-red-500"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-500"
                     title="Clear folder filter"
                   >
                     <X className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
+                )}
+                {folderMenuOpen && (
+                  <div className="absolute left-0 top-[calc(100%+6px)] z-40 w-[300px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg">
+                    <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
+                      <span className="text-xs font-semibold text-slate-500">
+                        {selectedFolders.length === 0
+                          ? "All folders selected"
+                          : `${selectedFolders.length} of ${folderOptions.length} selected`}
+                      </span>
+                      {selectedFolders.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleClearFolders}
+                          className="text-xs font-semibold text-blue-600 transition hover:text-blue-700"
+                        >
+                          Select all
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-64 overflow-y-auto py-1" role="listbox" aria-multiselectable="true">
+                      {folderOptions.map((option) => {
+                        const active = selectedFolders.includes(option.value);
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => handleFolderToggle(option.value)}
+                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition ${
+                              active
+                                ? "bg-blue-50 text-blue-700"
+                                : "text-slate-700 hover:bg-slate-50"
+                            }`}
+                            role="option"
+                            aria-selected={active}
+                          >
+                            <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                              active ? "border-blue-600 bg-blue-600" : "border-slate-300 bg-white"
+                            }`}>
+                              {active && <Check className="h-3 w-3 text-white" aria-hidden="true" />}
+                            </span>
+                            <span className="min-w-0 truncate">{option.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -746,6 +841,12 @@ function isDateInRange(value, range) {
 
 function formatResourceLabel(value) {
   return String(value || "").split("\n").map((part) => part.trim()).filter(Boolean).join(" / ");
+}
+
+function formatFolderSelectionLabel(selectedFolders) {
+  if (selectedFolders.length === 0) return "All folders";
+  if (selectedFolders.length === 1) return formatResourceLabel(selectedFolders[0]);
+  return `${selectedFolders.length} selected`;
 }
 
 function sumBy(rows, key) {

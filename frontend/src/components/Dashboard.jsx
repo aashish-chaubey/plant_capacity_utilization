@@ -11,7 +11,6 @@ import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import CapacityIntelligenceWidget from "./CapacityIntelligenceWidget.jsx";
-import DelayedPrintFinishWidget from "./DelayedPrintFinishWidget.jsx";
 import LossTimeThresholdWidget from "./LossTimeThresholdWidget.jsx";
 import KpiCard from "./KpiCard.jsx";
 
@@ -255,7 +254,6 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
       />
 
       <LossTimeThresholdWidget details={data.details} />
-      <DelayedPrintFinishWidget details={data.details} />
     </div>
   );
 }

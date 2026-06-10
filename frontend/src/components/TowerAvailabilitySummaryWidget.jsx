@@ -1,9 +1,6 @@
 import { useMemo } from "react";
 import { RadioTower } from "lucide-react";
 
-const CAPACITY_WINDOW_MINUTES = 240;
-const AVAILABILITY_THRESHOLDS = [70, 80, 90, 100];
-
 export default function TowerAvailabilitySummaryWidget({ towerDetails, daily }) {
   const summary = useMemo(
     () => buildTowerAvailabilitySummary(towerDetails || [], daily || []),
@@ -42,9 +39,9 @@ export default function TowerAvailabilitySummaryWidget({ towerDetails, daily }) 
             </thead>
             <tbody className="divide-y divide-slate-50 bg-white">
               {summary.thresholdRows.map((row) => (
-                <tr key={row.threshold}>
+                <tr key={row.towerCount}>
                   <td className="px-3 py-2 font-medium text-slate-800">
-                    {row.threshold}% towers active
+                    At least {formatNumber(row.towerCount)} of {formatNumber(summary.totalTowers)} towers
                   </td>
                   <td className="px-3 py-2 text-slate-700">
                     {formatNumber(row.days)} / {formatNumber(summary.totalDays)}
@@ -68,15 +65,11 @@ export default function TowerAvailabilitySummaryWidget({ towerDetails, daily }) 
           </table>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+        <div className="grid gap-2">
           <TowerMetric
-            label="Median tower utilization"
-            value={formatPercent(summary.medianUtilization)}
-          />
-          <TowerMetric
-            label="Lowest tower utilization"
-            value={formatPercent(summary.lowestUtilization)}
-            detail={summary.lowestTower}
+            label="Minimum operational towers"
+            value={`${formatNumber(summary.minimumActiveTowers)} / ${formatNumber(summary.totalTowers)}`}
+            detail="Lowest active tower count on any selected day"
           />
         </div>
       </div>
@@ -94,8 +87,8 @@ function TowerMetric({ label, value, detail }) {
         {value}
       </div>
       {detail && (
-        <div className="mt-0.5 truncate text-xs font-medium text-slate-500" title={detail}>
-          {formatTowerName(detail)}
+        <div className="mt-0.5 text-xs font-medium text-slate-500" title={detail}>
+          {detail}
         </div>
       )}
     </div>
@@ -113,7 +106,6 @@ function buildTowerAvailabilitySummary(towerDetails, dailyRows) {
   )).sort((first, second) => String(first).localeCompare(String(second)));
   const totalTowers = towers.length;
   const activeTowersByDay = new Map();
-  const towerDayEngaged = new Map();
 
   for (const row of towerDetails) {
     if (!row.run_date || !daySet.has(row.run_date) || !row.tower) continue;
@@ -121,53 +113,50 @@ function buildTowerAvailabilitySummary(towerDetails, dailyRows) {
     const activeSet = activeTowersByDay.get(row.run_date) || new Set();
     activeSet.add(row.tower);
     activeTowersByDay.set(row.run_date, activeSet);
-
-    const towerDayKey = `${row.tower}||${row.run_date}`;
-    const engagedMinutes = calculateTowerEngagedMinutes(row);
-    towerDayEngaged.set(
-      towerDayKey,
-      Math.min((towerDayEngaged.get(towerDayKey) || 0) + engagedMinutes, CAPACITY_WINDOW_MINUTES)
-    );
   }
 
-  const availabilityByDay = days.map((day) => {
-    const activeCount = activeTowersByDay.get(day)?.size || 0;
-    return totalTowers > 0 ? (activeCount / totalTowers) * 100 : 0;
-  });
-  const thresholdRows = AVAILABILITY_THRESHOLDS.map((threshold) => {
-    const daysAtThreshold = availabilityByDay.filter((value) =>
-      threshold === 100 ? value >= 99.999 : value >= threshold
-    ).length;
+  const activeCountsByDay = days.map((day) => activeTowersByDay.get(day)?.size || 0);
+  const minimumActiveTowers = activeCountsByDay.length > 0
+    ? Math.min(...activeCountsByDay)
+    : 0;
+  const thresholds = buildDynamicTowerThresholds(minimumActiveTowers, totalTowers);
+  const thresholdRows = thresholds.map((towerCount) => {
+    const daysAtThreshold = activeCountsByDay.filter((activeCount) => activeCount >= towerCount).length;
 
     return {
-      threshold,
+      towerCount,
       days: daysAtThreshold,
       share: totalDays > 0 ? (daysAtThreshold / totalDays) * 100 : 0,
     };
-  });
-  const utilizationRows = towers.map((tower) => {
-    const engaged = days.reduce(
-      (sum, day) => sum + (towerDayEngaged.get(`${tower}||${day}`) || 0),
-      0
-    );
-    const utilization = totalDays > 0
-      ? (engaged / (totalDays * CAPACITY_WINDOW_MINUTES)) * 100
-      : 0;
-
-    return { tower, utilization };
-  }).sort((first, second) => {
-    if (first.utilization !== second.utilization) return first.utilization - second.utilization;
-    return String(first.tower).localeCompare(String(second.tower));
   });
 
   return {
     totalDays,
     totalTowers,
+    minimumActiveTowers,
     thresholdRows,
-    medianUtilization: median(utilizationRows.map((row) => row.utilization)),
-    lowestUtilization: utilizationRows[0]?.utilization || 0,
-    lowestTower: utilizationRows[0]?.tower || "",
   };
+}
+
+function buildDynamicTowerThresholds(minimumActiveTowers, totalTowers) {
+  if (totalTowers <= 0) return [];
+
+  const lower = Math.min(Math.max(Math.ceil(minimumActiveTowers), 1), totalTowers);
+  const availableThresholdCount = totalTowers - lower;
+  if (availableThresholdCount <= 0) return [];
+
+  if (availableThresholdCount <= 4) {
+    return Array.from(
+      { length: availableThresholdCount },
+      (_, index) => lower + index + 1
+    );
+  }
+
+  return Array.from(new Set(
+    [1, 2, 3, 4].map((step) =>
+      Math.min(totalTowers, lower + Math.ceil((availableThresholdCount * step) / 4))
+    )
+  ));
 }
 
 function getSelectedDays(towerDetails, dailyRows) {
@@ -184,50 +173,6 @@ function getSelectedDays(towerDetails, dailyRows) {
       .map((row) => row.run_date)
       .filter(Boolean)
   )).sort();
-}
-
-function calculateTowerEngagedMinutes(row) {
-  const available = positiveNumber(row.available_capacity) || CAPACITY_WINDOW_MINUTES;
-  const buffer = positiveNumber(row.buffer_time);
-
-  if (buffer > 0 || available > 0) {
-    return Math.min(Math.max(available - buffer, 0), CAPACITY_WINDOW_MINUTES);
-  }
-
-  return Math.min(
-    positiveNumber(row.runtime)
-    + positiveNumber(row.downtime)
-    + positiveNumber(row.waiting_time)
-    + positiveNumber(row.change_over_time)
-    + positiveNumber(row.reflong_related_downtime)
-    + positiveNumber(row.late_start_time),
-    CAPACITY_WINDOW_MINUTES
-  );
-}
-
-function median(values) {
-  const sorted = values
-    .map((value) => Number(value || 0))
-    .sort((first, second) => first - second);
-
-  if (sorted.length === 0) return 0;
-
-  const middle = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 1) return sorted[middle];
-
-  return (sorted[middle - 1] + sorted[middle]) / 2;
-}
-
-function positiveNumber(value) {
-  return Math.max(Number(value || 0), 0);
-}
-
-function formatTowerName(value) {
-  return String(value || "")
-    .split("\n")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join(" / ");
 }
 
 function formatNumber(value) {
