@@ -74,6 +74,14 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
         pd.Series("", index=df.index),
     ).apply(_clean_text)
     df["Issue Id"] = df["Issue Id"].apply(_clean_text)
+    df["Edition"] = df.get(
+        "Edition",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
+    df["Product Name"] = df.get(
+        "Product Name",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
     df["Reflong"] = df["Reflong"].apply(_clean_text)
     df["Complexities"] = df.get(
         "Complexities",
@@ -483,6 +491,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     # Step 4: runtime/lost/buffer calculations use only interval rows.
     calculated_metrics = _calculate_interval_metrics_by_folder_day(interval_editions)
     runtime_segments = _calculate_runtime_segments_by_folder_day(interval_editions)
+    editions = _calculate_editions_by_folder_day(interval_editions)
     twin_folder_info = (
         interval_editions.groupby(keys, dropna=False)
         .agg(
@@ -505,6 +514,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     metrics = (
         active_units.merge(calculated_metrics, on=keys, how="left")
         .merge(runtime_segments, on=keys, how="left")
+        .merge(editions, on=keys, how="left")
         .merge(twin_folder_info, on=keys, how="left")
         .merge(down_grouped, on=keys, how="left")
     )
@@ -566,6 +576,12 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     metrics["buffer_time"] = (
         metrics["available_capacity"] - fixed_used_minutes
     ).clip(lower=0, upper=CAPACITY_MINUTES_PER_FOLDER_DAY)
+    if "editions" not in metrics:
+        metrics["editions"] = [[] for _ in range(len(metrics))]
+    else:
+        metrics["editions"] = metrics["editions"].apply(
+            lambda value: value if isinstance(value, list) else []
+        )
     metrics["twin_folder_mode"] = metrics["twin_folder_mode"].fillna(False).astype(bool)
     metrics["twin_folder_group"] = metrics["twin_folder_group"].fillna("").apply(_clean_text)
 
@@ -589,6 +605,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
             "late_start_time",
             "overrun_minutes",
             "runtime_segments",
+            "editions",
             "twin_folder_mode",
             "twin_folder_group",
         ]
@@ -1081,6 +1098,63 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
         return pd.DataFrame(columns=columns)
 
     return pd.DataFrame(segment_rows)
+
+
+def _calculate_editions_by_folder_day(book_df: pd.DataFrame) -> pd.DataFrame:
+    keys = [REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"]
+    columns = [*keys, "editions"]
+
+    if book_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    sort_columns = [
+        column
+        for column in [*keys, "Effective Start DateTime", "Effective End DateTime", "Issue Id"]
+        if column in book_df.columns
+    ]
+    df = book_df.sort_values(sort_columns).copy() if sort_columns else book_df.copy()
+    rows = []
+
+    for (report_date, plant_name, machine, folder), group in df.groupby(keys, dropna=False):
+        editions: list[str] = []
+        seen: set[str] = set()
+
+        for _, row in group.iterrows():
+            edition = _edition_display_name(row)
+            edition_key = _canonical_text(edition)
+
+            if not edition_key or edition_key in seen:
+                continue
+
+            editions.append(edition)
+            seen.add(edition_key)
+
+        rows.append(
+            {
+                REPORT_DATE_COLUMN: report_date,
+                "Plant Name": plant_name,
+                "Machine": machine,
+                "Folder": folder,
+                "editions": editions,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(rows)
+
+
+def _edition_display_name(row: pd.Series) -> str:
+    edition = _clean_text(row.get("Edition"))
+    if edition:
+        return edition
+
+    product_name = _clean_text(row.get("Product Name"))
+    if product_name:
+        return product_name
+
+    return _clean_text(row.get("Issue Id"))
 
 
 def _scale_runtime_segments(value: Any, runtime_minutes: float) -> list[dict[str, Any]]:
@@ -1994,6 +2068,7 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "late_start_time",
                 "overrun_minutes",
                 "runtime_segments",
+                "editions",
                 "twin_folder_mode",
                 "twin_folder_group",
             ]
@@ -2074,7 +2149,9 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
             "waiting_time",
             "reflong_related_downtime",
             "late_start_time",
+            "overrun_minutes",
             "runtime_segments",
+            "editions",
             "twin_folder_mode",
             "twin_folder_group",
         ]

@@ -1,228 +1,452 @@
-import { useMemo, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { useMemo } from "react";
+import { AlertTriangle } from "lucide-react";
+
+const CAUSE_ORDER = [
+  "low_speed",
+  "high_complexity",
+  "high_downtime",
+  "high_wait_time",
+  "high_lost_time",
+  "high_print_order",
+];
 
 const ROOT_CAUSE_THRESHOLDS = {
   downtime_minutes: 30,
   waiting_time_minutes: 30,
   lost_time_minutes: 40,
-  speed_below_average_pct: 25,
+  speed_loss_minutes: 10,
+  complex_minutes: 30,
   complex_share_pct: 40,
-  print_order_above_average_pct: 25,
+  print_order_minutes: 10,
 };
 
-const ROOT_CAUSE_LABELS = {
-  high_downtime: "High downtime",
-  high_wait_time: "High wait time",
-  high_lost_time: "High lost time",
-  low_speed: "Low average speed",
-  high_complexity: "High complexity",
-  high_print_order: "High print order",
+const CAUSE_META = {
+  low_speed: {
+    label: "Low average speed",
+    color: "#2563eb",
+    pill: "bg-blue-50 text-blue-700",
+  },
+  high_complexity: {
+    label: "High complexity",
+    color: "#7c3aed",
+    pill: "bg-violet-50 text-violet-700",
+  },
+  high_downtime: {
+    label: "High downtime",
+    color: "#e11d48",
+    pill: "bg-rose-50 text-rose-700",
+  },
+  high_wait_time: {
+    label: "High wait time",
+    color: "#64748b",
+    pill: "bg-slate-100 text-slate-700",
+  },
+  high_lost_time: {
+    label: "High lost time",
+    color: "#d97706",
+    pill: "bg-amber-50 text-amber-700",
+  },
+  high_print_order: {
+    label: "High Print Order",
+    color: "#ea580c",
+    pill: "bg-orange-50 text-orange-700",
+  },
 };
 
 export default function DelayedPrintFinishWidget({ details }) {
-  const [expanded, setExpanded] = useState(true);
-
-  const { breachedRows, folderBaselines } = useMemo(
-    () => buildBreachAnalysis(details || []),
+  const analysis = useMemo(
+    () => buildDelayedFinishAnalysis(details || []),
     [details]
   );
 
   if (!details || details.length === 0) return null;
-  if (breachedRows.length === 0) return null;
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white shadow-soft">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center justify-between p-3 text-left"
-      >
-        <div className="flex items-center gap-2">
-          <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-red-50 text-red-700">
-            <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-          </span>
-          <div>
-            <h2 className="text-base font-semibold text-slate-950">
-              Delayed print finish
-            </h2>
-            <p className="text-xs text-slate-500">
-              {breachedRows.length} folder-day{breachedRows.length === 1 ? "" : "s"} crossed the 04:00 AM window
-            </p>
-          </div>
+    <div className="mt-4 border-t border-slate-100 pt-4">
+      <div className="flex items-start gap-2">
+        <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-700">
+          <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+        </span>
+        <div>
+          <h3 className="text-base font-semibold text-slate-950">
+            Folderwise & Plant-Level Delayed PF
+          </h3>
+          <p className="mt-1 text-sm text-slate-500">
+            Cutoff: 04:00 AM | {formatNumber(analysis.folderBreaches.length)} breach{analysis.folderBreaches.length === 1 ? "" : "es"}
+          </p>
         </div>
-        {expanded
-          ? <ChevronUp className="h-4 w-4 text-slate-400" />
-          : <ChevronDown className="h-4 w-4 text-slate-400" />}
-      </button>
+      </div>
 
-      {expanded && (
-        <div className="border-t border-slate-100 px-3 pb-3">
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[600px] text-sm">
-              <thead>
-                <tr className="border-b border-slate-100 text-left text-xs font-semibold uppercase tracking-normal text-slate-500">
-                  <th className="pb-2 pr-4">Date</th>
-                  <th className="pb-2 pr-4">Folder</th>
-                  <th className="pb-2 pr-4 text-right">Finish time</th>
-                  <th className="pb-2 pr-4 text-right">Overrun</th>
-                  <th className="pb-2">Root cause</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-50">
-                {breachedRows.map((row) => {
-                  const baseline = folderBaselines[row.folder] || {};
-                  const causes = identifyRootCauses(row, baseline);
-                  return (
-                    <tr key={`${row.run_date}||${row.folder}`} className="align-top">
-                      <td className="py-2 pr-4 font-medium text-slate-800">
-                        {formatDate(row.run_date)}
-                      </td>
-                      <td className="py-2 pr-4 text-slate-700">
-                        {formatFolderName(row.folder)}
-                      </td>
-                      <td className="py-2 pr-4 text-right font-mono text-slate-700">
-                        {formatFinishTime(row.overrun_minutes)}
-                      </td>
-                      <td className="py-2 pr-4 text-right">
-                        <span className="inline-block rounded-md bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">
-                          +{formatMinutes(row.overrun_minutes)}
-                        </span>
-                      </td>
-                      <td className="py-2">
-                        <div className="flex flex-wrap gap-1">
-                          {causes.length > 0
-                            ? causes.map((cause) => (
-                                <CausePill key={cause} cause={cause} />
-                              ))
-                            : <span className="text-xs text-slate-400">—</span>}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+      {analysis.folderBreaches.length === 0 ? (
+        <div className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+          No delayed PF beyond 04:00 AM was found for this selection.
+        </div>
+      ) : (
+        <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+          <DelayedFinishTable rows={analysis.tableRows} />
+          <DelayCauseDonut
+            rows={analysis.causeTotals}
+            topCause={analysis.topCause}
+            delayedPlantDays={analysis.delayedPlantDays}
+          />
         </div>
       )}
-    </section>
+    </div>
   );
 }
 
-function CausePill({ cause }) {
-  const colorMap = {
-    high_downtime: "bg-pink-50 text-pink-700",
-    high_wait_time: "bg-slate-100 text-slate-700",
-    high_lost_time: "bg-amber-50 text-amber-700",
-    low_speed: "bg-blue-50 text-blue-700",
-    high_complexity: "bg-violet-50 text-violet-700",
-    high_print_order: "bg-orange-50 text-orange-700",
-  };
+function DelayCauseDonut({ rows, topCause, delayedPlantDays }) {
+  const positiveRows = rows.filter((row) => row.minutes > 0);
+  const totalMinutes = positiveRows.reduce((sum, row) => sum + row.minutes, 0);
+  const gradient = buildDonutGradient(positiveRows, totalMinutes);
+
   return (
-    <span className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium ${colorMap[cause] || "bg-slate-100 text-slate-600"}`}>
-      {ROOT_CAUSE_LABELS[cause] || cause}
+    <aside className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <h4 className="text-sm font-semibold text-slate-950">Plant-level cause mix</h4>
+        <span className="text-xs font-semibold text-slate-500">
+          {formatNumber(delayedPlantDays)} delayed day{delayedPlantDays === 1 ? "" : "s"}
+        </span>
+      </div>
+
+      <div className="mt-3 grid gap-3 md:grid-cols-[128px_minmax(0,1fr)] lg:grid-cols-1">
+        <div className="relative mx-auto h-32 w-32 shrink-0 rounded-full" style={{ background: gradient }}>
+          <div className="absolute inset-5 flex flex-col items-center justify-center rounded-full bg-white text-center shadow-inner">
+            <span className="text-[10px] font-semibold uppercase tracking-normal text-slate-500">Top</span>
+            <span className="mt-1 max-w-20 text-xs font-bold leading-4 text-slate-950">
+              {topCause ? CAUSE_META[topCause.cause].label : "NA"}
+            </span>
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          {positiveRows.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-white p-3 text-sm text-slate-500">
+              No plant-level cause mix available.
+            </div>
+          ) : positiveRows.map((row) => {
+            const meta = CAUSE_META[row.cause];
+            const percentage = totalMinutes > 0 ? (row.minutes / totalMinutes) * 100 : 0;
+
+            return (
+              <div key={row.cause} className="flex items-center justify-between gap-3 text-xs">
+                <span className="flex min-w-0 items-center gap-1.5 font-semibold text-slate-700">
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                    style={{ backgroundColor: meta.color }}
+                  />
+                  <span className="truncate">{meta.label}</span>
+                </span>
+                <span className="shrink-0 text-right font-bold text-slate-900">
+                  {formatPercent(percentage)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function buildDonutGradient(rows, totalMinutes) {
+  if (totalMinutes <= 0 || rows.length === 0) {
+    return "conic-gradient(#e2e8f0 0deg 360deg)";
+  }
+
+  let cursor = 0;
+  const stops = rows.map((row) => {
+    const start = cursor;
+    const end = cursor + (row.minutes / totalMinutes) * 360;
+    cursor = end;
+    return `${CAUSE_META[row.cause].color} ${start}deg ${end}deg`;
+  });
+
+  return `conic-gradient(${stops.join(", ")})`;
+}
+
+function DelayedFinishTable({ rows }) {
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h4 className="text-sm font-semibold text-slate-950">Delayed PF breaches</h4>
+      </div>
+      <div className="max-h-[300px] overflow-auto rounded-lg border border-slate-100">
+        <table className="w-full min-w-[780px] text-sm">
+          <thead className="sticky top-0 bg-slate-50">
+            <tr className="border-b border-slate-100 text-left text-xs font-semibold uppercase tracking-normal text-slate-500">
+              <th className="px-3 py-2">Date</th>
+              <th className="px-3 py-2">Folder</th>
+              <th className="px-3 py-2">Print finish</th>
+              <th className="px-3 py-2">Root cause</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-50 bg-white">
+            {rows.map((row) => (
+              <tr key={row.key} className="align-top">
+                <td className="px-3 py-2 font-medium text-slate-800">
+                  {formatDate(row.run_date)}
+                </td>
+                <td className="px-3 py-2 text-slate-700">
+                  {row.display_name}
+                </td>
+                <td className="px-3 py-2 font-mono text-slate-700">
+                  {formatFinishTime(row.overrun_minutes)}
+                </td>
+                <td className="px-3 py-2">
+                  <div className="flex flex-wrap gap-1">
+                    {row.root_causes.map((cause) => (
+                      <CausePill key={cause.cause} cause={cause.cause} />
+                    ))}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CausePill({ cause, minutes, showMinutes = false }) {
+  const meta = CAUSE_META[cause] || {
+    label: cause,
+    pill: "bg-slate-100 text-slate-600",
+  };
+
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${meta.pill}`}>
+      <span>{meta.label}</span>
+      {showMinutes && Number(minutes || 0) > 0 && (
+        <span className="font-bold">{formatMinutes(minutes)}</span>
+      )}
     </span>
   );
 }
 
-function buildBreachAnalysis(details) {
-  const breachedRows = details
-    .filter((row) => Number(row.overrun_minutes || 0) > 0)
+function buildDelayedFinishAnalysis(details) {
+  const sourceRows = details.filter((row) => row.run_date && row.folder);
+  const folderBaselines = buildBaselines(sourceRows, (row) => row.folder);
+  const delayedRows = dedupeTwinFolderBreaches(
+    sourceRows.filter((row) => Number(row.overrun_minutes || 0) > 0)
+  );
+  const folderBreaches = delayedRows
+    .map((row) => buildFolderBreach(row, folderBaselines[row.folder]))
+    .sort(compareBreachRows);
+  const plantBreaches = buildPlantBreaches(folderBreaches);
+  const causeTotals = buildCauseTotals(plantBreaches);
+  const topCause = causeTotals.find((row) => row.minutes > 0) || null;
+  const tableRows = folderBreaches;
+  const delayedPlantDays = new Set(plantBreaches.map((row) => `${row.run_date}||${row.plant_name}`)).size;
+
+  return {
+    folderBreaches,
+    plantBreaches,
+    causeTotals,
+    topCause,
+    tableRows,
+    delayedPlantDays,
+  };
+}
+
+function dedupeTwinFolderBreaches(rows) {
+  const grouped = new Map();
+
+  for (const row of rows) {
+    const key = delayedPrintFinishKey(row);
+    const current = grouped.get(key);
+
+    if (!current || compareTwinDuplicateRows(row, current) < 0) {
+      grouped.set(key, row);
+    }
+  }
+
+  return Array.from(grouped.values());
+}
+
+function delayedPrintFinishKey(row) {
+  const plant = row.plant_name || "";
+
+  if (row.twin_folder_mode && row.twin_folder_group) {
+    return [
+      row.run_date || "",
+      plant,
+      row.twin_folder_group,
+      Math.round(Number(row.overrun_minutes || 0)),
+    ].join("||");
+  }
+
+  return [
+    row.run_date || "",
+    plant,
+    row.folder || "",
+    Math.round(Number(row.overrun_minutes || 0)),
+  ].join("||");
+}
+
+function compareTwinDuplicateRows(first, second) {
+  const folderDiff = String(first.folder || "").localeCompare(String(second.folder || ""));
+  if (folderDiff !== 0) return folderDiff;
+
+  return formatEditions(first.editions).localeCompare(formatEditions(second.editions));
+}
+
+function buildFolderBreach(row, baseline) {
+  const causeScores = calculateCauseScores(row, baseline || {});
+
+  return {
+    ...row,
+    key: `folder||${row.run_date}||${row.folder}`,
+    scope: "folder",
+    plant_name: row.plant_name || "Plant",
+    display_name: formatFolderName(row.folder),
+    overrun_minutes: cleanNumber(row.overrun_minutes),
+    cause_scores: causeScores,
+    root_causes: getRootCauses(causeScores),
+  };
+}
+
+function buildPlantBreaches(folderBreaches) {
+  const grouped = new Map();
+
+  for (const row of folderBreaches) {
+    const plantName = row.plant_name || "Plant";
+    const key = `${row.run_date}||${plantName}`;
+    const current = grouped.get(key) || {
+      key: `plant||${row.run_date}||${plantName}`,
+      scope: "plant",
+      run_date: row.run_date,
+      plant_name: plantName,
+      display_name: `${plantName} (Plant level)`,
+      folder_count: 0,
+      overrun_minutes: 0,
+      cause_scores: emptyCauseScores(),
+    };
+
+    current.folder_count += 1;
+    current.overrun_minutes = Math.max(current.overrun_minutes, Number(row.overrun_minutes || 0));
+    current.cause_scores = addCauseScores(current.cause_scores, row.cause_scores);
+    grouped.set(key, current);
+  }
+
+  return Array.from(grouped.values())
+    .map((row) => ({
+      ...row,
+      overrun_minutes: cleanNumber(row.overrun_minutes),
+      root_causes: getRootCauses(row.cause_scores),
+    }))
+    .sort(compareBreachRows);
+}
+
+function calculateCauseScores(row, baseline) {
+  const waitingTime = positiveNumber(row.waiting_time);
+  const downtime = positiveNumber(row.downtime);
+  const nonWaitLostTime = calculateNonWaitLostTime(row, waitingTime);
+  const runtime = positiveNumber(row.runtime);
+  const avgSpeed = computeAverageSpeed(row);
+  const printOrder = computeTotalPrintOrder(row);
+  const baselineSpeed = positiveNumber(baseline.avg_speed);
+  const baselinePrintOrder = positiveNumber(baseline.avg_print_order);
+  const complexMinutes = computeComplexMinutes(row);
+  const complexShare = runtime > 0 ? (complexMinutes / runtime) * 100 : 0;
+  const speedLossMinutes = baselineSpeed > 0 && printOrder > 0
+    ? Math.max(runtime - (printOrder / baselineSpeed) * 60, 0)
+    : 0;
+  const printOrderMinutes = avgSpeed > 0 && baselinePrintOrder > 0
+    ? Math.max((printOrder - baselinePrintOrder) / avgSpeed * 60, 0)
+    : 0;
+  const scores = {
+    low_speed: speedLossMinutes >= ROOT_CAUSE_THRESHOLDS.speed_loss_minutes ? speedLossMinutes : 0,
+    high_complexity:
+      complexMinutes >= ROOT_CAUSE_THRESHOLDS.complex_minutes || complexShare >= ROOT_CAUSE_THRESHOLDS.complex_share_pct
+        ? complexMinutes
+        : 0,
+    high_downtime: downtime >= ROOT_CAUSE_THRESHOLDS.downtime_minutes ? downtime : 0,
+    high_wait_time: waitingTime >= ROOT_CAUSE_THRESHOLDS.waiting_time_minutes ? waitingTime : 0,
+    high_lost_time: nonWaitLostTime >= ROOT_CAUSE_THRESHOLDS.lost_time_minutes ? nonWaitLostTime : 0,
+    high_print_order: printOrderMinutes >= ROOT_CAUSE_THRESHOLDS.print_order_minutes ? printOrderMinutes : 0,
+  };
+
+  if (Object.values(scores).some((value) => value > 0)) {
+    return cleanCauseScores(scores);
+  }
+
+  return cleanCauseScores({
+    low_speed: speedLossMinutes,
+    high_complexity: complexMinutes,
+    high_downtime: downtime,
+    high_wait_time: waitingTime,
+    high_lost_time: nonWaitLostTime,
+    high_print_order: printOrderMinutes || (printOrder > 0 ? runtime : 0),
+  });
+}
+
+function buildCauseTotals(plantBreaches) {
+  const totals = plantBreaches.reduce((acc, row) => addCauseScores(acc, row.cause_scores), emptyCauseScores());
+
+  return orderedCauseEntries(totals).sort((a, b) => {
+    if (b.minutes !== a.minutes) return b.minutes - a.minutes;
+    return CAUSE_ORDER.indexOf(a.cause) - CAUSE_ORDER.indexOf(b.cause);
+  });
+}
+
+function getRootCauses(scores) {
+  const entries = orderedCauseEntries(scores)
+    .filter((entry) => entry.minutes > 0)
     .sort((a, b) => {
-      const dateDiff = String(a.run_date).localeCompare(String(b.run_date));
-      return dateDiff !== 0 ? dateDiff : String(a.folder).localeCompare(String(b.folder));
+      if (b.minutes !== a.minutes) return b.minutes - a.minutes;
+      return CAUSE_ORDER.indexOf(a.cause) - CAUSE_ORDER.indexOf(b.cause);
     });
 
-  // Build per-folder baselines from ALL days (to compare breached days against)
-  const folderGroups = {};
-  for (const row of details) {
-    const key = row.folder;
-    if (!folderGroups[key]) folderGroups[key] = [];
-    folderGroups[key].push(row);
+  if (!entries.length) return [];
+
+  const [top, ...rest] = entries;
+  const secondary = rest.filter((entry) => entry.minutes >= Math.max(top.minutes * 0.35, 10)).slice(0, 1);
+  return [top, ...secondary];
+}
+
+function buildBaselines(rows, keyGetter) {
+  const groups = {};
+
+  for (const row of rows) {
+    const key = keyGetter(row);
+    if (!key) continue;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(row);
   }
 
-  const folderBaselines = {};
-  for (const [folder, rows] of Object.entries(folderGroups)) {
-    folderBaselines[folder] = computeBaseline(rows);
-  }
-
-  return { breachedRows, folderBaselines };
+  return Object.fromEntries(
+    Object.entries(groups).map(([key, groupRows]) => [key, computeBaseline(groupRows)])
+  );
 }
 
 function computeBaseline(rows) {
-  if (!rows.length) return {};
-
   const speedValues = [];
   const printOrderValues = [];
 
   for (const row of rows) {
     const speed = computeAverageSpeed(row);
-    const po = computeTotalPrintOrder(row);
+    const printOrder = computeTotalPrintOrder(row);
     if (speed > 0) speedValues.push(speed);
-    if (po > 0) printOrderValues.push(po);
+    if (printOrder > 0) printOrderValues.push(printOrder);
   }
 
   return {
-    avg_speed: speedValues.length ? speedValues.reduce((s, v) => s + v, 0) / speedValues.length : 0,
-    avg_print_order: printOrderValues.length ? printOrderValues.reduce((s, v) => s + v, 0) / printOrderValues.length : 0,
+    avg_speed: average(speedValues),
+    avg_print_order: average(printOrderValues),
   };
 }
 
-function identifyRootCauses(row, baseline) {
-  const causes = [];
-
-  // High downtime
-  if (Number(row.downtime || 0) >= ROOT_CAUSE_THRESHOLDS.downtime_minutes) {
-    causes.push("high_downtime");
-  }
-
-  // High wait time
-  if (Number(row.waiting_time || 0) >= ROOT_CAUSE_THRESHOLDS.waiting_time_minutes) {
-    causes.push("high_wait_time");
-  }
-
-  // High lost time
-  if (Number(row.lost_time || 0) >= ROOT_CAUSE_THRESHOLDS.lost_time_minutes) {
-    causes.push("high_lost_time");
-  }
-
-  // Low average speed vs folder baseline
-  const daySpeed = computeAverageSpeed(row);
-  if (daySpeed > 0 && baseline.avg_speed > 0) {
-    const pctBelow = ((baseline.avg_speed - daySpeed) / baseline.avg_speed) * 100;
-    if (pctBelow >= ROOT_CAUSE_THRESHOLDS.speed_below_average_pct) {
-      causes.push("low_speed");
-    }
-  }
-
-  // High complexity share
-  const complexShare = computeComplexShare(row);
-  if (complexShare >= ROOT_CAUSE_THRESHOLDS.complex_share_pct) {
-    causes.push("high_complexity");
-  }
-
-  // High print order vs folder baseline
-  const dayPO = computeTotalPrintOrder(row);
-  if (dayPO > 0 && baseline.avg_print_order > 0) {
-    const pctAbove = ((dayPO - baseline.avg_print_order) / baseline.avg_print_order) * 100;
-    if (pctAbove >= ROOT_CAUSE_THRESHOLDS.print_order_above_average_pct) {
-      causes.push("high_print_order");
-    }
-  }
-
-  return causes;
-}
-
 function computeAverageSpeed(row) {
-  const segments = row.runtime_segments;
-  if (!Array.isArray(segments) || !segments.length) return 0;
-
+  const segments = Array.isArray(row.runtime_segments) ? row.runtime_segments : [];
   let weightedSpeed = 0;
   let totalMinutes = 0;
+  const twinDivisor = row.twin_folder_mode ? 2 : 1;
 
-  for (const seg of segments) {
-    const minutes = Number(seg.minutes || 0);
-    const speed = Number(seg.effective_speed || 0);
+  for (const segment of segments) {
+    const minutes = positiveNumber(segment.minutes);
+    const speed = positiveNumber(segment.effective_speed) / twinDivisor;
     if (minutes > 0 && speed > 0) {
       weightedSpeed += speed * minutes;
       totalMinutes += minutes;
@@ -232,56 +456,133 @@ function computeAverageSpeed(row) {
   return totalMinutes > 0 ? weightedSpeed / totalMinutes : 0;
 }
 
-function computeComplexShare(row) {
-  const segments = row.runtime_segments;
-  if (!Array.isArray(segments) || !segments.length) return 0;
-
-  let complexMinutes = 0;
-  let totalMinutes = 0;
-
-  for (const seg of segments) {
-    const minutes = Number(seg.minutes || 0);
-    if (minutes > 0) {
-      totalMinutes += minutes;
-      if (seg.is_complex) complexMinutes += minutes;
-    }
-  }
-
-  return totalMinutes > 0 ? (complexMinutes / totalMinutes) * 100 : 0;
+function computeTotalPrintOrder(row) {
+  const segments = Array.isArray(row.runtime_segments) ? row.runtime_segments : [];
+  const twinDivisor = row.twin_folder_mode ? 2 : 1;
+  return segments.reduce((sum, segment) => sum + positiveNumber(segment.print_order) / twinDivisor, 0);
 }
 
-function computeTotalPrintOrder(row) {
-  const segments = row.runtime_segments;
-  if (!Array.isArray(segments) || !segments.length) return 0;
-  return segments.reduce((sum, seg) => sum + Number(seg.print_order || 0), 0);
+function computeComplexMinutes(row) {
+  const segments = Array.isArray(row.runtime_segments) ? row.runtime_segments : [];
+
+  return segments.reduce((sum, segment) => {
+    const isComplex = Boolean(segment.is_complex) || String(segment.key || "").toLowerCase().includes("complex");
+    return isComplex ? sum + positiveNumber(segment.minutes) : sum;
+  }, 0);
+}
+
+function calculateNonWaitLostTime(row, waitingTime) {
+  const explicitLoss = (
+    positiveNumber(row.change_over_time)
+    + positiveNumber(row.reflong_related_downtime)
+    + positiveNumber(row.late_start_time)
+  );
+
+  if (explicitLoss > 0) return explicitLoss;
+  return Math.max(positiveNumber(row.lost_time) - waitingTime, 0);
+}
+
+function addCauseScores(first, second) {
+  return CAUSE_ORDER.reduce((acc, cause) => {
+    acc[cause] = cleanNumber(positiveNumber(first?.[cause]) + positiveNumber(second?.[cause]));
+    return acc;
+  }, {});
+}
+
+function emptyCauseScores() {
+  return Object.fromEntries(CAUSE_ORDER.map((cause) => [cause, 0]));
+}
+
+function cleanCauseScores(scores) {
+  return CAUSE_ORDER.reduce((acc, cause) => {
+    acc[cause] = cleanNumber(scores[cause]);
+    return acc;
+  }, {});
+}
+
+function orderedCauseEntries(scores) {
+  return CAUSE_ORDER.map((cause) => ({
+    cause,
+    minutes: cleanNumber(scores?.[cause]),
+  }));
+}
+
+function compareBreachRows(first, second) {
+  const dateDiff = String(first.run_date).localeCompare(String(second.run_date));
+  if (dateDiff !== 0) return dateDiff;
+
+  if (first.scope !== second.scope) {
+    return first.scope === "plant" ? -1 : 1;
+  }
+
+  return String(first.display_name).localeCompare(String(second.display_name));
+}
+
+function average(values) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function positiveNumber(value) {
+  return Math.max(Number(value || 0), 0);
+}
+
+function cleanNumber(value) {
+  const numeric = Number.isFinite(Number(value)) ? Number(value) : 0;
+  const rounded = Math.round(numeric * 100) / 100;
+  return Number.isInteger(rounded) ? rounded : Number(rounded.toFixed(2));
 }
 
 function formatDate(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
   if (!match) return String(value || "");
-  const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(d);
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
 function formatFolderName(value) {
   return String(value || "")
     .split("\n")
-    .map((p) => p.trim())
+    .map((part) => part.trim())
     .filter(Boolean)
     .join(" / ");
 }
 
-function formatFinishTime(overrunMinutes) {
-  const totalMinutes = 240 + Number(overrunMinutes || 0);
-  const hours = Math.floor(totalMinutes / 60);
-  const mins = Math.round(totalMinutes % 60);
-  return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`;
+function formatEditions(value) {
+  if (Array.isArray(value)) {
+    const editions = value
+      .map((edition) => String(edition || "").trim())
+      .filter(Boolean);
+
+    return editions.length > 0 ? editions.join(", ") : "-";
+  }
+
+  const edition = String(value || "").trim();
+  return edition || "-";
 }
 
 function formatMinutes(value) {
-  const mins = Math.round(Number(value || 0));
-  if (mins < 60) return `${mins} min`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  const minutes = Math.round(Number(value || 0));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+function formatFinishTime(overrunMinutes) {
+  const totalMinutes = 240 + Math.round(Number(overrunMinutes || 0));
+  const dayOffset = Math.floor(totalMinutes / 1440);
+  const clockMinutes = totalMinutes % 1440;
+  const hours = Math.floor(clockMinutes / 60);
+  const minutes = clockMinutes % 60;
+  const timeText = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  return dayOffset > 0 ? `${timeText} +${dayOffset}d` : timeText;
+}
+
+function formatNumber(value) {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(Number(value || 0));
+}
+
+function formatPercent(value) {
+  return `${formatNumber(Math.min(Math.max(Number(value || 0), 0), 100))}%`;
 }

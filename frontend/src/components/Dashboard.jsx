@@ -17,6 +17,7 @@ import KpiCard from "./KpiCard.jsx";
 
 const CAPACITY_WINDOW_MINUTES = 240;
 const CAPACITY_PAGE_SIZE = 7;
+const PLANT_CAPACITY_PAGE_SIZE = 31;
 
 const CAPACITY_SPLIT_COLORS = {
   waiting_time: "#B0B0B0",
@@ -248,10 +249,12 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
         intelligence={intelligence}
         loading={intelligenceLoading}
         error={intelligenceError}
+        details={data.details}
+        towerDetails={data.tower_details || []}
+        daily={data.daily}
       />
 
       <LossTimeThresholdWidget details={data.details} />
-
       <DelayedPrintFinishWidget details={data.details} />
     </div>
   );
@@ -259,6 +262,7 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
 
 function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
   const [pageStart, setPageStart] = useState(0);
+  const [viewMode, setViewMode] = useState("folder");
   const [summaryPopover, setSummaryPopover] = useState(null);
   const chartFrameRef = useRef(null);
 
@@ -267,33 +271,46 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
     [daily, details]
   );
 
-  const { days, folders, rows } = chartModel;
-  const maxPageStart = Math.max(days.length - CAPACITY_PAGE_SIZE, 0);
+  const { days, folders, rows, plantRows } = chartModel;
+  const isPlantView = viewMode === "plant";
+  const pageSize = isPlantView ? PLANT_CAPACITY_PAGE_SIZE : CAPACITY_PAGE_SIZE;
+  const maxPageStart = Math.max(days.length - pageSize, 0);
   const safePageStart = Math.min(pageStart, maxPageStart);
-  const visibleDays = days.slice(safePageStart, safePageStart + CAPACITY_PAGE_SIZE);
+  const visibleDays = days.slice(safePageStart, safePageStart + pageSize);
 
   useEffect(() => {
     setPageStart(0);
-  }, [days.length, folders.length]);
+  }, [days.length, folders.length, viewMode]);
 
   const width = 1380;
   const height = 500;
-  const margins = { top: 18, right: 8, bottom: 78, left: 62 };
+  const margins = isPlantView
+    ? { top: 18, right: 8, bottom: 52, left: 62 }
+    : { top: 18, right: 8, bottom: 78, left: 62 };
   const yAxisTitleX = 14;
   const plotWidth = width - margins.left - margins.right;
   const plotHeight = height - margins.top - margins.bottom;
-  const yMax = 270;
-  const yTicks = [0, 60, 120, 180, 240];
+  const maxPlantCapacity = Math.max(
+    CAPACITY_WINDOW_MINUTES,
+    ...plantRows.map((row) => Number(row.total_capacity || 0))
+  );
+  const yMax = isPlantView ? maxPlantCapacity * 1.08 : 270;
+  const yTicks = isPlantView ? buildPlantCapacityTicks(maxPlantCapacity) : [0, 60, 120, 180, 240];
   const dayCount = Math.max(visibleDays.length, 1);
   const groupWidth = plotWidth / dayCount;
-  const folderCount = Math.max(folders.length, 1);
-  const dayGap = 28;
-  const barGap = 4;
-  const availableGroupWidth = Math.max(groupWidth - dayGap, 28);
-  const barWidth = Math.min(38, Math.max(10, (availableGroupWidth - barGap * (folderCount - 1)) / folderCount));
-  const actualGroupWidth = barWidth * folderCount + barGap * (folderCount - 1);
-  const viewRows = rows.filter((row) => visibleDays.includes(row.run_date));
-  const twinMarkers = buildTwinFolderMarkers(rows, visibleDays);
+  const barsPerDay = isPlantView ? 1 : Math.max(folders.length, 1);
+  const dayGap = isPlantView ? 12 : 28;
+  const barGap = isPlantView ? 0 : 4;
+  const availableGroupWidth = Math.max(groupWidth - dayGap, isPlantView ? 10 : 28);
+  const barWidth = Math.min(
+    isPlantView ? 30 : 38,
+    Math.max(isPlantView ? 8 : 10, (availableGroupWidth - barGap * (barsPerDay - 1)) / barsPerDay)
+  );
+  const actualGroupWidth = barWidth * barsPerDay + barGap * (barsPerDay - 1);
+  const viewRows = isPlantView
+    ? plantRows.filter((row) => visibleDays.includes(row.run_date))
+    : rows.filter((row) => visibleDays.includes(row.run_date));
+  const twinMarkers = isPlantView ? [] : buildTwinFolderMarkers(rows, visibleDays);
   const twinMarkerFolderKeys = new Set(
     twinMarkers.flatMap((m) =>
       Array.from(m.folderIndexes).map((fi) => `${m.run_date}||${fi}`)
@@ -304,7 +321,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
       .filter((row) => row.twin_folder_mode && !twinMarkerFolderKeys.has(`${row.run_date}||${row.folderIndex}`))
       .map((row) => `${row.run_date}||${row.folderIndex}`)
   );
-const selectedHighlightColor = "#475569";
+  const selectedHighlightColor = "#475569";
   const selectedDaySummary = useMemo(
     () => buildCapacityDaySummary(summaryPopover?.day, rows, folders.length),
     [folders.length, rows, summaryPopover?.day]
@@ -322,7 +339,7 @@ const selectedHighlightColor = "#475569";
     });
   }, [selectedDay]);
 
-  function xFor(dayIndex, folderIndex) {
+  function xFor(dayIndex, folderIndex = 0) {
     const groupStart = margins.left + dayIndex * groupWidth + (groupWidth - actualGroupWidth) / 2;
     return groupStart + folderIndex * (barWidth + barGap);
   }
@@ -343,14 +360,20 @@ const selectedHighlightColor = "#475569";
     return (Math.min(Math.max(minutes, 0), yMax) / yMax) * plotHeight;
   }
 
+  function setChartView(nextViewMode) {
+    setViewMode(nextViewMode);
+    setPageStart(0);
+    setSummaryPopover(null);
+  }
+
   function setPreviousPage() {
     setSummaryPopover(null);
-    setPageStart((current) => Math.max(current - CAPACITY_PAGE_SIZE, 0));
+    setPageStart((current) => Math.max(current - pageSize, 0));
   }
 
   function setNextPage() {
     setSummaryPopover(null);
-    setPageStart((current) => Math.min(current + CAPACITY_PAGE_SIZE, maxPageStart));
+    setPageStart((current) => Math.min(current + pageSize, maxPageStart));
   }
 
   function handleBarClick(event, runDate) {
@@ -407,33 +430,63 @@ const selectedHighlightColor = "#475569";
               <span>{item.label}</span>
             </div>
           ))}
-          <div className="inline-flex items-center gap-1.5">
-            <span
-              className="h-0 w-7 border-t border-dashed"
-              style={{ borderColor: CAPACITY_SPLIT_COLORS.window_line }}
-            />
-            <span>4-hr Window</span>
-          </div>
+          {isPlantView ? (
+            <div className="inline-flex items-center gap-1.5">
+              <span className="h-3 w-3 rounded-sm border border-slate-300 bg-white" />
+              <span>Plant capacity: {formatNumber(folders.length)} folders × 240 min</span>
+            </div>
+          ) : (
+            <div className="inline-flex items-center gap-1.5">
+              <span
+                className="h-0 w-7 border-t border-dashed"
+                style={{ borderColor: CAPACITY_SPLIT_COLORS.window_line }}
+              />
+              <span>4-hr Window</span>
+            </div>
+          )}
         </div>
 
-        <div className="inline-flex items-center justify-end gap-2">
+        <div className="inline-flex flex-wrap items-center justify-end gap-2">
+          <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
+            {[
+              ["folder", "Folder"],
+              ["plant", "Plant"]
+            ].map(([mode, label]) => {
+              const selected = viewMode === mode;
+
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setChartView(mode)}
+                  className={`min-h-8 rounded-md px-3 text-xs font-semibold transition ${
+                    selected
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
           <button
             type="button"
             onClick={setPreviousPage}
             disabled={safePageStart === 0}
-            aria-label="Previous 7 days"
+            aria-label={`Previous ${pageSize} days`}
             className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <ChevronLeft className="h-4 w-4" aria-hidden="true" />
           </button>
           <span className="min-w-28 text-center text-xs font-semibold text-slate-500">
-            {safePageStart + 1}-{Math.min(safePageStart + CAPACITY_PAGE_SIZE, days.length)} of {days.length}
+            {safePageStart + 1}-{Math.min(safePageStart + pageSize, days.length)} of {days.length}
           </span>
           <button
             type="button"
             onClick={setNextPage}
             disabled={safePageStart >= maxPageStart}
-            aria-label="Next 7 days"
+            aria-label={`Next ${pageSize} days`}
             className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <ChevronRight className="h-4 w-4" aria-hidden="true" />
@@ -441,28 +494,30 @@ const selectedHighlightColor = "#475569";
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-700">
-        {folders.map((folder) => (
-          <span
-            key={folder.key}
-            className="inline-flex items-center gap-1.5 font-semibold"
-          >
+      {!isPlantView && (
+        <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-700">
+          {folders.map((folder) => (
             <span
-              className="h-3 w-3 rounded-sm border border-slate-300"
-              style={{ backgroundColor: folder.color }}
-              aria-hidden="true"
-            />
-            <span>{folder.alias}: {folder.shortName}</span>
-          </span>
-        ))}
-      </div>
+              key={folder.key}
+              className="inline-flex items-center gap-1.5 font-semibold"
+            >
+              <span
+                className="h-3 w-3 rounded-sm border border-slate-300"
+                style={{ backgroundColor: folder.color }}
+                aria-hidden="true"
+              />
+              <span>{folder.alias}: {folder.shortName}</span>
+            </span>
+          ))}
+        </div>
+      )}
 
       <div ref={chartFrameRef} className="relative rounded-lg border border-slate-100 bg-[#f3f6fa] p-1.5">
         <svg
           className="h-[500px] w-full"
           viewBox={`0 0 ${width} ${height}`}
           role="img"
-          aria-label="Daily machine-folder capacity split"
+          aria-label={isPlantView ? "Daily plant capacity split" : "Daily machine-folder capacity split"}
         >
           <defs>
             <pattern id="idlePattern" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(35)">
@@ -480,9 +535,9 @@ const selectedHighlightColor = "#475569";
                 x2={width - margins.right}
                 y1={yFor(tick)}
                 y2={yFor(tick)}
-                stroke={tick === CAPACITY_WINDOW_MINUTES ? CAPACITY_SPLIT_COLORS.window_line : "#d9e1ea"}
-                strokeDasharray={tick === CAPACITY_WINDOW_MINUTES ? "6 5" : ""}
-                strokeWidth={tick === CAPACITY_WINDOW_MINUTES ? 1.8 : 1}
+                stroke={!isPlantView && tick === CAPACITY_WINDOW_MINUTES ? CAPACITY_SPLIT_COLORS.window_line : "#d9e1ea"}
+                strokeDasharray={!isPlantView && tick === CAPACITY_WINDOW_MINUTES ? "6 5" : ""}
+                strokeWidth={!isPlantView && tick === CAPACITY_WINDOW_MINUTES ? 1.8 : 1}
               />
               <text
                 x={margins.left - 8}
@@ -491,7 +546,7 @@ const selectedHighlightColor = "#475569";
                 fontSize="12"
                 fill="#334155"
               >
-                {formatHourTick(tick)}
+                {isPlantView ? formatPlantCapacityTick(tick) : formatHourTick(tick)}
               </text>
             </g>
           ))}
@@ -555,8 +610,9 @@ const selectedHighlightColor = "#475569";
 
           {viewRows.map((row) => {
             const dayIndex = visibleDays.indexOf(row.run_date);
-            const folder = folders[row.folderIndex];
-            const x = xFor(dayIndex, row.folderIndex);
+            const folder = isPlantView ? { alias: "Plant", color: "#334155" } : folders[row.folderIndex];
+            const x = xFor(dayIndex, isPlantView ? 0 : row.folderIndex);
+            const rowCapacity = Math.max(Number(row.total_capacity || CAPACITY_WINDOW_MINUTES), 1);
             let cursorY = yFor(0);
 
             return (
@@ -569,7 +625,7 @@ const selectedHighlightColor = "#475569";
                   if (segment.value <= 0) return null;
 
                   const fill = getSegmentFill(segment);
-                  const sparePercent = row.isIdle ? 0 : calculatePercentage(row.spare_time, CAPACITY_WINDOW_MINUTES);
+                  const sparePercent = row.isIdle ? 0 : calculatePercentage(row.spare_time, rowCapacity);
                   const runtimeDetailText = formatRuntimeSegmentDetail(segment, row.twin_folder_mode);
                   const runtimeLabelText = segment.isComplex && runtimeDetailText ? `▲ | ${runtimeDetailText}` : runtimeDetailText;
                   const canShowSpareLabel = segment.key === "spare_time" && sparePercent > 0;
@@ -660,7 +716,7 @@ const selectedHighlightColor = "#475569";
             const dayTwinMarkers = twinMarkers.filter((marker) => marker.run_date === day);
             return (
               <g key={day}>
-                {folders.map((folder, folderIndex) => (
+                {!isPlantView && folders.map((folder, folderIndex) => (
                   <text
                     key={`${day}-${folder.key}`}
                     x={xFor(dayIndex, folderIndex) + barWidth / 2}
@@ -673,7 +729,7 @@ const selectedHighlightColor = "#475569";
                     {folder.alias}
                   </text>
                 ))}
-                {dayTwinMarkers.map((marker, markerIndex) => {
+                {!isPlantView && dayTwinMarkers.map((marker, markerIndex) => {
                   const startX = xFor(dayIndex, marker.startFolderIndex) + barWidth / 2;
                   const endX = xFor(dayIndex, marker.endFolderIndex) + barWidth / 2;
                   const connectorY = margins.top + plotHeight + 36;
@@ -702,7 +758,7 @@ const selectedHighlightColor = "#475569";
                     </g>
                   );
                 })}
-                {folders.map((folder, folderIndex) => {
+                {!isPlantView && folders.map((folder, folderIndex) => {
                   if (!soloTwinFolderKeys.has(`${day}||${folderIndex}`)) return null;
                   const cx = xFor(dayIndex, folderIndex) + barWidth / 2;
                   const dotY = margins.top + plotHeight + 36;
@@ -720,7 +776,7 @@ const selectedHighlightColor = "#475569";
                 })}
                 <text
                   x={groupCenter}
-                  y={margins.top + plotHeight + 60}
+                  y={margins.top + plotHeight + (isPlantView ? 28 : 60)}
                   textAnchor="middle"
                   fontSize="12"
                   fontWeight="700"
@@ -1088,15 +1144,15 @@ function buildCapacitySplitModel(dailyRows, detailRows) {
         };
 
         rows.push({
-        run_date: runDate,
-        folderKey: folder.key,
-        folderIndex,
-        isIdle: true,
-        twin_folder_mode: false,
-        twin_folder_group: "",
-        ...idleValues,
-        segments: buildCapacitySegments(idleValues)
-      });
+          run_date: runDate,
+          folderKey: folder.key,
+          folderIndex,
+          isIdle: true,
+          twin_folder_mode: false,
+          twin_folder_group: "",
+          ...idleValues,
+          segments: buildCapacitySegments(idleValues)
+        });
         return;
       }
 
@@ -1116,7 +1172,131 @@ function buildCapacitySplitModel(dailyRows, detailRows) {
     });
   }
 
-  return { days, folders, rows };
+  return { days, folders, rows, plantRows: buildPlantCapacityRows(days, rows, folders.length) };
+}
+
+function buildPlantCapacityRows(days, rows, folderCount) {
+  const rowsByDay = new Map();
+
+  for (const row of rows) {
+    const dayRows = rowsByDay.get(row.run_date) || [];
+    dayRows.push(row);
+    rowsByDay.set(row.run_date, dayRows);
+  }
+
+  return days.map((runDate) => {
+    const dayRows = rowsByDay.get(runDate) || [];
+    const totalFolders = Math.max(folderCount, dayRows.length, 1);
+    const totalCapacity = totalFolders * CAPACITY_WINDOW_MINUTES;
+    const values = normalizePlantCapacityValues({
+      waiting_time: sumCapacityRows(dayRows, "waiting_time"),
+      loss_time: sumCapacityRows(dayRows, "loss_time"),
+      downtime: sumCapacityRows(dayRows, "downtime"),
+      runtime: sumCapacityRows(dayRows, "runtime"),
+      spare_time: sumCapacityRows(dayRows, "spare_time"),
+      idle_time: sumCapacityRows(dayRows, "idle_time")
+    }, totalCapacity);
+    const runtimeSegments = aggregatePlantRuntimeSegments(dayRows, values.runtime);
+
+    return {
+      run_date: runDate,
+      folderKey: "Plant",
+      folderIndex: 0,
+      isIdle: false,
+      isPlant: true,
+      twin_folder_mode: false,
+      twin_folder_group: "",
+      activeFolders: dayRows.filter((row) => !row.isIdle).length,
+      totalFolders,
+      total_capacity: totalCapacity,
+      ...values,
+      runtime_segments: runtimeSegments,
+      segments: buildCapacitySegments({ ...values, runtime_segments: runtimeSegments }, totalCapacity)
+    };
+  });
+}
+
+function normalizePlantCapacityValues(values, totalCapacity) {
+  const capacity = Math.max(Number(totalCapacity || 0), 0);
+  const normalized = {
+    waiting_time: cleanNumber(Math.max(Number(values.waiting_time || 0), 0)),
+    loss_time: cleanNumber(Math.max(Number(values.loss_time || 0), 0)),
+    downtime: cleanNumber(Math.max(Number(values.downtime || 0), 0)),
+    runtime: cleanNumber(Math.max(Number(values.runtime || 0), 0)),
+    spare_time: cleanNumber(Math.max(Number(values.spare_time || 0), 0)),
+    idle_time: cleanNumber(Math.max(Number(values.idle_time || 0), 0))
+  };
+
+  if (capacity <= 0) return normalized;
+
+  let total = cleanNumber(Object.values(normalized).reduce((sum, value) => sum + value, 0));
+
+  if (total < capacity) {
+    normalized.spare_time = cleanNumber(normalized.spare_time + capacity - total);
+    return normalized;
+  }
+
+  if (total <= capacity) return normalized;
+
+  let overage = cleanNumber(total - capacity);
+
+  for (const key of ["idle_time", "spare_time", "runtime", "downtime", "loss_time", "waiting_time"]) {
+    if (overage <= 0) break;
+
+    const reduction = Math.min(normalized[key], overage);
+    normalized[key] = cleanNumber(normalized[key] - reduction);
+    overage = cleanNumber(overage - reduction);
+  }
+
+  return normalized;
+}
+
+function aggregatePlantRuntimeSegments(dayRows, targetRuntime) {
+  const buckets = new Map();
+
+  for (const row of dayRows) {
+    for (const segment of row.segments || []) {
+      if (!segment.runtimeSegment || Number(segment.value || 0) <= 0) continue;
+
+      const key = getRuntimeBucketKey(segment);
+      const bucket = buckets.get(key) || {
+        key,
+        label: RUNTIME_SEGMENT_STYLES[key]?.label || "Run Time",
+        minutes: 0,
+        is_complex: Boolean(segment.isComplex)
+      };
+
+      bucket.minutes = cleanNumber(bucket.minutes + Number(segment.value || 0));
+      bucket.is_complex = bucket.is_complex || Boolean(segment.isComplex);
+      buckets.set(key, bucket);
+    }
+  }
+
+  const orderedKeys = ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"];
+  const segments = orderedKeys
+    .filter((key) => buckets.has(key))
+    .map((key) => buckets.get(key));
+  const totalMinutes = cleanNumber(segments.reduce((sum, segment) => sum + Number(segment.minutes || 0), 0));
+
+  if (totalMinutes <= 0 || Number(targetRuntime || 0) <= 0) return [];
+
+  const scale = Number(targetRuntime || 0) / totalMinutes;
+  return segments.map((segment) => ({
+    ...segment,
+    minutes: cleanNumber(segment.minutes * scale)
+  }));
+}
+
+function getRuntimeBucketKey(segment) {
+  const text = `${segment.key || ""} ${segment.label || ""}`.toLowerCase();
+  const runtimeType = text.includes("snp")
+    ? "snp"
+    : text.includes("gnp")
+      ? "gnp"
+      : "unknown";
+
+  if (runtimeType === "unknown") return runtimeType;
+  return segment.isComplex ? `${runtimeType}_complex` : runtimeType;
 }
 
 function buildTwinFolderMarkers(rows, visibleDays) {
@@ -1239,7 +1419,7 @@ function getSegmentFill(segment) {
   return segment.color;
 }
 
-function buildCapacitySegments(values) {
+function buildCapacitySegments(values, capacityLimit = CAPACITY_WINDOW_MINUTES) {
   return [
     {
       key: "waiting_time",
@@ -1259,7 +1439,7 @@ function buildCapacitySegments(values) {
       value: values.downtime,
       color: CAPACITY_SPLIT_COLORS.downtime
     },
-    ...buildRuntimeCapacitySegments(values.runtime_segments, values.runtime),
+    ...buildRuntimeCapacitySegments(values.runtime_segments, values.runtime, capacityLimit),
     {
       key: "spare_time",
       label: "Spare Time",
@@ -1275,8 +1455,8 @@ function buildCapacitySegments(values) {
   ];
 }
 
-function buildRuntimeCapacitySegments(runtimeSegments, fallbackRuntime) {
-  const normalizedSegments = normalizeRuntimeSegments(runtimeSegments, fallbackRuntime);
+function buildRuntimeCapacitySegments(runtimeSegments, fallbackRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES) {
+  const normalizedSegments = normalizeRuntimeSegments(runtimeSegments, fallbackRuntime, capacityLimit);
 
   if (normalizedSegments.length === 0) {
     return [
@@ -1310,8 +1490,11 @@ function buildRuntimeCapacitySegments(runtimeSegments, fallbackRuntime) {
   });
 }
 
-function normalizeRuntimeSegments(runtimeSegments, targetRuntime) {
-  const runtime = cleanNumber(Math.min(Math.max(Number(targetRuntime || 0), 0), CAPACITY_WINDOW_MINUTES));
+function normalizeRuntimeSegments(runtimeSegments, targetRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES) {
+  const runtime = cleanNumber(Math.min(
+    Math.max(Number(targetRuntime || 0), 0),
+    Math.max(Number(capacityLimit || CAPACITY_WINDOW_MINUTES), 0)
+  ));
   if (runtime <= 0 || !Array.isArray(runtimeSegments) || runtimeSegments.length === 0) {
     return [];
   }
@@ -1401,6 +1584,29 @@ function formatHourTick(minutes) {
   const hours = Math.floor(Number(minutes || 0) / 60);
   const minutePart = String(Math.round(Number(minutes || 0) % 60)).padStart(2, "0");
   return `${String(hours).padStart(2, "0")}:${minutePart}`;
+}
+
+function buildPlantCapacityTicks(maxCapacity) {
+  const capacity = Math.max(Number(maxCapacity || 0), CAPACITY_WINDOW_MINUTES);
+  const folderUnits = Math.max(1, Math.ceil(capacity / CAPACITY_WINDOW_MINUTES));
+  const folderStep = Math.max(1, Math.ceil(folderUnits / 5));
+  const step = folderStep * CAPACITY_WINDOW_MINUTES;
+  const ticks = [];
+
+  for (let tick = 0; tick <= capacity; tick += step) {
+    ticks.push(tick);
+  }
+
+  if (ticks[ticks.length - 1] !== capacity) {
+    ticks.push(capacity);
+  }
+
+  return ticks;
+}
+
+function formatPlantCapacityTick(minutes) {
+  const hours = Number(minutes || 0) / 60;
+  return `${formatNumber(hours)}h`;
 }
 
 function formatDayLabel(dateStr) {

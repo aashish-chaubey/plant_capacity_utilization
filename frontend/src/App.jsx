@@ -1,11 +1,9 @@
-import { AlertCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { AlertCircle, BarChart2, FileSpreadsheet, Loader2, RotateCcw, UploadCloud, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import Dashboard from "./components/Dashboard.jsx";
-import TimeframeFilter from "./components/TimeframeFilter.jsx";
-import UploadPanel from "./components/UploadPanel.jsx";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 const PERIOD_MODES = ["annual", "half", "quarter", "month"];
 const MODE_LABELS = {
   annual: "Annual",
@@ -13,8 +11,16 @@ const MODE_LABELS = {
   quarter: "Quarterly",
   month: "Monthly"
 };
+const TIMEFRAME_TABS = [
+  ["annual", "Annual"],
+  ["half", "Half-yr"],
+  ["quarter", "Qtr"],
+  ["month", "Month"],
+  ["custom", "Custom"]
+];
 
 export default function App() {
+  const fileInputRef = useRef(null);
   const [result, setResult] = useState(null);
   const [errors, setErrors] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -26,10 +32,7 @@ export default function App() {
   const [selectedPlant, setSelectedPlant] = useState("");
   const [selectedFolders, setSelectedFolders] = useState([]);
 
-  const plantOptions = useMemo(
-    () => buildPlantOptions(result),
-    [result]
-  );
+  const plantOptions = useMemo(() => buildPlantOptions(result), [result]);
   const folderOptions = useMemo(
     () => buildFolderOptions(result, selectedPlant),
     [result, selectedPlant]
@@ -49,12 +52,8 @@ export default function App() {
       setSelectedFolders([]);
       return;
     }
-
     setSelectedPlant((current) => {
-      if (current && plantOptions.some((option) => option.value === current)) {
-        return current;
-      }
-
+      if (current && plantOptions.some((option) => option.value === current)) return current;
       return plantOptions.length === 1 ? plantOptions[0].value : "";
     });
   }, [plantOptions, result]);
@@ -68,38 +67,24 @@ export default function App() {
 
   useEffect(() => {
     if (!scopedResult?.daily?.length) return;
-
     setTimeframe((current) => {
       const nextPeriods = { ...current.periods };
       let changed = false;
-
       for (const mode of PERIOD_MODES) {
         const options = periodOptions[mode] || [];
         const hasCurrentPeriod = options.some((option) => option.key === nextPeriods[mode]);
         const nextKey = hasCurrentPeriod ? nextPeriods[mode] : options[0]?.key || "";
-
         if (nextPeriods[mode] !== nextKey) {
           nextPeriods[mode] = nextKey;
           changed = true;
         }
       }
-
       const bounds = getDateBounds(scopedResult.daily);
       const customStart = current.customStart || bounds.start;
       const customEnd = current.customEnd || bounds.end;
-
-      if (customStart !== current.customStart || customEnd !== current.customEnd) {
-        changed = true;
-      }
-
+      if (customStart !== current.customStart || customEnd !== current.customEnd) changed = true;
       if (!changed) return current;
-
-      return {
-        ...current,
-        periods: nextPeriods,
-        customStart,
-        customEnd
-      };
+      return { ...current, periods: nextPeriods, customStart, customEnd };
     });
   }, [periodOptions, scopedResult]);
 
@@ -120,7 +105,6 @@ export default function App() {
       setIntelligenceError("");
       return;
     }
-
     const controller = new AbortController();
     setIntelligenceLoading(true);
     setIntelligenceError("");
@@ -129,9 +113,7 @@ export default function App() {
       try {
         const response = await fetch(`${API_BASE_URL}/api/intelligence`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             summary: filteredResult.summary,
             daily: filteredResult.daily,
@@ -141,36 +123,25 @@ export default function App() {
           }),
           signal: controller.signal
         });
-
-        if (!response.ok) {
-          throw new Error(`Intelligence failed with status ${response.status}`);
-        }
-
+        if (!response.ok) throw new Error(`Intelligence failed with status ${response.status}`);
         const payload = await response.json();
-        if (!payload.valid) {
-          throw new Error(payload.errors?.[0] || "Intelligence generation failed.");
-        }
-
+        if (!payload.valid) throw new Error(payload.errors?.[0] || "Intelligence generation failed.");
         setIntelligence(payload.intelligence);
       } catch (error) {
         if (error.name === "AbortError") return;
         setIntelligence(null);
         setIntelligenceError(error.message || "Unable to load capacity intelligence.");
       } finally {
-        if (!controller.signal.aborted) {
-          setIntelligenceLoading(false);
-        }
+        if (!controller.signal.aborted) setIntelligenceLoading(false);
       }
     }
 
     loadIntelligence();
-
     return () => controller.abort();
   }, [filteredResult, timeframeRange?.label]);
 
   async function handleUpload(file) {
     if (!file) return;
-
     setLoading(true);
     setErrors([]);
     setIntelligence(null);
@@ -189,11 +160,7 @@ export default function App() {
         method: "POST",
         body: formData
       });
-
-      if (!response.ok) {
-        throw new Error(`Upload failed with status ${response.status}`);
-      }
-
+      if (!response.ok) throw new Error(`Upload failed with status ${response.status}`);
       const payload = await response.json();
       if (!payload.valid) {
         setResult(null);
@@ -201,7 +168,6 @@ export default function App() {
         setErrors(payload.errors || ["The workbook could not be processed."]);
         return;
       }
-
       setResult(payload);
     } catch (error) {
       setResult(null);
@@ -220,26 +186,16 @@ export default function App() {
     setTimeframe((current) => ({
       ...current,
       isCleared: false,
-      periods: {
-        ...current.periods,
-        [current.mode]: periodKey
-      }
+      periods: { ...current.periods, [current.mode]: periodKey }
     }));
   }
 
   function handleCustomRangeChange(field, value) {
-    setTimeframe((current) => ({
-      ...current,
-      isCleared: false,
-      [field]: value
-    }));
+    setTimeframe((current) => ({ ...current, isCleared: false, [field]: value }));
   }
 
   function handleClearTimeframe() {
-    setTimeframe((current) => ({
-      ...current,
-      isCleared: true
-    }));
+    setTimeframe((current) => ({ ...current, isCleared: true }));
   }
 
   function handlePlantChange(plantName) {
@@ -249,11 +205,11 @@ export default function App() {
   }
 
   function handleFolderToggle(folderName) {
-    setSelectedFolders((current) => (
+    setSelectedFolders((current) =>
       current.includes(folderName)
         ? current.filter((folder) => folder !== folderName)
         : [...current, folderName]
-    ));
+    );
     setTimeframe(createDefaultTimeframe());
   }
 
@@ -262,59 +218,210 @@ export default function App() {
     setTimeframe(createDefaultTimeframe());
   }
 
+  const showControlStrip = Boolean(result && selectedPlant);
+
   return (
     <div className="min-h-screen bg-[#f6f8fb] text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex w-full max-w-[1800px] flex-col gap-3 px-3 py-4 sm:px-4 lg:flex-row lg:items-center lg:justify-between xl:px-5 2xl:px-6">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-normal text-slate-950">
-              Plant Capacity Utilization
-            </h1>
-            <p className="mt-1 text-sm text-slate-500">
-              Daily 00:00-04:00 production window across active machine-folder units
-            </p>
+      {/* ── Header ──────────────────────────────────────────────── */}
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white shadow-[0_1px_4px_rgba(0,0,0,0.06)]">
+        <div className="mx-auto flex h-14 w-full max-w-[1800px] items-center gap-4 px-4 sm:px-5 xl:px-6">
+          {/* Brand */}
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-600 shadow-sm">
+              <BarChart2 className="h-[18px] w-[18px] text-white" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-bold leading-snug text-slate-950">
+                Plant Capacity Utilization
+              </h1>
+              <p className="hidden text-[11px] leading-snug text-slate-400 sm:block">
+                00:00 – 04:00 production window
+              </p>
+            </div>
           </div>
-          <div className="text-sm text-slate-500">
-            {fileName ? <span className="font-medium text-slate-700">{fileName}</span> : "No report loaded"}
+
+          {/* Right: filename badge + upload button */}
+          <div className="flex shrink-0 items-center gap-2.5">
+            {fileName && !loading && (
+              <span className="hidden max-w-[180px] items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-500 sm:flex">
+                <FileSpreadsheet className="h-3 w-3 shrink-0 text-slate-400" aria-hidden="true" />
+                <span className="truncate">{fileName}</span>
+              </span>
+            )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls"
+              className="hidden"
+              onChange={(event) => handleUpload(event.target.files?.[0])}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={loading}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 active:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              {loading ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <UploadCloud className="h-4 w-4" aria-hidden="true" />
+              )}
+              <span>{loading ? "Processing…" : result ? "Replace report" : "Upload report"}</span>
+            </button>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-[1800px] px-3 py-5 sm:px-4 xl:px-5 2xl:px-6">
-        <div className={result ? "grid gap-4 xl:grid-cols-[0.75fr_1.25fr]" : ""}>
-          <UploadPanel onUpload={handleUpload} loading={loading} compact={Boolean(result)} />
+      {/* ── Control strip (sticky below header) ─────────────────── */}
+      {showControlStrip && (
+        <div className="sticky top-14 z-20 border-b border-slate-200 bg-white/95 shadow-[0_1px_3px_rgba(0,0,0,0.04)] backdrop-blur-sm">
+          <div className="mx-auto w-full max-w-[1800px] px-4 py-2.5 sm:px-5 xl:px-6">
+            <div className="flex flex-wrap items-start gap-2">
 
-          {result && (
-            <ScopeFilter
-              plantOptions={plantOptions}
-              selectedPlant={selectedPlant}
-              folderOptions={folderOptions}
-              selectedFolders={selectedFolders}
-              onPlantChange={handlePlantChange}
-              onFolderToggle={handleFolderToggle}
-              onClearFolders={handleClearFolders}
-            />
-          )}
+              {/* ── Plant ── */}
+              {plantOptions.length > 1 && (
+                <div className="flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Plant</span>
+                  <select
+                    value={selectedPlant}
+                    onChange={(event) => handlePlantChange(event.target.value)}
+                    className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-blue-400 focus:ring-1 focus:ring-blue-200"
+                  >
+                    <option value="">Select plant</option>
+                    {plantOptions.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
-          {result && selectedPlant && (
-            <TimeframeFilter
-              mode={timeframe.mode}
-              periodKey={timeframe.periods[timeframe.mode] || ""}
-              periodOptions={periodOptions[timeframe.mode] || []}
-              customStart={timeframe.customStart}
-              customEnd={timeframe.customEnd}
-              isCleared={timeframe.isCleared}
-              rangeLabel={timeframeRange?.label || "No production dates loaded"}
-              onModeChange={handleModeChange}
-              onPeriodChange={handlePeriodChange}
-              onCustomRangeChange={handleCustomRangeChange}
-              onClear={handleClearTimeframe}
-            />
-          )}
+              {/* ── Folders ── */}
+              <div className="flex min-w-0 flex-1 items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                <span className="shrink-0 pt-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  Folders
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {folderOptions.map((option) => {
+                    const active = selectedFolders.includes(option.value);
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => handleFolderToggle(option.value)}
+                        className={`h-8 rounded-full border px-3 text-xs font-semibold transition ${
+                          active
+                            ? "border-blue-500 bg-blue-600 text-white shadow-sm"
+                            : "border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {selectedFolders.length === 0 ? (
+                  <span className="shrink-0 pt-1 text-xs text-slate-400">All</span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleClearFolders}
+                    className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 transition hover:bg-red-50 hover:text-red-500"
+                    title="Clear folder filter"
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+
+              {/* ── Timeframe ── */}
+              <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Period</span>
+
+                {/* Mode tabs */}
+                <div className="flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white p-0.5">
+                  {TIMEFRAME_TABS.map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => handleModeChange(value)}
+                      className={`h-8 rounded-md px-3 text-xs font-semibold whitespace-nowrap transition ${
+                        !timeframe.isCleared && timeframe.mode === value
+                          ? "bg-blue-600 text-white shadow-sm"
+                          : "text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Period selector or date range */}
+                {timeframe.mode === "custom" ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="date"
+                      value={timeframe.customStart}
+                      onChange={(event) => handleCustomRangeChange("customStart", event.target.value)}
+                      className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-200"
+                    />
+                    <span className="text-sm font-medium text-slate-400">–</span>
+                    <input
+                      type="date"
+                      value={timeframe.customEnd}
+                      onChange={(event) => handleCustomRangeChange("customEnd", event.target.value)}
+                      className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-200"
+                    />
+                  </div>
+                ) : (
+                  <select
+                    value={timeframe.periods[timeframe.mode] || ""}
+                    onChange={(event) => handlePeriodChange(event.target.value)}
+                    className="h-8 min-w-[130px] rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-800 outline-none transition focus:border-blue-400 focus:ring-1 focus:ring-blue-200"
+                  >
+                    {(periodOptions[timeframe.mode] || []).length === 0 && (
+                      <option value="">No dates</option>
+                    )}
+                    {(periodOptions[timeframe.mode] || []).map((option) => (
+                      <option key={option.key} value={option.key}>{option.label}</option>
+                    ))}
+                  </select>
+                )}
+
+                {/* Range label */}
+                {timeframeRange?.label && (
+                  <span className="hidden max-w-[200px] truncate text-xs text-slate-400 xl:block">
+                    {timeframeRange.label}
+                  </span>
+                )}
+
+                {/* Reset */}
+                <button
+                  type="button"
+                  onClick={handleClearTimeframe}
+                  disabled={timeframe.isCleared}
+                  title="Show all dates"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-400 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
+
+            </div>
+          </div>
         </div>
+      )}
 
+      {/* ── Main ────────────────────────────────────────────────── */}
+      <main className="mx-auto w-full max-w-[1800px] px-4 py-6 sm:px-5 xl:px-6">
+
+        {/* Empty state */}
+        {!result && !loading && errors.length === 0 && (
+          <EmptyDropZone onUpload={handleUpload} />
+        )}
+
+        {/* Error banner */}
         {errors.length > 0 && (
-          <section className="mt-5 rounded-lg border border-red-200 bg-red-50 p-4 text-red-900">
+          <section className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-900">
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
               <div>
@@ -329,15 +436,30 @@ export default function App() {
           </section>
         )}
 
+        {/* Multi-plant selection required */}
         {result && plantOptions.length > 1 && !selectedPlant && errors.length === 0 && (
-          <section className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-6 text-amber-900 shadow-soft">
+          <section className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-amber-900">
             <h2 className="text-base font-semibold">Select a plant to continue</h2>
             <p className="mt-1 text-sm">
-              This upload contains multiple plants. Choose one plant first; folder filtering is optional after that.
+              This report contains multiple plants. Choose one using the{" "}
+              <span className="font-semibold">Plant</span> selector in the control bar above.
             </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {plantOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => handlePlantChange(option.value)}
+                  className="rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-800 shadow-sm transition hover:bg-amber-100"
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
           </section>
         )}
 
+        {/* Dashboard */}
         {selectedPlant && filteredResult?.daily?.length > 0 && (
           <Dashboard
             data={filteredResult}
@@ -347,11 +469,12 @@ export default function App() {
           />
         )}
 
+        {/* Empty timeframe */}
         {selectedPlant && filteredResult && filteredResult.daily.length === 0 && errors.length === 0 && (
-          <section className="mt-6 rounded-lg border border-slate-200 bg-white p-6 text-slate-700 shadow-soft">
-            <h2 className="text-base font-semibold text-slate-950">No rows in this timeframe</h2>
+          <section className="mt-2 rounded-xl border border-slate-200 bg-white p-8 text-center shadow-soft">
+            <p className="text-sm font-semibold text-slate-950">No rows in this timeframe</p>
             <p className="mt-1 text-sm text-slate-500">
-              The selected range does not contain production dates from the uploaded report.
+              The selected range contains no production dates from the uploaded report.
             </p>
           </section>
         )}
@@ -360,91 +483,62 @@ export default function App() {
   );
 }
 
-function ScopeFilter({
-  plantOptions,
-  selectedPlant,
-  folderOptions,
-  selectedFolders,
-  onPlantChange,
-  onFolderToggle,
-  onClearFolders
-}) {
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-soft">
-      <div className="grid gap-4 lg:grid-cols-[minmax(220px,0.35fr)_1fr]">
-        <div>
-          <label htmlFor="plant-select" className="text-xs font-semibold uppercase tracking-normal text-slate-500">
-            Plant
-          </label>
-          <select
-            id="plant-select"
-            value={selectedPlant}
-            onChange={(event) => onPlantChange(event.target.value)}
-            className="mt-2 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-          >
-            <option value="">Select plant</option>
-            {plantOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
+// ── Empty drop zone ────────────────────────────────────────────────
+function EmptyDropZone({ onUpload }) {
+  const inputRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
 
-        <div>
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-xs font-semibold uppercase tracking-normal text-slate-500">Folders</p>
-            {selectedFolders.length > 0 && (
-              <button
-                type="button"
-                onClick={onClearFolders}
-                className="text-xs font-semibold text-blue-700 transition hover:text-blue-900"
-              >
-                Clear folders
-              </button>
-            )}
-          </div>
-          {!selectedPlant ? (
-            <p className="mt-2 text-sm text-slate-500">Select a plant first.</p>
-          ) : folderOptions.length === 0 ? (
-            <p className="mt-2 text-sm text-slate-500">No folders found for this plant.</p>
-          ) : (
-            <div className="mt-2 flex max-h-28 flex-wrap gap-2 overflow-auto pr-1">
-              {folderOptions.map((option) => (
-                <label
-                  key={option.value}
-                  className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-semibold text-slate-700"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedFolders.includes(option.value)}
-                    onChange={() => onFolderToggle(option.value)}
-                    className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  <span>{option.label}</span>
-                </label>
-              ))}
-            </div>
-          )}
-          <p className="mt-2 text-xs text-slate-500">
-            {selectedFolders.length > 0 ? `${selectedFolders.length} folder${selectedFolders.length === 1 ? "" : "s"} selected` : "All folders selected"}
+  function submitFile(file) {
+    if (file) onUpload(file);
+  }
+
+  return (
+    <div
+      onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(event) => { event.preventDefault(); setDragging(false); submitFile(event.dataTransfer.files?.[0]); }}
+      onClick={() => inputRef.current?.click()}
+      className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed transition ${
+        dragging
+          ? "border-blue-400 bg-blue-50"
+          : "border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50/60"
+      }`}
+      style={{ minHeight: "calc(100vh - 120px)" }}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".xlsx,.xls"
+        className="hidden"
+        onChange={(event) => submitFile(event.target.files?.[0])}
+      />
+      <div className="flex flex-col items-center gap-5 text-center px-6">
+        <div className={`rounded-2xl p-5 transition ${dragging ? "bg-blue-100" : "bg-slate-100"}`}>
+          <UploadCloud className={`h-10 w-10 transition ${dragging ? "text-blue-500" : "text-slate-400"}`} aria-hidden="true" />
+        </div>
+        <div className="space-y-1.5">
+          <p className="text-base font-semibold text-slate-700">
+            {dragging ? "Release to upload" : "Drop your production report here"}
+          </p>
+          <p className="max-w-xs text-sm text-slate-400">
+            Or use the{" "}
+            <span className="font-semibold text-blue-600">Upload report</span>{" "}
+            button in the top-right corner
           </p>
         </div>
+        <p className="text-xs text-slate-300">Accepts .xlsx and .xls files</p>
       </div>
-    </section>
+    </div>
   );
 }
+
+// ── Helpers ─────────────────────────────────────────────────────────
 
 function createDefaultTimeframe() {
   return {
     mode: "annual",
     isCleared: false,
-    periods: {
-      annual: "",
-      half: "",
-      quarter: "",
-      month: ""
-    },
+    periods: { annual: "", half: "", quarter: "", month: "" },
     customStart: "",
     customEnd: ""
   };
@@ -452,17 +546,15 @@ function createDefaultTimeframe() {
 
 function buildPlantOptions(result) {
   if (!result) return [];
-
   return Array.from(
     new Set((result.details || []).map((row) => row.plant_name).filter(Boolean))
   )
-    .sort((first, second) => first.localeCompare(second))
+    .sort((a, b) => a.localeCompare(b))
     .map((plantName) => ({ value: plantName, label: plantName }));
 }
 
 function buildFolderOptions(result, selectedPlant) {
   if (!result || !selectedPlant) return [];
-
   return Array.from(
     new Set(
       (result.details || [])
@@ -471,16 +563,12 @@ function buildFolderOptions(result, selectedPlant) {
         .filter(Boolean)
     )
   )
-    .sort((first, second) => first.localeCompare(second))
-    .map((folderName) => ({
-      value: folderName,
-      label: formatResourceLabel(folderName)
-    }));
+    .sort((a, b) => a.localeCompare(b))
+    .map((folderName) => ({ value: folderName, label: formatResourceLabel(folderName) }));
 }
 
 function filterCapacityDataByScope(result, selectedPlant, selectedFolders) {
   if (!result || !selectedPlant) return null;
-
   const selectedFolderSet = new Set(selectedFolders);
   const plantDetails = (result.details || []).filter((row) => row.plant_name === selectedPlant);
   const dateUniverse = Array.from(new Set(plantDetails.map((row) => row.run_date).filter(Boolean))).sort();
@@ -492,14 +580,7 @@ function filterCapacityDataByScope(result, selectedPlant, selectedFolders) {
     .filter((row) => selectedFolderSet.size === 0 || selectedFolderSet.has(row.folder));
   const fixedCapacityFolders = selectedFolderSet.size > 0 ? selectedFolderSet.size : null;
   const daily = buildDailyRowsFromDetails(details, dateUniverse, fixedCapacityFolders);
-
-  return {
-    ...result,
-    summary: calculateSummary(daily),
-    daily,
-    details,
-    tower_details: towerDetails
-  };
+  return { ...result, summary: calculateSummary(daily), daily, details, tower_details: towerDetails };
 }
 
 function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolders = null) {
@@ -522,7 +603,6 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
     ...dates.map((runDate) => new Set((detailsByDate.get(runDate) || []).map((row) => row.folder)).size)
   );
   const capacityFoldersCount = Math.max(Number(fixedCapacityFolders || 0), maxActiveFolders);
-
   if (capacityFoldersCount <= 0) return [];
 
   return dates.map((runDate) => {
@@ -535,7 +615,6 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
     const downtime = sumBy(rows, "downtime");
     const bufferTime = sumBy(rows, "buffer_time");
     const idleTime = Math.max(availableCapacity - activeAvailableCapacity, 0);
-
     return {
       run_date: runDate,
       active_folders_count: activeFoldersCount,
@@ -546,53 +625,41 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
       downtime: cleanNumber(downtime),
       buffer_time: cleanNumber(bufferTime),
       idle_time: cleanNumber(idleTime),
-      utilization_percentage: cleanNumber(availableCapacity > 0 ? Math.min((runtime / availableCapacity) * 100, 100) : 0)
+      utilization_percentage: cleanNumber(
+        availableCapacity > 0 ? Math.min((runtime / availableCapacity) * 100, 100) : 0
+      )
     };
   });
 }
 
 function buildPeriodOptions(dailyRows) {
-  const periodMaps = {
-    annual: new Map(),
-    half: new Map(),
-    quarter: new Map(),
-    month: new Map()
-  };
+  const periodMaps = { annual: new Map(), half: new Map(), quarter: new Map(), month: new Map() };
 
   for (const row of dailyRows) {
     const dateParts = parseDateKey(row.run_date);
     if (!dateParts) continue;
-
     const { year, month } = dateParts;
     const half = month <= 6 ? 1 : 2;
     const quarter = Math.ceil(month / 3);
 
     addPeriod(periodMaps.annual, {
-      key: String(year),
-      label: String(year),
-      start: formatDateKey(year, 1, 1),
-      end: formatDateKey(year, 12, 31)
+      key: String(year), label: String(year),
+      start: formatDateKey(year, 1, 1), end: formatDateKey(year, 12, 31)
     });
-
     addPeriod(periodMaps.half, {
-      key: `${year}-H${half}`,
-      label: `H${half} ${year}`,
+      key: `${year}-H${half}`, label: `H${half} ${year}`,
       start: formatDateKey(year, half === 1 ? 1 : 7, 1),
       end: formatDateKey(year, half === 1 ? 6 : 12, half === 1 ? 30 : 31)
     });
-
     const quarterStartMonth = (quarter - 1) * 3 + 1;
     const quarterEndMonth = quarterStartMonth + 2;
     addPeriod(periodMaps.quarter, {
-      key: `${year}-Q${quarter}`,
-      label: `Q${quarter} ${year}`,
+      key: `${year}-Q${quarter}`, label: `Q${quarter} ${year}`,
       start: formatDateKey(year, quarterStartMonth, 1),
       end: formatDateKey(year, quarterEndMonth, daysInMonth(year, quarterEndMonth))
     });
-
     addPeriod(periodMaps.month, {
-      key: `${year}-${pad(month)}`,
-      label: formatMonthLabel(year, month),
+      key: `${year}-${pad(month)}`, label: formatMonthLabel(year, month),
       start: formatDateKey(year, month, 1),
       end: formatDateKey(year, month, daysInMonth(year, month))
     });
@@ -607,9 +674,7 @@ function buildPeriodOptions(dailyRows) {
 }
 
 function addPeriod(periodMap, option) {
-  if (!periodMap.has(option.key)) {
-    periodMap.set(option.key, option);
-  }
+  if (!periodMap.has(option.key)) periodMap.set(option.key, option);
 }
 
 function sortPeriodOptions(periodMap) {
@@ -621,11 +686,8 @@ function resolveTimeframeRange(timeframe, periodOptions, dailyRows) {
 
   if (timeframe.isCleared) {
     const bounds = getDateBounds(dailyRows);
-
     return {
-      key: "all",
-      start: bounds.start,
-      end: bounds.end,
+      key: "all", start: bounds.start, end: bounds.end,
       label: `All dates: ${formatDisplayDate(bounds.start)} to ${formatDisplayDate(bounds.end)}`
     };
   }
@@ -636,42 +698,22 @@ function resolveTimeframeRange(timeframe, periodOptions, dailyRows) {
     const secondDate = timeframe.customEnd || bounds.end;
     const start = firstDate <= secondDate ? firstDate : secondDate;
     const end = firstDate <= secondDate ? secondDate : firstDate;
-
-    return {
-      key: "custom",
-      start,
-      end,
-      label: `Custom: ${formatDisplayDate(start)} to ${formatDisplayDate(end)}`
-    };
+    return { key: "custom", start, end, label: `Custom: ${formatDisplayDate(start)} to ${formatDisplayDate(end)}` };
   }
 
   const options = periodOptions[timeframe.mode] || [];
-  const selectedOption =
-    options.find((option) => option.key === timeframe.periods[timeframe.mode]) || options[0];
-
+  const selectedOption = options.find((option) => option.key === timeframe.periods[timeframe.mode]) || options[0];
   if (!selectedOption) return null;
-
-  return {
-    ...selectedOption,
-    label: `${MODE_LABELS[timeframe.mode]}: ${selectedOption.label}`
-  };
+  return { ...selectedOption, label: `${MODE_LABELS[timeframe.mode]}: ${selectedOption.label}` };
 }
 
 function filterCapacityData(result, range) {
   if (!result) return null;
   if (!range) return result;
-
   const daily = result.daily.filter((row) => isDateInRange(row.run_date, range));
   const details = result.details.filter((row) => isDateInRange(row.run_date, range));
   const towerDetails = (result.tower_details || []).filter((row) => isDateInRange(row.run_date, range));
-
-  return {
-    ...result,
-    summary: calculateSummary(daily),
-    daily,
-    details,
-    tower_details: towerDetails
-  };
+  return { ...result, summary: calculateSummary(daily), daily, details, tower_details: towerDetails };
 }
 
 function calculateSummary(dailyRows) {
@@ -679,11 +721,6 @@ function calculateSummary(dailyRows) {
   const totalRuntime = sumBy(dailyRows, "runtime");
   const totalBufferTime = sumBy(dailyRows, "buffer_time");
   const totalIdleTime = sumBy(dailyRows, "idle_time");
-  const rawPercentage = totalAvailable > 0 ? (totalRuntime / totalAvailable) * 100 : 0;
-  const cappedPercentage = Math.min(rawPercentage, 100);
-  const spareCapacityPercentage = totalAvailable > 0 ? Math.min((totalBufferTime / totalAvailable) * 100, 100) : 0;
-  const idleCapacityPercentage = totalAvailable > 0 ? Math.min((totalIdleTime / totalAvailable) * 100, 100) : 0;
-
   return {
     total_available_capacity: cleanNumber(totalAvailable),
     total_runtime: cleanNumber(totalRuntime),
@@ -691,23 +728,16 @@ function calculateSummary(dailyRows) {
     total_downtime: cleanNumber(sumBy(dailyRows, "downtime")),
     total_buffer_time: cleanNumber(totalBufferTime),
     total_idle_time: cleanNumber(totalIdleTime),
-    average_utilization_percentage: cleanNumber(cappedPercentage),
-    spare_capacity_percentage: cleanNumber(spareCapacityPercentage),
-    idle_capacity_percentage: cleanNumber(idleCapacityPercentage),
+    average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalRuntime / totalAvailable) * 100, 100) : 0),
+    spare_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalBufferTime / totalAvailable) * 100, 100) : 0),
+    idle_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalIdleTime / totalAvailable) * 100, 100) : 0),
     active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count"))
   };
 }
 
 function getDateBounds(dailyRows) {
-  const dates = dailyRows
-    .map((row) => row.run_date)
-    .filter(Boolean)
-    .sort();
-
-  return {
-    start: dates[0] || "",
-    end: dates[dates.length - 1] || ""
-  };
+  const dates = dailyRows.map((row) => row.run_date).filter(Boolean).sort();
+  return { start: dates[0] || "", end: dates[dates.length - 1] || "" };
 }
 
 function isDateInRange(value, range) {
@@ -715,11 +745,7 @@ function isDateInRange(value, range) {
 }
 
 function formatResourceLabel(value) {
-  return String(value || "")
-    .split("\n")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join(" / ");
+  return String(value || "").split("\n").map((part) => part.trim()).filter(Boolean).join(" / ");
 }
 
 function sumBy(rows, key) {
@@ -735,12 +761,7 @@ function cleanNumber(value) {
 function parseDateKey(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
   if (!match) return null;
-
-  return {
-    year: Number(match[1]),
-    month: Number(match[2]),
-    day: Number(match[3])
-  };
+  return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
 }
 
 function formatDateKey(year, month, day) {
@@ -756,19 +777,13 @@ function daysInMonth(year, month) {
 }
 
 function formatMonthLabel(year, month) {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    year: "numeric"
-  }).format(new Date(year, month - 1, 1));
+  return new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric" }).format(new Date(year, month - 1, 1));
 }
 
 function formatDisplayDate(value) {
   const dateParts = parseDateKey(value);
   if (!dateParts) return value;
-
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric"
-  }).format(new Date(dateParts.year, dateParts.month - 1, dateParts.day));
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(
+    new Date(dateParts.year, dateParts.month - 1, dateParts.day)
+  );
 }
