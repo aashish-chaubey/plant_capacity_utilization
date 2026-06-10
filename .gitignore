@@ -17,3 +17,4 @@ data/~$*.xlsx
 
 # Ignore environment variable files
 .env
+.env.local
