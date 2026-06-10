@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,7 @@ from typing import Any
 import pandas as pd
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -35,51 +36,71 @@ class IntelligenceRequest(BaseModel):
     scope_label: str = ""
 
 
+def _json_default(obj: Any) -> Any:
+    """Convert numpy/pandas scalar types that json.dumps can't handle natively."""
+    # pd.NA, pd.NaT, numpy.nan → null
+    try:
+        if pd.isna(obj):
+            return None
+    except (TypeError, ValueError):
+        pass
+    # numpy scalars (int64, float64, bool_) → Python native via .item()
+    if hasattr(obj, "item"):
+        return obj.item()
+    # numpy arrays, pandas Series → list
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    raise TypeError(f"Type {type(obj).__name__} is not JSON serializable")
+
+
+def _safe_json(data: Any) -> Any:
+    """Round-trip through json.dumps/loads to strip all non-serializable types."""
+    return json.loads(json.dumps(data, default=_json_default))
+
+
 @app.get("/api/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.post("/api/upload")
-async def upload_production_report(file: UploadFile = File(...)) -> dict:
+async def upload_production_report(file: UploadFile = File(...)) -> JSONResponse:
     try:
         contents = await file.read()
         workbook = pd.ExcelFile(BytesIO(contents), engine="openpyxl")
-    except Exception:
-        return {
+    except Exception as exc:
+        return JSONResponse({
             "valid": False,
             "summary": None,
             "daily": [],
             "details": [],
-            "errors": ["Unable to read workbook. Upload a readable Excel workbook."],
-        }
+            "errors": [f"Unable to read workbook: {exc}"],
+        })
 
     try:
-        return build_capacity_response(workbook)
+        result = build_capacity_response(workbook)
+        return JSONResponse(_safe_json(result))
     except Exception as exc:
-        return {
+        return JSONResponse({
             "valid": False,
             "summary": None,
             "daily": [],
             "details": [],
             "errors": [f"Processing failed: {exc}"],
-        }
+        })
 
 
 @app.post("/api/intelligence")
-def capacity_intelligence(request: IntelligenceRequest) -> dict[str, Any]:
+def capacity_intelligence(request: IntelligenceRequest) -> JSONResponse:
     try:
-        return {
-            "valid": True,
-            "intelligence": build_capacity_intelligence(request.model_dump()),
-            "errors": [],
-        }
+        result = build_capacity_intelligence(request.model_dump())
+        return JSONResponse(_safe_json({"valid": True, "intelligence": result, "errors": []}))
     except Exception as exc:
-        return {
+        return JSONResponse({
             "valid": False,
             "intelligence": None,
             "errors": [f"Intelligence generation failed: {exc}"],
-        }
+        })
 
 
 # Serve built frontend in production (skipped silently in dev when dist/ doesn't exist)
