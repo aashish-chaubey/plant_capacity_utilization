@@ -709,7 +709,8 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
     const lostTime = sumBy(rows, "lost_time");
     const downtime = sumBy(rows, "downtime");
     const bufferTime = sumBy(rows, "buffer_time");
-    const idleTime = Math.max(availableCapacity - activeAvailableCapacity, 0);
+    const activeIdleTime = sumBy(rows, "idle_time");
+    const idleTime = Math.max(availableCapacity - activeAvailableCapacity, 0) + activeIdleTime;
     return {
       run_date: runDate,
       active_folders_count: activeFoldersCount,

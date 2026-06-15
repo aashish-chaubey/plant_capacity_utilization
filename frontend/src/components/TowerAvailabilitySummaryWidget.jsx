@@ -19,7 +19,7 @@ export default function TowerAvailabilitySummaryWidget({ towerDetails, daily }) 
         </span>
         <div>
           <h3 className="text-base font-semibold text-slate-950">
-            Tower Availability Summary
+            Tower Utilization Summary
           </h3>
           <p className="mt-1 text-sm text-slate-500">
             {formatNumber(summary.totalTowers)} towers tracked across {formatNumber(summary.totalDays)} day{summary.totalDays === 1 ? "" : "s"}.
@@ -32,7 +32,7 @@ export default function TowerAvailabilitySummaryWidget({ towerDetails, daily }) 
           <table className="w-full min-w-[420px] text-sm">
             <thead className="bg-slate-50">
               <tr className="border-b border-slate-100 text-left text-xs font-semibold uppercase tracking-normal text-slate-500">
-                <th className="px-3 py-2">Tower availability</th>
+                <th className="px-3 py-2">Tower utilization</th>
                 <th className="px-3 py-2">Days</th>
                 <th className="px-3 py-2">Share</th>
               </tr>

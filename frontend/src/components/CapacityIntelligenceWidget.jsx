@@ -4,6 +4,7 @@ import {
 } from "lucide-react";
 
 import DelayedPrintFinishWidget from "./DelayedPrintFinishWidget.jsx";
+import MaximumAllowableLossTimeWidget from "./MaximumAllowableLossTimeWidget.jsx";
 import TowerAvailabilitySummaryWidget from "./TowerAvailabilitySummaryWidget.jsx";
 
 export default function CapacityIntelligenceWidget({ intelligence, loading, error, details, towerDetails, daily }) {
@@ -20,6 +21,7 @@ export default function CapacityIntelligenceWidget({ intelligence, loading, erro
         ) : (
           <StatusMessage message={error} />
         )}
+        <MaximumAllowableLossTimeWidget details={details} />
         <DelayedPrintFinishWidget details={details} />
         <TowerAvailabilitySummaryWidget towerDetails={towerDetails} daily={daily} />
       </section>
@@ -58,6 +60,7 @@ export default function CapacityIntelligenceWidget({ intelligence, loading, erro
         <StatusMessage message={error || llm.message || "LLM synthesis is unavailable; deterministic findings are shown."} />
       )}
 
+      <MaximumAllowableLossTimeWidget details={details} />
       <DelayedPrintFinishWidget details={details} />
       <TowerAvailabilitySummaryWidget towerDetails={towerDetails} daily={daily} />
     </section>

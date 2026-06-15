@@ -20,6 +20,11 @@ warnings.filterwarnings(
 )
 
 CAPACITY_MINUTES_PER_FOLDER_DAY = 240.0
+PF_COMPLIANCE_MINUTES_BY_PLANT = {
+    "baroda": 180.0,
+    "manesar": 180.0,
+    "trivandrum": 150.0,
+}
 
 GENERAL_SHEET = "General"
 BOOK_WISE_SHEET = "Book Wise Details"
@@ -566,15 +571,21 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     metrics["lost_time"] = calculated_lost_time.clip(upper=remaining_capacity)
 
     # Strict railguard:
-    # runtime + downtime + lost_time + buffer_time must equal 240.
+    # runtime + downtime + lost_time + buffer_time + idle_time must equal 240.
+    # For PF-cutoff plants, spare is available only until the compliance time.
+    # The post-compliance part of the 00:00-04:00 window is shown as unplanned.
     fixed_used_minutes = (
         metrics["runtime"]
         + metrics["downtime"]
         + metrics["lost_time"]
     )
+    compliance_minutes = metrics["Plant Name"].apply(_pf_compliance_minutes)
 
     metrics["buffer_time"] = (
-        metrics["available_capacity"] - fixed_used_minutes
+        compliance_minutes - fixed_used_minutes
+    ).clip(lower=0, upper=CAPACITY_MINUTES_PER_FOLDER_DAY)
+    metrics["idle_time"] = (
+        metrics["available_capacity"] - fixed_used_minutes - metrics["buffer_time"]
     ).clip(lower=0, upper=CAPACITY_MINUTES_PER_FOLDER_DAY)
     if "editions" not in metrics:
         metrics["editions"] = [[] for _ in range(len(metrics))]
@@ -599,6 +610,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
             "lost_time",
             "downtime",
             "buffer_time",
+            "idle_time",
             "change_over_time",
             "waiting_time",
             "reflong_related_downtime",
@@ -1411,6 +1423,7 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
             lost_time=("lost_time", "sum"),
             downtime=("downtime", "sum"),
             buffer_time=("buffer_time", "sum"),
+            active_idle_time=("idle_time", "sum"),
         )
         .reset_index()
         .rename(columns={REPORT_DATE_COLUMN: "Run Date"})
@@ -1425,7 +1438,8 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
 
     daily["capacity_folders_count"] = capacity_folders_count
     daily["available_capacity"] = fixed_daily_capacity
-    daily["idle_time"] = idle_time
+    daily["idle_time"] = idle_time + daily["active_idle_time"]
+    daily = daily.drop(columns=["active_idle_time"])
 
     daily["utilization_percentage"] = daily.apply(
         lambda row: _percentage(row["runtime"], row["available_capacity"]),
@@ -2005,6 +2019,13 @@ def _percentage(numerator: float, denominator: float) -> float:
     return min(percentage, 100.0)
 
 
+def _pf_compliance_minutes(plant_name: Any) -> float:
+    return PF_COMPLIANCE_MINUTES_BY_PLANT.get(
+        _canonical_text(plant_name),
+        CAPACITY_MINUTES_PER_FOLDER_DAY,
+    )
+
+
 def _clean_number(value: Any) -> int | float:
     numeric = float(value) if value is not None else 0.0
     if not isfinite(numeric):
@@ -2062,6 +2083,7 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "lost_time",
                 "downtime",
                 "buffer_time",
+                "idle_time",
                 "change_over_time",
                 "waiting_time",
                 "reflong_related_downtime",
@@ -2145,6 +2167,7 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
             "lost_time",
             "downtime",
             "buffer_time",
+            "idle_time",
             "change_over_time",
             "waiting_time",
             "reflong_related_downtime",

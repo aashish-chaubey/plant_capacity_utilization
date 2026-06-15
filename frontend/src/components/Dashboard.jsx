@@ -25,7 +25,8 @@ const CAPACITY_SPLIT_COLORS = {
   runtime: "#B2CFB2",
   spare_time: "#C5E1FF",
   idle_time: "#E5E7EB",
-  window_line: "#234775"
+  window_line: "#234775",
+  twin_folder: "#2563eb"
 };
 
 const CAPACITY_SPLIT_LEGEND = [
@@ -34,9 +35,10 @@ const CAPACITY_SPLIT_LEGEND = [
   { key: "downtime", label: "Downtime", color: CAPACITY_SPLIT_COLORS.downtime },
   { key: "runtime_snp", label: "Run Time: SNP", color: "#CCDCCC" },
   { key: "runtime_gnp", label: "Run Time: GNP", color: "#88AA88" },
-  { key: "complex_prints", label: "Complex prints", marker: "triangle" },
   { key: "spare_time", label: "Spare Time", color: CAPACITY_SPLIT_COLORS.spare_time },
-  { key: "idle_time", label: "Unplanned Time", color: CAPACITY_SPLIT_COLORS.idle_time, pattern: "idle" }
+  { key: "idle_time", label: "Unplanned Time", color: CAPACITY_SPLIT_COLORS.idle_time, pattern: "idle" },
+  { key: "complex_prints", label: "Complex prints", marker: "triangle" },
+  { key: "twin_folder", label: "Twin folders", marker: "twin" }
 ];
 
 const RUNTIME_SEGMENT_STYLES = {
@@ -253,7 +255,7 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
         daily={data.daily}
       />
 
-      <LossTimeThresholdWidget details={data.details} />
+      {/* <LossTimeThresholdWidget details={data.details} /> */}
     </div>
   );
 }
@@ -383,8 +385,8 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
       return;
     }
 
-    const cardWidth = 380;
-    const cardHeight = 300;
+    const cardWidth = 400;
+    const cardHeight = 360;
     const localX = event.clientX - bounds.left;
     const localY = event.clientY - bounds.top;
     const left = localX + cardWidth + 24 > bounds.width
@@ -414,6 +416,21 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
             <div key={item.key} className="inline-flex items-center gap-1.5">
               {item.marker === "triangle" ? (
                 <span className="text-[11px] font-black leading-none text-slate-950">▲</span>
+              ) : item.marker === "twin" ? (
+                <span className="relative inline-flex h-3 w-7 items-center" aria-hidden="true">
+                  <span
+                    className="absolute left-1 right-1 h-0.5 rounded-full"
+                    style={{ backgroundColor: CAPACITY_SPLIT_COLORS.twin_folder }}
+                  />
+                  <span
+                    className="absolute left-0 h-1.5 w-1.5 rounded-full"
+                    style={{ backgroundColor: CAPACITY_SPLIT_COLORS.twin_folder }}
+                  />
+                  <span
+                    className="absolute right-0 h-1.5 w-1.5 rounded-full"
+                    style={{ backgroundColor: CAPACITY_SPLIT_COLORS.twin_folder }}
+                  />
+                </span>
               ) : (
                 <span
                   className="h-3 w-3 rounded-sm border border-slate-300"
@@ -624,8 +641,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
 
                   const fill = getSegmentFill(segment);
                   const sparePercent = row.isIdle ? 0 : calculatePercentage(row.spare_time, rowCapacity);
-                  const runtimeDetailText = formatRuntimeSegmentDetail(segment, row.twin_folder_mode);
-                  const runtimeLabelText = segment.isComplex && runtimeDetailText ? `▲ | ${runtimeDetailText}` : runtimeDetailText;
+                  const runtimeLabelText = formatRuntimeSegmentLabel(segment);
                   const canShowSpareLabel = segment.key === "spare_time" && sparePercent > 0;
                   const showSpareLabelAboveBar = canShowSpareLabel && segmentHeight < 22;
                   const spareLabel = `${Math.round(sparePercent)}%`;
@@ -646,7 +662,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
                         strokeWidth="0.6"
                       >
                         <title>
-                          {`${row.run_date} ${folder.alias}: ${segment.runtimeSegment ? "Run Time" : segment.label} ${formatMinutes(segment.value)}${segment.runtimeSegment && runtimeDetailText ? `, ${runtimeDetailText}` : ""}`}
+                          {`${row.run_date} ${folder.alias}: ${segment.runtimeSegment ? segment.label || "Run Time" : segment.label} ${formatMinutes(segment.value)}`}
                         </title>
                       </rect>
                       {canShowRuntimeLabel && (
@@ -802,7 +818,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
 function CapacityDaySummary({ summary, style, onClose }) {
   return (
     <section
-      className="absolute z-20 w-[380px] max-w-[calc(100%-1rem)] rounded-lg border border-slate-200 bg-white p-3 pr-10 text-sm shadow-xl"
+      className="absolute z-20 max-h-[440px] w-[400px] max-w-[calc(100%-1rem)] overflow-y-auto rounded-lg border border-slate-200 bg-white p-3 pr-10 text-sm shadow-xl"
       style={style}
     >
       <button
@@ -827,6 +843,34 @@ function CapacityDaySummary({ summary, style, onClose }) {
           </div>
         ))}
       </div>
+
+      {summary.runtimeDetails.length > 0 && (
+        <div className="mt-2 border-t border-slate-100 pt-2">
+          <h4 className="text-xs font-semibold uppercase tracking-normal text-slate-500">
+            Runtime details
+          </h4>
+          <div className="mt-1.5 space-y-1.5">
+            {summary.runtimeDetails.map((detail) => (
+              <div key={detail.key} className="rounded-md bg-slate-50 px-2 py-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: detail.color }} />
+                    <span className="truncate font-semibold text-slate-700">
+                      {detail.folderAlias} · {detail.complexity}
+                    </span>
+                  </div>
+                  <span className="shrink-0 font-mono text-xs font-semibold text-slate-500">
+                    {formatMinutes(detail.minutes)}
+                  </span>
+                </div>
+                <div className="mt-0.5 font-mono text-xs font-bold text-slate-950">
+                  {detail.detailText}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="mt-2 space-y-1.5 border-t border-slate-100 pt-2">
         <div className="flex items-center justify-between gap-3">
@@ -1164,8 +1208,7 @@ function buildCapacitySplitModel(dailyRows, detailRows) {
         twin_folder_mode: Boolean(detail.twin_folder_mode),
         twin_folder_group: detail.twin_folder_group || "",
         ...values,
-        idle_time: 0,
-        segments: buildCapacitySegments({ ...values, idle_time: 0 })
+        segments: buildCapacitySegments(values)
       });
     });
   }
@@ -1366,6 +1409,7 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
     totalFolders: folderCount,
     totalCapacity,
     utilization: cleanNumber(runtime + lossTime + downtime),
+    runtimeDetails: buildRuntimeTooltipDetails(activeRows),
     components: [
       {
         key: "runtime",
@@ -1405,6 +1449,30 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
       }
     ]
   };
+}
+
+function buildRuntimeTooltipDetails(rows) {
+  const details = [];
+
+  for (const row of rows) {
+    for (const segment of row.segments || []) {
+      if (!segment.runtimeSegment || Number(segment.value || 0) <= 0) continue;
+
+      const detailText = formatRuntimeSegmentDetail(segment, row.twin_folder_mode);
+      if (!detailText) continue;
+
+      details.push({
+        key: `${row.run_date}||${row.folderKey}||${segment.key}`,
+        folderAlias: `F${Number(row.folderIndex || 0) + 1}`,
+        complexity: formatRuntimeDetailLabel(segment),
+        minutes: segment.value,
+        color: segment.color || CAPACITY_SPLIT_COLORS.runtime,
+        detailText,
+      });
+    }
+  }
+
+  return details;
 }
 
 function sumCapacityRows(rows, key) {
@@ -1537,13 +1605,19 @@ function normalizeCapacityValues(detail) {
     runtime
   };
   const nonSpareTotal = Object.values(nonSpareValues).reduce((total, value) => total + value, 0);
-  const spareTime = cleanNumber(Math.max(CAPACITY_WINDOW_MINUTES - nonSpareTotal, 0));
+  const hasProvidedSpare = Number.isFinite(Number(detail.buffer_time));
+  const hasProvidedIdle = Number.isFinite(Number(detail.idle_time));
+  const idleTime = hasProvidedIdle ? clampMinutes(detail.idle_time) : 0;
+  const spareTime = hasProvidedSpare
+    ? clampMinutes(detail.buffer_time)
+    : cleanNumber(Math.max(CAPACITY_WINDOW_MINUTES - nonSpareTotal - idleTime, 0));
   const values = {
     ...nonSpareValues,
     spare_time: spareTime,
+    idle_time: idleTime,
     runtime_segments: normalizeRuntimeSegments(detail.runtime_segments, runtime)
   };
-  const total = cleanNumber(nonSpareTotal + spareTime);
+  const total = cleanNumber(nonSpareTotal + spareTime + idleTime);
 
   if (total <= CAPACITY_WINDOW_MINUTES) {
     return values;
@@ -1552,7 +1626,7 @@ function normalizeCapacityValues(detail) {
   let overage = cleanNumber(total - CAPACITY_WINDOW_MINUTES);
   const normalized = { ...values };
 
-  for (const key of ["spare_time", "runtime", "downtime", "loss_time", "waiting_time"]) {
+  for (const key of ["spare_time", "idle_time", "runtime", "downtime", "loss_time", "waiting_time"]) {
     if (overage <= 0) break;
 
     const reduction = Math.min(normalized[key], overage);
@@ -1964,6 +2038,16 @@ function formatCapacityMinutes(value) {
 function formatCapacitySummaryValue(minutes, totalCapacity) {
   const percentage = totalCapacity > 0 ? (Number(minutes || 0) / totalCapacity) * 100 : 0;
   return `${formatCapacityMinutes(minutes)} (${formatFixedPercent(percentage)})`;
+}
+
+function formatRuntimeSegmentLabel(segment) {
+  if (!segment?.runtimeSegment) return "";
+  if (!segment.isComplex) return "";
+  return "▲";
+}
+
+function formatRuntimeDetailLabel(segment) {
+  return segment?.label || "Run Time";
 }
 
 function formatRuntimeSegmentDetail(segment, isTwin = false) {

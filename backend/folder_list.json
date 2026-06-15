@@ -1,0 +1,207 @@
+[
+  {
+    "plantName": "Airoli",
+    "machine": "Colorman-A",
+    "folder": "Press 1"
+  },
+  {
+    "plantName": "Airoli",
+    "machine": "Colorman-A",
+    "folder": "Press 2"
+  },
+  {
+    "plantName": "Airoli",
+    "machine": "Colorman-B",
+    "folder": "Press 3"
+  },
+  {
+    "plantName": "Airoli",
+    "machine": "Colorman-B",
+    "folder": "Press 4"
+  },
+  {
+    "plantName": "Airoli",
+    "machine": "Cromoman-C",
+    "folder": "Press 5"
+  },
+  {
+    "plantName": "Baroda",
+    "machine": "HILINE",
+    "folder": "Folder-1"
+  },
+  {
+    "plantName": "Bhosari",
+    "machine": "Regioman",
+    "folder": "Folder 3"
+  },
+  {
+    "plantName": "Bhosari",
+    "machine": "Regioman",
+    "folder": "Folder 4"
+  },
+  {
+    "plantName": "Bommasandra",
+    "machine": "Regioman-A",
+    "folder": "Folder A"
+  },
+  {
+    "plantName": "Bommasandra",
+    "machine": "Regioman-A",
+    "folder": "Folder B"
+  },
+  {
+    "plantName": "Bommasandra",
+    "machine": "Regioman-B",
+    "folder": "Folder C"
+  },
+  {
+    "plantName": "Bommasandra",
+    "machine": "Regioman-B",
+    "folder": "Folder D"
+  },
+  {
+    "plantName": "Butibori",
+    "machine": "HILINE",
+    "folder": "JF-1"
+  },
+  {
+    "plantName": "Butibori",
+    "machine": "HILINE",
+    "folder": "JF-2"
+  },
+  {
+    "plantName": "Chemmencherry",
+    "machine": "Regioman",
+    "folder": "Folder 1"
+  },
+  {
+    "plantName": "Chemmencherry",
+    "machine": "Regioman",
+    "folder": "Folder 2"
+  },
+  {
+    "plantName": "Chinhat",
+    "machine": "Hiline-1",
+    "folder": "Folder 1"
+  },
+  {
+    "plantName": "Chinhat",
+    "machine": "Hiline-1",
+    "folder": "Folder 2"
+  },
+  {
+    "plantName": "Chinhat",
+    "machine": "Hiline-2",
+    "folder": "Folder 3"
+  },
+  {
+    "plantName": "Chinhat",
+    "machine": "Hiline-2",
+    "folder": "Folder 4"
+  },
+  {
+    "plantName": "Kandivali",
+    "machine": "Colorman-B",
+    "folder": "COLOR  B"
+  },
+  {
+    "plantName": "Kandivali",
+    "machine": "Colorman-B",
+    "folder": "COLOR  C"
+  },
+  {
+    "plantName": "Kandivali",
+    "machine": "Colorman-D",
+    "folder": "COLOR  D"
+  },
+  {
+    "plantName": "Kandivali",
+    "machine": "Colorman-D",
+    "folder": "COLOR  E"
+  },
+  {
+    "plantName": "Kandivali",
+    "machine": "Geoman-A",
+    "folder": "GEOMAN A"
+  },
+  {
+    "plantName": "Manesar",
+    "machine": "TKS1",
+    "folder": "Folder-1"
+  },
+  {
+    "plantName": "Nacharam",
+    "machine": "Hiline-1",
+    "folder": "F-1"
+  },
+  {
+    "plantName": "Nacharam",
+    "machine": "Hiline-1",
+    "folder": "F-2"
+  },
+  {
+    "plantName": "Nacharam",
+    "machine": "Hiline-2",
+    "folder": "Folder 3"
+  },
+  {
+    "plantName": "Nacharam",
+    "machine": "Hiline-2",
+    "folder": "Folder 4"
+  },
+  {
+    "plantName": "Sahibabad",
+    "machine": "Colorman-C",
+    "folder": "COLOR  D"
+  },
+  {
+    "plantName": "Sahibabad",
+    "machine": "Colorman-C",
+    "folder": "COLOR  E"
+  },
+  {
+    "plantName": "Sahibabad",
+    "machine": "Colorman-D",
+    "folder": "COLOR  F"
+  },
+  {
+    "plantName": "Sahibabad",
+    "machine": "Colorman-D",
+    "folder": "COLOR  G"
+  },
+  {
+    "plantName": "Sahibabad",
+    "machine": "Geoman-B",
+    "folder": "GEOMAN B"
+  },
+  {
+    "plantName": "Saltlake",
+    "machine": "Regioman",
+    "folder": "Folder A"
+  },
+  {
+    "plantName": "Saltlake",
+    "machine": "Cromoman",
+    "folder": "Folder C"
+  },
+  {
+    "plantName": "Saltlake",
+    "machine": "Cromoman",
+    "folder": "Folder D"
+  },
+  {
+    "plantName": "Trivandrum",
+    "machine": "Citiline",
+    "folder": "F1"
+  },
+  {
+    "plantName": "Vejalpur",
+    "machine": "Cityline-1",
+    "folder": "F1"
+  },
+  {
+    "plantName": "Vejalpur",
+    "machine": "HILINE",
+    "folder": "HL - Folder 1"
+  }
+]
