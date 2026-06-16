@@ -4,15 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Dashboard from "./components/Dashboard.jsx";
 
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
+const FISCAL_YEAR_START_MONTH = 4;
 const PERIOD_MODES = ["annual", "half", "quarter", "month"];
-const MODE_LABELS = {
-  annual: "Annual",
-  half: "Half yearly",
-  quarter: "Quarterly",
-  month: "Monthly"
-};
 const TIMEFRAME_TABS = [
-  ["annual", "Annual"],
+  ["annual", "Fiscal yr"],
   ["half", "Half-yr"],
   ["quarter", "Qtr"],
   ["month", "Month"],
@@ -72,6 +67,15 @@ export default function App() {
     () => buildPeriodOptions(scopedResult?.daily || []),
     [scopedResult]
   );
+  const periodSelectOptions = useMemo(
+    () =>
+      getVisiblePeriodOptions(
+        periodOptions[timeframe.mode] || [],
+        timeframe.mode,
+        timeframe.periods[timeframe.mode] || ""
+      ),
+    [periodOptions, timeframe.mode, timeframe.periods]
+  );
 
   useEffect(() => {
     if (!result) {
@@ -119,8 +123,7 @@ export default function App() {
       let changed = false;
       for (const mode of PERIOD_MODES) {
         const options = periodOptions[mode] || [];
-        const hasCurrentPeriod = options.some((option) => option.key === nextPeriods[mode]);
-        const nextKey = hasCurrentPeriod ? nextPeriods[mode] : options[0]?.key || "";
+        const nextKey = nextPeriods[mode] || options[0]?.key || "";
         if (nextPeriods[mode] !== nextKey) {
           nextPeriods[mode] = nextKey;
           changed = true;
@@ -253,7 +256,6 @@ export default function App() {
     setSelectedPlant(plantName);
     setSelectedFolders([]);
     setFolderMenuOpen(false);
-    setTimeframe(createDefaultTimeframe());
   }
 
   function handleFolderToggle(folderName) {
@@ -262,13 +264,11 @@ export default function App() {
         ? current.filter((folder) => folder !== folderName)
         : [...current, folderName]
     );
-    setTimeframe(createDefaultTimeframe());
   }
 
   function handleClearFolders() {
     setSelectedFolders([]);
     setFolderMenuOpen(false);
-    setTimeframe(createDefaultTimeframe());
   }
 
   const showControlStrip = Boolean(result && selectedPlant);
@@ -473,10 +473,10 @@ export default function App() {
                     onChange={(event) => handlePeriodChange(event.target.value)}
                     className="h-8 min-w-[130px] rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-800 outline-none transition focus:border-blue-400 focus:ring-1 focus:ring-blue-200"
                   >
-                    {(periodOptions[timeframe.mode] || []).length === 0 && (
+                    {periodSelectOptions.length === 0 && (
                       <option value="">No dates</option>
                     )}
-                    {(periodOptions[timeframe.mode] || []).map((option) => (
+                    {periodSelectOptions.map((option) => (
                       <option key={option.key} value={option.key}>{option.label}</option>
                     ))}
                   </select>
@@ -693,16 +693,18 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
     detailsByDate.set(row.run_date, rows);
   }
 
-  const maxActiveFolders = Math.max(
+  const maxCapacityFolders = Math.max(
     0,
     ...dates.map((runDate) => new Set((detailsByDate.get(runDate) || []).map((row) => row.folder)).size)
   );
-  const capacityFoldersCount = Math.max(Number(fixedCapacityFolders || 0), maxActiveFolders);
+  const capacityFoldersCount = Math.max(Number(fixedCapacityFolders || 0), maxCapacityFolders);
   if (capacityFoldersCount <= 0) return [];
 
   return dates.map((runDate) => {
     const rows = detailsByDate.get(runDate) || [];
-    const activeFoldersCount = new Set(rows.map((row) => row.folder)).size;
+    const activeFoldersCount = new Set(
+      rows.filter(isActiveCapacityDetailRow).map((row) => row.folder)
+    ).size;
     const activeAvailableCapacity = sumBy(rows, "available_capacity");
     const availableCapacity = capacityFoldersCount * 240;
     const runtime = sumBy(rows, "runtime");
@@ -735,27 +737,35 @@ function buildPeriodOptions(dailyRows) {
     const dateParts = parseDateKey(row.run_date);
     if (!dateParts) continue;
     const { year, month } = dateParts;
-    const half = month <= 6 ? 1 : 2;
-    const quarter = Math.ceil(month / 3);
+    const fiscalPeriod = getFiscalPeriodParts(year, month);
+    const fiscalYearLabel = formatFiscalYearLabel(fiscalPeriod.fiscalYearStart);
+    const annualRange = getFiscalAnnualRange(fiscalPeriod.fiscalYearStart);
+    const halfRange = getFiscalSubPeriodRange(fiscalPeriod.fiscalYearStart, fiscalPeriod.half === 1 ? 1 : 7, fiscalPeriod.half === 1 ? 6 : 12);
+    const quarterStartFiscalMonth = (fiscalPeriod.quarter - 1) * 3 + 1;
+    const quarterRange = getFiscalSubPeriodRange(
+      fiscalPeriod.fiscalYearStart,
+      quarterStartFiscalMonth,
+      quarterStartFiscalMonth + 2
+    );
 
     addPeriod(periodMaps.annual, {
-      key: String(year), label: String(year),
-      start: formatDateKey(year, 1, 1), end: formatDateKey(year, 12, 31)
+      key: String(fiscalPeriod.fiscalYearStart),
+      label: fiscalYearLabel,
+      ...annualRange
     });
     addPeriod(periodMaps.half, {
-      key: `${year}-H${half}`, label: `H${half} ${year}`,
-      start: formatDateKey(year, half === 1 ? 1 : 7, 1),
-      end: formatDateKey(year, half === 1 ? 6 : 12, half === 1 ? 30 : 31)
+      key: `${fiscalPeriod.fiscalYearStart}-H${fiscalPeriod.half}`,
+      label: `H${fiscalPeriod.half} ${fiscalYearLabel}`,
+      ...halfRange
     });
-    const quarterStartMonth = (quarter - 1) * 3 + 1;
-    const quarterEndMonth = quarterStartMonth + 2;
     addPeriod(periodMaps.quarter, {
-      key: `${year}-Q${quarter}`, label: `Q${quarter} ${year}`,
-      start: formatDateKey(year, quarterStartMonth, 1),
-      end: formatDateKey(year, quarterEndMonth, daysInMonth(year, quarterEndMonth))
+      key: `${fiscalPeriod.fiscalYearStart}-Q${fiscalPeriod.quarter}`,
+      label: `Q${fiscalPeriod.quarter} ${fiscalYearLabel}`,
+      ...quarterRange
     });
     addPeriod(periodMaps.month, {
-      key: `${year}-${pad(month)}`, label: formatMonthLabel(year, month),
+      key: `${year}-${pad(month)}`,
+      label: `${formatMonthLabel(year, month)} (${fiscalYearLabel})`,
       start: formatDateKey(year, month, 1),
       end: formatDateKey(year, month, daysInMonth(year, month))
     });
@@ -777,6 +787,17 @@ function sortPeriodOptions(periodMap) {
   return Array.from(periodMap.values()).sort((a, b) => b.start.localeCompare(a.start));
 }
 
+function getVisiblePeriodOptions(options, mode, selectedKey) {
+  if (!selectedKey || options.some((option) => option.key === selectedKey)) return options;
+
+  const selectedOption = buildPeriodOptionFromKey(mode, selectedKey);
+  if (!selectedOption) return options;
+
+  const periodMap = new Map(options.map((option) => [option.key, option]));
+  periodMap.set(selectedOption.key, selectedOption);
+  return sortPeriodOptions(periodMap);
+}
+
 function resolveTimeframeRange(timeframe, periodOptions, dailyRows) {
   if (!dailyRows.length) return null;
 
@@ -784,7 +805,7 @@ function resolveTimeframeRange(timeframe, periodOptions, dailyRows) {
     const bounds = getDateBounds(dailyRows);
     return {
       key: "all", start: bounds.start, end: bounds.end,
-      label: `All dates: ${formatDisplayDate(bounds.start)} to ${formatDisplayDate(bounds.end)}`
+      label: formatDateRangeLabel(bounds.start, bounds.end)
     };
   }
 
@@ -794,13 +815,23 @@ function resolveTimeframeRange(timeframe, periodOptions, dailyRows) {
     const secondDate = timeframe.customEnd || bounds.end;
     const start = firstDate <= secondDate ? firstDate : secondDate;
     const end = firstDate <= secondDate ? secondDate : firstDate;
-    return { key: "custom", start, end, label: `Custom: ${formatDisplayDate(start)} to ${formatDisplayDate(end)}` };
+    return { key: "custom", start, end, label: formatDateRangeLabel(start, end) };
   }
 
   const options = periodOptions[timeframe.mode] || [];
-  const selectedOption = options.find((option) => option.key === timeframe.periods[timeframe.mode]) || options[0];
+  const selectedKey = timeframe.periods[timeframe.mode] || "";
+  const selectedOption = options.find((option) => option.key === selectedKey)
+    || buildPeriodOptionFromKey(timeframe.mode, selectedKey)
+    || options[0];
   if (!selectedOption) return null;
-  return { ...selectedOption, label: `${MODE_LABELS[timeframe.mode]}: ${selectedOption.label}` };
+  return {
+    ...selectedOption,
+    label: formatDateRangeLabel(selectedOption.start, selectedOption.end)
+  };
+}
+
+function formatDateRangeLabel(start, end) {
+  return `${formatDisplayDate(start)} to ${formatDisplayDate(end)}`;
 }
 
 function filterCapacityData(result, range) {
@@ -817,6 +848,7 @@ function calculateSummary(dailyRows) {
   const totalRuntime = sumBy(dailyRows, "runtime");
   const totalBufferTime = sumBy(dailyRows, "buffer_time");
   const totalIdleTime = sumBy(dailyRows, "idle_time");
+  const plannedAvailableTime = Math.max(totalAvailable - totalIdleTime, 0);
   return {
     total_available_capacity: cleanNumber(totalAvailable),
     total_runtime: cleanNumber(totalRuntime),
@@ -825,7 +857,7 @@ function calculateSummary(dailyRows) {
     total_buffer_time: cleanNumber(totalBufferTime),
     total_idle_time: cleanNumber(totalIdleTime),
     average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalRuntime / totalAvailable) * 100, 100) : 0),
-    spare_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalBufferTime / totalAvailable) * 100, 100) : 0),
+    spare_capacity_percentage: cleanNumber(plannedAvailableTime > 0 ? Math.min((totalBufferTime / plannedAvailableTime) * 100, 100) : 0),
     idle_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalIdleTime / totalAvailable) * 100, 100) : 0),
     active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count"))
   };
@@ -854,10 +886,122 @@ function sumBy(rows, key) {
   return rows.reduce((total, row) => total + Number(row[key] || 0), 0);
 }
 
+function isActiveCapacityDetailRow(row) {
+  const activeMinutes = [
+    "runtime",
+    "lost_time",
+    "downtime",
+    "buffer_time",
+    "change_over_time",
+    "waiting_time",
+    "reflong_related_downtime",
+    "late_start_time",
+    "gross_runtime",
+    "scheduled_runtime",
+    "overlap_minutes"
+  ].reduce((total, key) => total + Number(row[key] || 0), 0);
+  const availableCapacity = Number(row.available_capacity || 0);
+  const idleTime = Number(row.idle_time || 0);
+  return !(availableCapacity > 0 && idleTime >= availableCapacity && activeMinutes <= 0);
+}
+
 function cleanNumber(value) {
   const numeric = Number.isFinite(Number(value)) ? Number(value) : 0;
   const rounded = Math.round(numeric * 100) / 100;
   return Number.isInteger(rounded) ? rounded : Number(rounded.toFixed(2));
+}
+
+function buildPeriodOptionFromKey(mode, key) {
+  if (!key) return null;
+
+  if (mode === "annual") {
+    const match = /^(\d{4})$/.exec(key);
+    if (!match) return null;
+    const fiscalYearStart = Number(match[1]);
+    return {
+      key,
+      label: formatFiscalYearLabel(fiscalYearStart),
+      ...getFiscalAnnualRange(fiscalYearStart)
+    };
+  }
+
+  if (mode === "half") {
+    const match = /^(\d{4})-H([12])$/.exec(key);
+    if (!match) return null;
+    const fiscalYearStart = Number(match[1]);
+    const half = Number(match[2]);
+    return {
+      key,
+      label: `H${half} ${formatFiscalYearLabel(fiscalYearStart)}`,
+      ...getFiscalSubPeriodRange(fiscalYearStart, half === 1 ? 1 : 7, half === 1 ? 6 : 12)
+    };
+  }
+
+  if (mode === "quarter") {
+    const match = /^(\d{4})-Q([1-4])$/.exec(key);
+    if (!match) return null;
+    const fiscalYearStart = Number(match[1]);
+    const quarter = Number(match[2]);
+    const quarterStartFiscalMonth = (quarter - 1) * 3 + 1;
+    return {
+      key,
+      label: `Q${quarter} ${formatFiscalYearLabel(fiscalYearStart)}`,
+      ...getFiscalSubPeriodRange(fiscalYearStart, quarterStartFiscalMonth, quarterStartFiscalMonth + 2)
+    };
+  }
+
+  if (mode === "month") {
+    const match = /^(\d{4})-(\d{2})$/.exec(key);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    if (month < 1 || month > 12) return null;
+    const fiscalPeriod = getFiscalPeriodParts(year, month);
+    return {
+      key,
+      label: `${formatMonthLabel(year, month)} (${formatFiscalYearLabel(fiscalPeriod.fiscalYearStart)})`,
+      start: formatDateKey(year, month, 1),
+      end: formatDateKey(year, month, daysInMonth(year, month))
+    };
+  }
+
+  return null;
+}
+
+function getFiscalPeriodParts(year, month) {
+  const fiscalYearStart = month >= FISCAL_YEAR_START_MONTH ? year : year - 1;
+  const fiscalMonth = ((month - FISCAL_YEAR_START_MONTH + 12) % 12) + 1;
+  return {
+    fiscalYearStart,
+    fiscalMonth,
+    half: fiscalMonth <= 6 ? 1 : 2,
+    quarter: Math.ceil(fiscalMonth / 3)
+  };
+}
+
+function getFiscalAnnualRange(fiscalYearStart) {
+  return getFiscalSubPeriodRange(fiscalYearStart, 1, 12);
+}
+
+function getFiscalSubPeriodRange(fiscalYearStart, startFiscalMonth, endFiscalMonth) {
+  const startPeriod = getFiscalCalendarMonth(fiscalYearStart, startFiscalMonth);
+  const endPeriod = getFiscalCalendarMonth(fiscalYearStart, endFiscalMonth);
+  return {
+    start: formatDateKey(startPeriod.year, startPeriod.month, 1),
+    end: formatDateKey(endPeriod.year, endPeriod.month, daysInMonth(endPeriod.year, endPeriod.month))
+  };
+}
+
+function getFiscalCalendarMonth(fiscalYearStart, fiscalMonth) {
+  const zeroBasedCalendarMonth = FISCAL_YEAR_START_MONTH - 1 + fiscalMonth - 1;
+  return {
+    year: fiscalYearStart + Math.floor(zeroBasedCalendarMonth / 12),
+    month: (zeroBasedCalendarMonth % 12) + 1
+  };
+}
+
+function formatFiscalYearLabel(fiscalYearStart) {
+  return `FY ${fiscalYearStart}-${String(fiscalYearStart + 1).slice(-2)}`;
 }
 
 function parseDateKey(value) {

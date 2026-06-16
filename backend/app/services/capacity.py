@@ -35,6 +35,7 @@ TWIN_FOLDER_CONFIG_FILENAMES = ("twin_folders.json", "twin_folder.json")
 TWIN_FOLDER_MODE_COLUMN = "Twin Folder Mode"
 TWIN_FOLDER_GROUP_COLUMN = "Twin Folder Group"
 UV_TOWER_CONFIG_FILENAME = "uv_towers.json"
+FOLDER_LIST_CONFIG_FILENAME = "folder_list.json"
 
 
 def parse_general(workbook: pd.ExcelFile) -> pd.DataFrame:
@@ -171,6 +172,237 @@ def _load_uv_tower_lookup() -> dict[str, dict[str, set[str]]]:
         raise ValueError(f"Unable to read UV tower config from {path.name}: {exc}") from exc
 
     return _normalize_uv_tower_lookup(raw_config)
+
+
+def _load_folder_list_lookup() -> dict[str, Any]:
+    path = Path(__file__).resolve().parents[2] / FOLDER_LIST_CONFIG_FILENAME
+    if not path.exists():
+        return {"plants": {}, "by_unit": {}, "by_folder": {}}
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            raw_config = json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Unable to read folder list config from {path.name}: {exc}") from exc
+
+    return _normalize_folder_list_lookup(raw_config)
+
+
+def _normalize_folder_list_lookup(raw_config: Any) -> dict[str, Any]:
+    lookup: dict[str, Any] = {"plants": {}, "by_unit": {}, "by_folder": {}}
+    if not isinstance(raw_config, list):
+        return lookup
+
+    for item in raw_config:
+        if not isinstance(item, dict):
+            continue
+
+        plant_name = _clean_text(item.get("plantName"))
+        machine = _clean_text(item.get("machine"))
+        folder = _clean_text(item.get("folder"))
+        plant_key = _loose_canonical_text(plant_name)
+        machine_key = _loose_canonical_text(machine)
+        folder_key = _loose_canonical_text(folder)
+
+        if not plant_key or not machine_key or not folder_key:
+            continue
+
+        unit_key = _folder_unit_key(machine_key, folder_key)
+        plant_lookup = lookup["plants"].setdefault(
+            plant_key,
+            {
+                "plant_name": plant_name,
+                "folders": [],
+                "by_unit": {},
+                "by_folder": {},
+            },
+        )
+
+        if unit_key in plant_lookup["by_unit"]:
+            continue
+
+        reference = {
+            "plant_name": plant_lookup["plant_name"],
+            "machine": machine,
+            "folder": folder,
+            "plant_key": plant_key,
+            "machine_key": machine_key,
+            "folder_key": folder_key,
+            "unit_key": unit_key,
+        }
+
+        plant_lookup["folders"].append(reference)
+        plant_lookup["by_unit"][unit_key] = reference
+        plant_lookup["by_folder"].setdefault(folder_key, []).append(reference)
+        lookup["by_unit"].setdefault(unit_key, []).append(reference)
+        lookup["by_folder"].setdefault(folder_key, []).append(reference)
+
+    return lookup
+
+
+def _canonicalize_book_folders(book_df: pd.DataFrame, folder_lookup: dict[str, Any]) -> pd.DataFrame:
+    if book_df.empty or not folder_lookup.get("plants"):
+        return book_df.copy()
+
+    rows = []
+    for _, row in book_df.iterrows():
+        reference = _folder_reference_for_row(row, folder_lookup)
+        if not reference:
+            continue
+
+        next_row = row.copy()
+        _apply_folder_reference(next_row, reference)
+        rows.append(next_row)
+
+    if not rows:
+        return book_df.iloc[0:0].copy()
+
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
+def _canonicalize_down_time_folders(
+    down_time_df: pd.DataFrame,
+    folder_lookup: dict[str, Any],
+    book_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if down_time_df.empty or not folder_lookup.get("plants"):
+        return down_time_df.copy()
+
+    issue_lookup, issue_only_lookup = _build_issue_folder_reference_lookup(book_df)
+    rows = []
+
+    for _, row in down_time_df.iterrows():
+        reference = _folder_reference_for_row(row, folder_lookup)
+        if not reference:
+            issue_id = _clean_text(row.get("IssueID"))
+            issue_key = (
+                issue_id,
+                _loose_canonical_text(row.get("Machine")),
+                _loose_canonical_text(row.get("Folder")),
+            )
+            reference = issue_lookup.get(issue_key) or issue_only_lookup.get(issue_id)
+
+        if not reference:
+            continue
+
+        next_row = row.copy()
+        _apply_folder_reference(next_row, reference)
+        rows.append(next_row)
+
+    if not rows:
+        return down_time_df.iloc[0:0].copy()
+
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
+def _build_issue_folder_reference_lookup(
+    book_df: pd.DataFrame,
+) -> tuple[dict[tuple[str, str, str], dict[str, str]], dict[str, dict[str, str]]]:
+    issue_lookup: dict[tuple[str, str, str], dict[str, str]] = {}
+    issue_only_candidates: dict[str, list[dict[str, str]]] = {}
+
+    if book_df.empty:
+        return issue_lookup, {}
+
+    for _, row in book_df.iterrows():
+        issue_id = _clean_text(row.get("Issue Id"))
+        machine = _clean_text(row.get("Machine"))
+        folder = _clean_text(row.get("Folder"))
+        plant_name = _clean_text(row.get("Plant Name"))
+
+        if not issue_id or not machine or not folder or not plant_name:
+            continue
+
+        reference = {
+            "plant_name": plant_name,
+            "machine": machine,
+            "folder": folder,
+            "plant_key": _loose_canonical_text(plant_name),
+            "machine_key": _loose_canonical_text(machine),
+            "folder_key": _loose_canonical_text(folder),
+            "unit_key": _folder_unit_key(
+                _loose_canonical_text(machine),
+                _loose_canonical_text(folder),
+            ),
+        }
+        issue_key = (issue_id, reference["machine_key"], reference["folder_key"])
+        issue_lookup.setdefault(issue_key, reference)
+        issue_only_candidates.setdefault(issue_id, []).append(reference)
+
+    issue_only_lookup = {
+        issue_id: references[0]
+        for issue_id, references in issue_only_candidates.items()
+        if len({
+            (
+                reference["plant_key"],
+                reference["machine_key"],
+                reference["folder_key"],
+            )
+            for reference in references
+        }) == 1
+    }
+
+    return issue_lookup, issue_only_lookup
+
+
+def _folder_reference_for_row(row: pd.Series, folder_lookup: dict[str, Any]) -> dict[str, str] | None:
+    plant_key = _loose_canonical_text(row.get("Plant Name"))
+    machine_key = _loose_canonical_text(row.get("Machine"))
+    folder_key = _loose_canonical_text(row.get("Folder"))
+
+    if not folder_key:
+        return None
+
+    if plant_key:
+        plant_lookup = folder_lookup.get("plants", {}).get(plant_key)
+        if not plant_lookup:
+            return None
+
+        if machine_key:
+            reference = plant_lookup["by_unit"].get(_folder_unit_key(machine_key, folder_key))
+            if reference:
+                return reference
+
+        folder_matches = plant_lookup["by_folder"].get(folder_key, [])
+        return folder_matches[0] if len(folder_matches) == 1 else None
+
+    if machine_key:
+        unit_matches = folder_lookup.get("by_unit", {}).get(_folder_unit_key(machine_key, folder_key), [])
+        if len(unit_matches) == 1:
+            return unit_matches[0]
+
+    folder_matches = folder_lookup.get("by_folder", {}).get(folder_key, [])
+    return folder_matches[0] if len(folder_matches) == 1 else None
+
+
+def _apply_folder_reference(row: pd.Series, reference: dict[str, str]) -> None:
+    row["Plant Name"] = reference["plant_name"]
+    row["Machine"] = reference["machine"]
+    row["Folder"] = reference["folder"]
+
+
+def _configured_folders_for_plant(folder_lookup: dict[str, Any], plant_name: Any) -> list[dict[str, str]]:
+    plant_lookup = folder_lookup.get("plants", {}).get(_loose_canonical_text(plant_name), {})
+    return list(plant_lookup.get("folders", []))
+
+
+def _build_plant_date_universe(book_df: pd.DataFrame) -> list[tuple[date, str]]:
+    if book_df.empty or REPORT_DATE_COLUMN not in book_df.columns or "Plant Name" not in book_df.columns:
+        return []
+
+    plant_dates = {
+        (row[REPORT_DATE_COLUMN], _clean_text(row.get("Plant Name")))
+        for _, row in book_df.iterrows()
+        if row[REPORT_DATE_COLUMN] is not None
+        and not pd.isna(row[REPORT_DATE_COLUMN])
+        and _clean_text(row.get("Plant Name"))
+    }
+
+    return sorted(plant_dates, key=lambda item: (item[0], item[1]))
+
+
+def _folder_unit_key(machine_key: str, folder_key: str) -> str:
+    return f"{machine_key}||{folder_key}"
 
 
 def _normalize_uv_tower_lookup(raw_config: Any) -> dict[str, dict[str, set[str]]]:
@@ -624,6 +856,82 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     ]
 
 
+def _add_unplanned_folder_day_rows(
+    folder_day_df: pd.DataFrame,
+    folder_lookup: dict[str, Any],
+    plant_dates: list[tuple[date, str]],
+) -> pd.DataFrame:
+    if not folder_lookup.get("plants") or not plant_dates:
+        return folder_day_df
+
+    columns = list(_empty_folder_day_metrics().columns)
+    existing_rows = folder_day_df.copy() if not folder_day_df.empty else pd.DataFrame(columns=columns)
+    missing_rows = []
+
+    existing_units = {
+        (
+            row[REPORT_DATE_COLUMN],
+            _loose_canonical_text(row.get("Plant Name")),
+            _folder_unit_key(
+                _loose_canonical_text(row.get("Machine")),
+                _loose_canonical_text(row.get("Folder")),
+            ),
+        )
+        for _, row in existing_rows.iterrows()
+    }
+
+    for report_date, plant_name in plant_dates:
+        plant_key = _loose_canonical_text(plant_name)
+        if not report_date or not plant_key:
+            continue
+
+        for folder_reference in _configured_folders_for_plant(folder_lookup, plant_name):
+            unit_key = folder_reference["unit_key"]
+            existing_key = (report_date, plant_key, unit_key)
+            if existing_key in existing_units:
+                continue
+
+            missing_rows.append(_unplanned_folder_day_row(report_date, folder_reference))
+            existing_units.add(existing_key)
+
+    if not missing_rows:
+        return existing_rows
+
+    return (
+        pd.concat([existing_rows, pd.DataFrame(missing_rows)], ignore_index=True, sort=False)
+        .reindex(columns=columns)
+        .sort_values([REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"])
+        .reset_index(drop=True)
+    )
+
+
+def _unplanned_folder_day_row(report_date: date, folder_reference: dict[str, str]) -> dict[str, Any]:
+    return {
+        REPORT_DATE_COLUMN: report_date,
+        "Plant Name": folder_reference["plant_name"],
+        "Machine": folder_reference["machine"],
+        "Folder": folder_reference["folder"],
+        "available_capacity": CAPACITY_MINUTES_PER_FOLDER_DAY,
+        "gross_runtime": 0.0,
+        "scheduled_runtime": 0.0,
+        "overlap_minutes": 0.0,
+        "runtime": 0.0,
+        "lost_time": 0.0,
+        "downtime": 0.0,
+        "buffer_time": 0.0,
+        "idle_time": CAPACITY_MINUTES_PER_FOLDER_DAY,
+        "change_over_time": 0.0,
+        "waiting_time": 0.0,
+        "reflong_related_downtime": 0.0,
+        "late_start_time": 0.0,
+        "overrun_minutes": 0.0,
+        "runtime_segments": [],
+        "editions": [],
+        "twin_folder_mode": False,
+        "twin_folder_group": "",
+    }
+
+
 def _merge_print_intervals(
     intervals: list[tuple[pd.Timestamp, pd.Timestamp]]
 ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
@@ -706,7 +1014,7 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
             continue
 
         window_start = pd.Timestamp(datetime.combine(issue_date, time(0, 0)))
-        window_end = pd.Timestamp(datetime.combine(issue_date, time(4, 0)))
+        window_end = window_start + timedelta(minutes=_pf_compliance_minutes(row.get("Plant Name", "")))
 
         effective_start = max(start_dt, window_start)
         effective_end = min(end_dt, window_end)
@@ -1050,11 +1358,12 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             if runtime_minutes <= 0:
                 continue
 
-            key = classification["key"]
+            detail_key = classification["complexity_code"] or classification["key"]
             current = category_totals.setdefault(
-                key,
+                detail_key,
                 {
-                    "key": key,
+                    "key": classification["key"],
+                    "complexity_code": classification["complexity_code"],
                     "label": classification["label"],
                     "type": classification["type"],
                     "is_complex": classification["is_complex"],
@@ -1079,6 +1388,7 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             segments.append(
                 {
                     "key": segment["key"],
+                    "complexity_code": segment["complexity_code"],
                     "label": segment["label"],
                     "type": segment["type"],
                     "is_complex": segment["is_complex"],
@@ -1099,9 +1409,7 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                 "Folder": folder,
                 "runtime_segments": sorted(
                     segments,
-                    key=lambda item: ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"].index(
-                        item["key"] if item["key"] in ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"] else "unknown"
-                    ),
+                    key=_runtime_segment_sort_key,
                 ),
             }
         )
@@ -1219,11 +1527,12 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
         if source_runtime_minutes <= 0:
             continue
 
-        key = classification["key"]
+        detail_key = classification["complexity_code"] or classification["key"]
         current = category_totals.setdefault(
-            key,
+            detail_key,
             {
-                "key": key,
+                "key": classification["key"],
+                "complexity_code": classification["complexity_code"],
                 "label": classification["label"],
                 "type": classification["type"],
                 "is_complex": classification["is_complex"],
@@ -1248,6 +1557,7 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
         segments.append(
             {
                 "key": segment["key"],
+                "complexity_code": segment["complexity_code"],
                 "label": segment["label"],
                 "type": segment["type"],
                 "is_complex": segment["is_complex"],
@@ -1265,9 +1575,7 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
 
     segments = sorted(
         segments,
-        key=lambda item: ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"].index(
-            item["key"] if item["key"] in ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"] else "unknown"
-        ),
+        key=_runtime_segment_sort_key,
     )
     return _scale_runtime_segments(segments, runtime_minutes)
 
@@ -1414,10 +1722,13 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     if folder_day_df.empty:
         return _empty_daily_metrics()
 
+    working = folder_day_df.copy()
+    working["_active_folder_night"] = _active_folder_night_mask(working)
     daily = (
-        folder_day_df.groupby(REPORT_DATE_COLUMN, dropna=False)
+        working.groupby(REPORT_DATE_COLUMN, dropna=False)
         .agg(
-            active_folders_count=("Folder", "count"),
+            active_folders_count=("_active_folder_night", "sum"),
+            capacity_folder_units=("Folder", "count"),
             available_capacity=("available_capacity", "sum"),
             runtime=("runtime", "sum"),
             lost_time=("lost_time", "sum"),
@@ -1430,7 +1741,8 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
         .sort_values("Run Date")
     )
 
-    capacity_folders_count = int(daily["active_folders_count"].max())
+    daily["active_folders_count"] = daily["active_folders_count"].astype(int)
+    capacity_folders_count = int(daily["capacity_folder_units"].max())
     fixed_daily_capacity = capacity_folders_count * CAPACITY_MINUTES_PER_FOLDER_DAY
     idle_time = (
         fixed_daily_capacity - daily["available_capacity"]
@@ -1439,7 +1751,7 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     daily["capacity_folders_count"] = capacity_folders_count
     daily["available_capacity"] = fixed_daily_capacity
     daily["idle_time"] = idle_time + daily["active_idle_time"]
-    daily = daily.drop(columns=["active_idle_time"])
+    daily = daily.drop(columns=["active_idle_time", "capacity_folder_units"])
 
     daily["utilization_percentage"] = daily.apply(
         lambda row: _percentage(row["runtime"], row["available_capacity"]),
@@ -1447,6 +1759,42 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return daily
+
+
+def _active_folder_night_mask(folder_day_df: pd.DataFrame) -> pd.Series:
+    active_minutes = pd.Series(0.0, index=folder_day_df.index)
+    for column in (
+        "runtime",
+        "lost_time",
+        "downtime",
+        "buffer_time",
+        "change_over_time",
+        "waiting_time",
+        "reflong_related_downtime",
+        "late_start_time",
+        "gross_runtime",
+        "scheduled_runtime",
+        "overlap_minutes",
+    ):
+        if column in folder_day_df:
+            active_minutes += pd.to_numeric(folder_day_df[column], errors="coerce").fillna(0.0)
+
+    available_capacity = (
+        pd.to_numeric(folder_day_df["available_capacity"], errors="coerce").fillna(0.0)
+        if "available_capacity" in folder_day_df
+        else pd.Series(0.0, index=folder_day_df.index)
+    )
+    idle_time = (
+        pd.to_numeric(folder_day_df["idle_time"], errors="coerce").fillna(0.0)
+        if "idle_time" in folder_day_df
+        else pd.Series(0.0, index=folder_day_df.index)
+    )
+    fully_unplanned = (
+        (available_capacity > 0)
+        & (idle_time >= available_capacity)
+        & (active_minutes <= 0)
+    )
+    return ~fully_unplanned
 
 
 def calculate_tower_day_metrics(
@@ -1652,6 +2000,7 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
     total_buffer_time = float(daily_df["buffer_time"].sum()) if not daily_df.empty else 0.0
     total_idle_time = float(daily_df["idle_time"].sum()) if not daily_df.empty and "idle_time" in daily_df else 0.0
+    planned_available_time = max(total_available - total_idle_time, 0.0)
 
     return {
         "total_available_capacity": _clean_number(total_available),
@@ -1661,7 +2010,7 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
         "total_buffer_time": _clean_number(total_buffer_time),
         "total_idle_time": _clean_number(total_idle_time),
         "average_utilization_percentage": _clean_number(_percentage(total_runtime, total_available)),
-        "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, total_available)),
+        "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, planned_available_time)),
         "idle_capacity_percentage": _clean_number(_percentage(total_idle_time, total_available)),
         "active_folder_days": int(daily_df["active_folders_count"].sum()) if not daily_df.empty else 0,
     }
@@ -1675,30 +2024,44 @@ def _categorize_complexity(complexity_code: str) -> dict[str, Any]:
     - is_complex: True or False
     """
     if not complexity_code or pd.isna(complexity_code):
-        return {"key": "unknown", "label": "Unknown", "type": "Unknown", "is_complex": False}
+        return {"key": "unknown", "complexity_code": "", "label": "Unknown", "type": "Unknown", "is_complex": False}
 
     code = str(complexity_code).strip()
     match = re.search(r"\bC(\d{1,2})\b", code, flags=re.IGNORECASE)
     if match:
         code = f"C{int(match.group(1))}"
+    else:
+        match = re.fullmatch(r"\d{1,2}", code)
+        if match:
+            code = f"C{int(match.group(0))}"
 
     # C1-C3: SNP
     if code in ["C1", "C2", "C3"]:
-        return {"key": "snp", "label": "SNP", "type": "SNP", "is_complex": False}
+        return {"key": "snp", "complexity_code": code, "label": "SNP", "type": "SNP", "is_complex": False}
 
     # C4: SNP - Complex
     if code == "C4":
-        return {"key": "snp_complex", "label": "SNP Complex", "type": "SNP", "is_complex": True}
+        return {"key": "snp_complex", "complexity_code": code, "label": "SNP Complex", "type": "SNP", "is_complex": True}
 
     # C5-C8: GNP
     if code in ["C5", "C6", "C7", "C8"]:
-        return {"key": "gnp", "label": "GNP", "type": "GNP", "is_complex": False}
+        return {"key": "gnp", "complexity_code": code, "label": "GNP", "type": "GNP", "is_complex": False}
 
     # C9-C15: GNP - Complex
     if code in ["C9", "C10", "C11", "C12", "C13", "C14", "C15"]:
-        return {"key": "gnp_complex", "label": "GNP Complex", "type": "GNP", "is_complex": True}
+        return {"key": "gnp_complex", "complexity_code": code, "label": "GNP Complex", "type": "GNP", "is_complex": True}
 
-    return {"key": "unknown", "label": "Unknown", "type": "Unknown", "is_complex": False}
+    return {"key": "unknown", "complexity_code": "", "label": "Unknown", "type": "Unknown", "is_complex": False}
+
+
+def _runtime_segment_sort_key(segment: dict[str, Any]) -> tuple[int, int]:
+    complexity_match = re.fullmatch(r"C(\d{1,2})", _clean_text(segment.get("complexity_code")), flags=re.IGNORECASE)
+    if complexity_match:
+        return (0, int(complexity_match.group(1)))
+
+    category_order = ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"]
+    key = _clean_text(segment.get("key"))
+    return (1, category_order.index(key) if key in category_order else len(category_order))
 
 
 def _calculate_effective_speed(print_order: float, runtime_minutes: float) -> float:
@@ -1732,8 +2095,14 @@ def _calculate_effective_speed(print_order: float, runtime_minutes: float) -> fl
 
 def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
     general_df = parse_general(workbook)
-    book_df = _drop_reflong_print_rows(parse_book_wise_details(workbook))
-    down_time_df = _drop_reflong_down_time_rows(parse_down_time(workbook))
+    folder_lookup = _load_folder_list_lookup()
+    book_df = _drop_reflong_print_rows(
+        _canonicalize_book_folders(parse_book_wise_details(workbook), folder_lookup)
+    )
+    down_time_df = _drop_reflong_down_time_rows(
+        _canonicalize_down_time_folders(parse_down_time(workbook), folder_lookup, book_df)
+    )
+    plant_date_universe = _build_plant_date_universe(book_df)
     twin_lookup = _load_twin_folder_lookup()
     uv_tower_lookup = _load_uv_tower_lookup()
     issue_twin_targets = _build_issue_twin_targets(book_df, twin_lookup)
@@ -1745,6 +2114,7 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
         issue_twin_targets,
     )
     folder_day_df = calculate_folder_day_metrics(folder_book_df, folder_down_time_df)
+    folder_day_df = _add_unplanned_folder_day_rows(folder_day_df, folder_lookup, plant_date_universe)
     tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df, uv_tower_lookup)
     daily_df = calculate_daily_metrics(folder_day_df)
 
@@ -1960,6 +2330,10 @@ def _clean_text(value: Any) -> str:
 
 def _canonical_text(value: Any) -> str:
     return " ".join(_clean_text(value).split()).casefold()
+
+
+def _loose_canonical_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _clean_text(value).casefold())
 
 
 def _canonical_tower_name(value: Any) -> str:

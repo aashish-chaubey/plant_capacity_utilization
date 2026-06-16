@@ -76,12 +76,19 @@ const FOLDER_ALIAS_COLORS = ["#2563eb", "#7c3aed", "#dc2626", "#d97706", "#05966
 const BREAKDOWN_STACKS = [
   { key: "waiting_time", label: "Wait time", color: CAPACITY_SPLIT_COLORS.waiting_time },
   { key: "loss_time", label: "Loss time", color: CAPACITY_SPLIT_COLORS.loss_time },
-  { key: "downtime", label: "Downtime / breakdown", color: CAPACITY_SPLIT_COLORS.downtime },
+  { key: "downtime", label: "Downtime", color: CAPACITY_SPLIT_COLORS.downtime },
   { key: "runtime_snp", label: "Run Time: SNP", color: RUNTIME_SEGMENT_STYLES.snp.color },
   { key: "runtime_gnp", label: "Run Time: GNP", color: RUNTIME_SEGMENT_STYLES.gnp.color },
   { key: "spare_time", label: "Spare time", color: CAPACITY_SPLIT_COLORS.spare_time }
 ];
-const DEFAULT_BREAKDOWN_KEYS = BREAKDOWN_STACKS.map((stack) => stack.key);
+const UNPLANNED_BREAKDOWN_STACK = {
+  key: "idle_time",
+  label: "Unplanned Time",
+  color: CAPACITY_SPLIT_COLORS.idle_time,
+  pattern: "idle"
+};
+const FOLDER_BREAKDOWN_STACKS = [...BREAKDOWN_STACKS, UNPLANNED_BREAKDOWN_STACK];
+const DEFAULT_BREAKDOWN_KEYS = FOLDER_BREAKDOWN_STACKS.map((stack) => stack.key);
 
 export default function Dashboard({ data, intelligence, intelligenceLoading, intelligenceError }) {
   const [focusedDay, setFocusedDay] = useState("");
@@ -133,8 +140,12 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
     () => calculateTotalActiveFolderCapacity(data.daily),
     [data.daily]
   );
-  const selectedBreakdownStacks = useMemo(
+  const selectedTowerBreakdownStacks = useMemo(
     () => BREAKDOWN_STACKS.filter((stack) => selectedBreakdownKeys.includes(stack.key)),
+    [selectedBreakdownKeys]
+  );
+  const selectedFolderBreakdownStacks = useMemo(
+    () => FOLDER_BREAKDOWN_STACKS.filter((stack) => selectedBreakdownKeys.includes(stack.key)),
     [selectedBreakdownKeys]
   );
 
@@ -146,7 +157,7 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
         return current.length === 1 ? current : current.filter((key) => key !== componentKey);
       }
 
-      return BREAKDOWN_STACKS
+      return FOLDER_BREAKDOWN_STACKS
         .map((stack) => stack.key)
         .filter((key) => key === componentKey || current.includes(key));
     });
@@ -161,7 +172,13 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
     ["Spare Time", formatMinutes(data.summary.total_buffer_time), "slate"],
     [
       "Spare Capacity",
-      formatPercent(data.summary.spare_capacity_percentage ?? calculatePercentage(data.summary.total_buffer_time, data.summary.total_available_capacity)),
+      formatPercent(
+        data.summary.spare_capacity_percentage
+          ?? calculatePercentage(
+            data.summary.total_buffer_time,
+            Number(data.summary.total_available_capacity || 0) - Number(data.summary.total_idle_time || 0)
+          )
+      ),
       "slate"
     ],
     ["Folder-Nights", `${formatNumber(data.summary.active_folder_days)}/${formatNumber(totalActiveFolderCapacity)}`, "slate"]
@@ -181,9 +198,16 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
             <h2 className="text-base font-semibold text-slate-950">Daily capacity split</h2>
             <p className="mt-1 text-sm text-slate-500">Machine-folder capacity by Run Date</p>
           </div>
-          <div className="text-sm text-slate-500">
-            Breakdowns: <span className="font-semibold text-slate-800">{breakdownScope}</span>
-          </div>
+          {focusedDay && (
+            <button
+              type="button"
+              onClick={() => setFocusedDay("")}
+              className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-slate-950"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+              Clear day
+            </button>
+          )}
         </div>
 
         <CapacitySplitChart
@@ -197,7 +221,7 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
       <section className="space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h2 className="text-base font-semibold text-slate-950">Breakdown charts</h2>
+            <h2 className="text-base font-semibold text-slate-950">Drilldown charts</h2>
             <p className="mt-1 text-sm text-slate-500">
               {focusedDay ? `Showing ${focusedDay}` : "Showing selected timeframe"}
             </p>
@@ -215,7 +239,7 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
         </div>
 
         <BreakdownComponentSelector
-          options={BREAKDOWN_STACKS}
+          options={FOLDER_BREAKDOWN_STACKS}
           selectedKeys={selectedBreakdownKeys}
           onToggle={toggleBreakdownComponent}
         />
@@ -226,7 +250,7 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
             subtitle={focusedDay ? "Tower capacity split for selected day" : "Average tower capacity split across the selected timeframe"}
             data={towerBreakdown}
             nameKey="tower"
-            selectedStacks={selectedBreakdownStacks}
+            selectedStacks={selectedTowerBreakdownStacks}
             barSize={24}
             rowHeight={36}
             emptyMessage="No tower usage found for this selection."
@@ -237,7 +261,7 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
             subtitle={focusedDay ? "Folder capacity split for selected day" : "Average folder capacity split across the selected timeframe"}
             data={folderBreakdown}
             nameKey="folder"
-            selectedStacks={selectedBreakdownStacks}
+            selectedStacks={selectedFolderBreakdownStacks}
             barSize={24}
             rowHeight={54}
             emptyMessage="No folder usage found for this selection."
@@ -285,8 +309,10 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
   const width = 1380;
   const height = 500;
   const margins = isPlantView
-    ? { top: 18, right: 8, bottom: 52, left: 62 }
+    ? { top: 18, right: 8, bottom: 76, left: 62 }
     : { top: 18, right: 8, bottom: 78, left: 62 };
+  const dayLabelYOffset = isPlantView ? 28 : 58;
+  const monthLabelGap = 14;
   const yAxisTitleX = 14;
   const plotWidth = width - margins.left - margins.right;
   const plotHeight = height - margins.top - margins.bottom;
@@ -417,20 +443,18 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
               {item.marker === "triangle" ? (
                 <span className="text-[11px] font-black leading-none text-slate-950">▲</span>
               ) : item.marker === "twin" ? (
-                <span className="relative inline-flex h-3 w-7 items-center" aria-hidden="true">
-                  <span
-                    className="absolute left-1 right-1 h-0.5 rounded-full"
-                    style={{ backgroundColor: CAPACITY_SPLIT_COLORS.twin_folder }}
+                <svg className="h-4 w-8 shrink-0" viewBox="0 0 32 16" aria-hidden="true">
+                  <path
+                    d="M 4 5 Q 16 14, 28 5"
+                    fill="none"
+                    stroke={CAPACITY_SPLIT_COLORS.twin_folder}
+                    strokeLinecap="round"
+                    strokeWidth="2.3"
+                    opacity="0.9"
                   />
-                  <span
-                    className="absolute left-0 h-1.5 w-1.5 rounded-full"
-                    style={{ backgroundColor: CAPACITY_SPLIT_COLORS.twin_folder }}
-                  />
-                  <span
-                    className="absolute right-0 h-1.5 w-1.5 rounded-full"
-                    style={{ backgroundColor: CAPACITY_SPLIT_COLORS.twin_folder }}
-                  />
-                </span>
+                  <circle cx="4" cy="5" r="2.6" fill={CAPACITY_SPLIT_COLORS.twin_folder} opacity="0.9" />
+                  <circle cx="28" cy="5" r="2.6" fill={CAPACITY_SPLIT_COLORS.twin_folder} opacity="0.9" />
+                </svg>
               ) : (
                 <span
                   className="h-3 w-3 rounded-sm border border-slate-300"
@@ -662,7 +686,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
                         strokeWidth="0.6"
                       >
                         <title>
-                          {`${row.run_date} ${folder.alias}: ${segment.runtimeSegment ? segment.label || "Run Time" : segment.label} ${formatMinutes(segment.value)}`}
+                          {`${folder.alias}: ${segment.runtimeSegment ? segment.label || "Run Time" : segment.label} ${formatMinutes(segment.value)}`}
                         </title>
                       </rect>
                       {canShowRuntimeLabel && (
@@ -727,6 +751,9 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
 
           {visibleDays.map((day, dayIndex) => {
             const groupCenter = margins.left + dayIndex * groupWidth + groupWidth / 2;
+            const dayLabelY = margins.top + plotHeight + dayLabelYOffset;
+            const monthLabelY = dayLabelY + monthLabelGap;
+            const axisLabel = formatDayAxisLabel(day);
             const dayTwinMarkers = twinMarkers.filter((marker) => marker.run_date === day);
             return (
               <g key={day}>
@@ -790,13 +817,23 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
                 })}
                 <text
                   x={groupCenter}
-                  y={margins.top + plotHeight + (isPlantView ? 28 : 60)}
+                  y={dayLabelY}
                   textAnchor="middle"
                   fontSize="12"
-                  fontWeight="700"
+                  fontWeight="800"
                   fill="#334155"
                 >
-                  {formatDayLabel(day)}
+                  {axisLabel.day}
+                </text>
+                <text
+                  x={groupCenter}
+                  y={monthLabelY}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fontWeight="700"
+                  fill="#64748b"
+                >
+                  {axisLabel.month}
                 </text>
               </g>
             );
@@ -856,7 +893,7 @@ function CapacityDaySummary({ summary, style, onClose }) {
                   <div className="flex min-w-0 items-center gap-1.5">
                     <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: detail.color }} />
                     <span className="truncate font-semibold text-slate-700">
-                      {detail.folderAlias} · {detail.complexity}
+                      {detail.folderAlias}
                     </span>
                   </div>
                   <span className="shrink-0 font-mono text-xs font-semibold text-slate-500">
@@ -893,8 +930,8 @@ function BreakdownComponentSelector({ options, selectedKeys, onToggle }) {
     <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-soft">
       <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-slate-950">Breakdown includes</h3>
-          <p className="mt-1 text-xs text-slate-500">Select main capacity components shown in tower and folder bars.</p>
+          <h3 className="text-sm font-semibold text-slate-950">Drilldown includes</h3>
+          <p className="mt-1 text-xs text-slate-500">Select main capacity components shown in the drilldown bars.</p>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:flex xl:flex-wrap xl:justify-end">
           {options.map((option) => {
@@ -917,7 +954,7 @@ function BreakdownComponentSelector({ options, selectedKeys, onToggle }) {
                 />
                 <span
                   className="h-2.5 w-2.5 rounded-full"
-                  style={{ backgroundColor: option.color }}
+                  style={getBreakdownSwatchStyle(option)}
                 />
                 {option.label}
               </label>
@@ -950,6 +987,7 @@ function UtilizationBreakdownChart({
   );
   const yAxisLabelOffset = -6;
   const chartMargin = { top: 8, right: 16, left: 4, bottom: 8 };
+  const idlePatternId = `utilizationIdlePattern-${nameKey}`;
 
   const machineColors = useMemo(() => {
     const machines = [...new Set(
@@ -1019,6 +1057,12 @@ function UtilizationBreakdownChart({
           <div className="relative w-full" style={{ height: chartHeight }}>
             <ResponsiveContainer>
               <BarChart data={data} layout="vertical" margin={chartMargin}>
+                <defs>
+                  <pattern id={idlePatternId} patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(35)">
+                    <rect width="8" height="8" fill={CAPACITY_SPLIT_COLORS.idle_time} opacity="0.55" />
+                    <line x1="0" y1="0" x2="0" y2="8" stroke="#94a3b8" strokeWidth="1" opacity="0.55" />
+                  </pattern>
+                </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" horizontal={false} />
                 <XAxis
                   type="number"
@@ -1048,8 +1092,8 @@ function UtilizationBreakdownChart({
                     dataKey={`${option.key}_percentage`}
                     name={option.label}
                     stackId="engaged"
-                    fill={option.color}
-                    stroke="#f8fafc"
+                    fill={getBreakdownStackFill(option, idlePatternId)}
+                    stroke={option.pattern === "idle" ? "#cbd5e1" : "#f8fafc"}
                     strokeWidth={1.25}
                     barSize={barSize}
                     radius={index === selectedStacks.length - 1 ? [0, 4, 4, 0] : [0, 0, 0, 0]}
@@ -1067,6 +1111,8 @@ function UtilizationBreakdownChart({
 function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlannedNights }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload;
+  const nightsLabel = nameKey === "folder" ? "Folder nights:" : "Planned nights:";
+  const showIdleTime = selectedStacks.some((stack) => stack.key === "idle_time") && Number(row.idle_time || 0) > 0;
   const lossSubcomponents = [
     ["Reflong time", row.reflong_related_downtime],
     ["Changeover time", row.change_over_time],
@@ -1081,23 +1127,6 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
           label="Wait time"
           value={`${formatMinutes(row.waiting_time)} (${formatPercent(row.waiting_time_percentage)})`}
           color={CAPACITY_SPLIT_COLORS.waiting_time}
-        />
-        <TooltipRow
-          label="Run Time: SNP"
-          value={`${formatMinutes(row.runtime_snp)} (${formatPercent(row.runtime_snp_percentage)})`}
-          color={RUNTIME_SEGMENT_STYLES.snp.color}
-        />
-        {row.runtime_gnp > 0 && (
-          <TooltipRow
-            label="Run Time: GNP"
-            value={`${formatMinutes(row.runtime_gnp)} (${formatPercent(row.runtime_gnp_percentage)})`}
-            color={RUNTIME_SEGMENT_STYLES.gnp.color}
-          />
-        )}
-        <TooltipRow
-          label="Downtime / breakdown"
-          value={`${formatMinutes(row.downtime)} (${formatPercent(row.downtime_percentage)})`}
-          color={CAPACITY_SPLIT_COLORS.downtime}
         />
         <TooltipRow
           label="Loss time"
@@ -1115,13 +1144,38 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
           ))}
         </div>
         <TooltipRow
+          label="Downtime"
+          value={`${formatMinutes(row.downtime)} (${formatPercent(row.downtime_percentage)})`}
+          color={CAPACITY_SPLIT_COLORS.downtime}
+        />
+        <TooltipRow
+          label="Run Time: SNP"
+          value={`${formatMinutes(row.runtime_snp)} (${formatPercent(row.runtime_snp_percentage)})`}
+          color={RUNTIME_SEGMENT_STYLES.snp.color}
+        />
+        {row.runtime_gnp > 0 && (
+          <TooltipRow
+            label="Run Time: GNP"
+            value={`${formatMinutes(row.runtime_gnp)} (${formatPercent(row.runtime_gnp_percentage)})`}
+            color={RUNTIME_SEGMENT_STYLES.gnp.color}
+          />
+        )}
+        <TooltipRow
           label="Spare time"
           value={`${formatMinutes(row.spare_time)} (${formatPercent(row.spare_time_percentage)})`}
           color={CAPACITY_SPLIT_COLORS.spare_time}
         />
+        {showIdleTime && (
+          <TooltipRow
+            label="Unplanned time"
+            value={`${formatMinutes(row.idle_time)} (${formatPercent(row.idle_time_percentage)})`}
+            color={CAPACITY_SPLIT_COLORS.idle_time}
+            pattern="idle"
+          />
+        )}
         {showPlannedNights && (
           <div className="flex justify-between border-t border-slate-200 pt-2 text-slate-700">
-            <span>Planned nights:</span>
+            <span>{nightsLabel}</span>
             <span className="font-semibold text-slate-950">{formatNumber(row.planned_nights)}/{formatNumber(row.total_nights)}</span>
           </div>
         )}
@@ -1140,16 +1194,35 @@ function splitResourceLabel(value) {
   return [parts[0] || "", parts[1] || parts[0] || ""];
 }
 
-function TooltipRow({ label, value, color }) {
+function TooltipRow({ label, value, color, pattern }) {
   return (
     <div className="flex items-center justify-between gap-4">
       <span className="flex items-center gap-1.5">
-        <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: color }} />
+        <span
+          className="h-2.5 w-2.5 flex-shrink-0 rounded-full"
+          style={getBreakdownSwatchStyle({ color, pattern })}
+        />
         <span>{label}</span>
       </span>
       <span className="font-bold text-slate-950">{value}</span>
     </div>
   );
+}
+
+function getBreakdownStackFill(option, idlePatternId) {
+  if (option.pattern === "idle") return `url(#${idlePatternId})`;
+  return option.color;
+}
+
+function getBreakdownSwatchStyle(option) {
+  if (option.pattern === "idle") {
+    return {
+      backgroundColor: option.color,
+      backgroundImage: "repeating-linear-gradient(135deg, rgba(100,116,139,0.38) 0 1px, transparent 1px 4px)"
+    };
+  }
+
+  return { backgroundColor: option.color };
 }
 
 function buildCapacitySplitModel(dailyRows, detailRows) {
@@ -1412,12 +1485,6 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
     runtimeDetails: buildRuntimeTooltipDetails(activeRows),
     components: [
       {
-        key: "runtime",
-        label: "Run Time",
-        value: runtime,
-        color: CAPACITY_SPLIT_COLORS.runtime
-      },
-      {
         key: "waiting_time",
         label: "Wait Time",
         value: waitingTime,
@@ -1436,6 +1503,12 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
         color: CAPACITY_SPLIT_COLORS.downtime
       },
       {
+        key: "runtime",
+        label: "Run Time",
+        value: runtime,
+        color: CAPACITY_SPLIT_COLORS.runtime
+      },
+      {
         key: "spare_time",
         label: "Spare time",
         value: spareTime,
@@ -1443,7 +1516,7 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
       },
       {
         key: "idle_time",
-        label: "Idle time",
+        label: "Unplanned time",
         value: idleTime,
         color: CAPACITY_SPLIT_COLORS.idle_time
       }
@@ -1464,7 +1537,6 @@ function buildRuntimeTooltipDetails(rows) {
       details.push({
         key: `${row.run_date}||${row.folderKey}||${segment.key}`,
         folderAlias: `F${Number(row.folderIndex || 0) + 1}`,
-        complexity: formatRuntimeDetailLabel(segment),
         minutes: segment.value,
         color: segment.color || CAPACITY_SPLIT_COLORS.runtime,
         detailText,
@@ -1477,6 +1549,25 @@ function buildRuntimeTooltipDetails(rows) {
 
 function sumCapacityRows(rows, key) {
   return cleanNumber(rows.reduce((total, row) => total + Number(row[key] || 0), 0));
+}
+
+function isActiveCapacityDetailRow(row) {
+  const activeMinutes = [
+    "runtime",
+    "lost_time",
+    "downtime",
+    "buffer_time",
+    "change_over_time",
+    "waiting_time",
+    "reflong_related_downtime",
+    "late_start_time",
+    "gross_runtime",
+    "scheduled_runtime",
+    "overlap_minutes"
+  ].reduce((total, key) => total + Number(row[key] || 0), 0);
+  const availableCapacity = Number(row.available_capacity || 0);
+  const idleTime = Number(row.idle_time || 0);
+  return !(availableCapacity > 0 && idleTime >= availableCapacity && activeMinutes <= 0);
 }
 
 function getSegmentFill(segment) {
@@ -1551,7 +1642,8 @@ function buildRuntimeCapacitySegments(runtimeSegments, fallbackRuntime, capacity
       isComplex: Boolean(style.isComplex || segment.is_complex),
       textColor: style.textColor,
       effective_speed: segment.effective_speed,
-      print_order: segment.print_order
+      print_order: segment.print_order,
+      complexity_code: segment.complexity_code
     };
   });
 }
@@ -1686,6 +1778,18 @@ function formatDayLabel(dateStr) {
   return date.toLocaleDateString("en-US", { day: "2-digit", month: "short" });
 }
 
+function formatDayAxisLabel(dateStr) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ""));
+  if (!match) return { day: String(dateStr || ""), month: "" };
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  return {
+    day: match[3],
+    month: new Date(year, month - 1, 1).toLocaleDateString("en-US", { month: "short" })
+  };
+}
+
 function normalizeResourceBreakdownValues(row) {
   const fallbackLostTime = (
     Number(row.waiting_time || 0)
@@ -1716,6 +1820,7 @@ function normalizeResourceBreakdownValues(row) {
     loss_time: normalized.loss_time,
     downtime: normalized.downtime,
     spare_time: normalized.spare_time,
+    idle_time: normalized.idle_time,
     runtime_snp: runtimeBuckets.runtime_snp,
     runtime_gnp: runtimeBuckets.runtime_gnp,
     change_over_time: nonWaitingLoss.change_over_time,
@@ -1741,6 +1846,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
       downtime: 0,
       waiting_time: 0,
       loss_time: 0,
+      idle_time: 0,
       change_over_time: 0,
       reflong_related_downtime: 0,
       late_start_time: 0,
@@ -1753,12 +1859,13 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
     current.downtime += rowValues.downtime;
     current.waiting_time += rowValues.waiting_time;
     current.loss_time += rowValues.loss_time;
+    current.idle_time += rowValues.idle_time;
     current.change_over_time += rowValues.change_over_time;
     current.reflong_related_downtime += rowValues.reflong_related_downtime;
     current.late_start_time += rowValues.late_start_time;
     current.uv_tower = current.uv_tower || Boolean(row.uv_tower);
 
-    if (row.run_date) {
+    if (row.run_date && isActiveCapacityDetailRow(row)) {
       current.plannedDates.add(row.run_date);
     }
 
@@ -1767,15 +1874,19 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
 
   return Array.from(grouped.values())
     .map((row) => {
-      const plannedCapacity = row.plannedDates.size * CAPACITY_WINDOW_MINUTES;
+      const isFolderBreakdown = nameKey === "folder";
       const selectedCapacity = selectedProductionDays * CAPACITY_WINDOW_MINUTES;
+      const plannedCapacity = row.plannedDates.size * CAPACITY_WINDOW_MINUTES;
+      const capacityBasis = isFolderBreakdown ? selectedCapacity : plannedCapacity;
+      const breakdownStacks = isFolderBreakdown ? FOLDER_BREAKDOWN_STACKS : BREAKDOWN_STACKS;
       const capacityValues = normalizeBreakdownCapacityValues({
         waiting_time: row.waiting_time,
         loss_time: row.loss_time,
         downtime: row.downtime,
         runtime_snp: row.runtime_snp,
-        runtime_gnp: row.runtime_gnp
-      }, plannedCapacity);
+        runtime_gnp: row.runtime_gnp,
+        idle_time: isFolderBreakdown ? row.idle_time : 0
+      }, capacityBasis);
       const finalNonWaitLoss = scaleLossSubcomponents(
         {
           change_over_time: row.change_over_time,
@@ -1784,7 +1895,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
         },
         capacityValues.loss_time
       );
-      const percentages = calculateBreakdownPercentages(capacityValues, selectedCapacity);
+      const percentages = calculateBreakdownPercentages(capacityValues, selectedCapacity, breakdownStacks);
       const lossTimeTotal = capacityValues.waiting_time + capacityValues.loss_time;
 
       return {
@@ -1795,6 +1906,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
         downtime: cleanNumber(capacityValues.downtime),
         waiting_time: cleanNumber(capacityValues.waiting_time),
         loss_time: cleanNumber(capacityValues.loss_time),
+        idle_time: cleanNumber(capacityValues.idle_time),
         spare_time: cleanNumber(capacityValues.spare_time),
         change_over_time: cleanNumber(finalNonWaitLoss.change_over_time),
         reflong_related_downtime: cleanNumber(finalNonWaitLoss.reflong_related_downtime),
@@ -1811,6 +1923,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
         runtime_gnp_percentage: percentages.runtime_gnp,
         runtime_percentage: cleanNumber((percentages.runtime_snp || 0) + (percentages.runtime_gnp || 0)),
         spare_time_percentage: percentages.spare_time,
+        idle_time_percentage: percentages.idle_time || 0,
         loss_time_total_percentage: cleanNumber(percentages.waiting_time + percentages.loss_time)
       };
     })
@@ -1914,37 +2027,42 @@ function normalizeBreakdownCapacityValues(values, availableCapacity) {
     downtime: Math.max(Number(values.downtime || 0), 0),
     runtime_snp: Math.max(Number(values.runtime_snp || 0), 0),
     runtime_gnp: Math.max(Number(values.runtime_gnp || 0), 0),
+    idle_time: Math.max(Number(values.idle_time || 0), 0),
     spare_time: 0
   };
-  const used = normalized.waiting_time + normalized.loss_time + normalized.downtime + normalized.runtime_snp + normalized.runtime_gnp;
+  const componentKeys = ["waiting_time", "loss_time", "downtime", "runtime_snp", "runtime_gnp", "idle_time"];
+  const used = componentKeys.reduce((total, key) => total + normalized[key], 0);
 
   if (capacity <= 0) {
     return normalized;
   }
 
   if (used > capacity) {
-    const scale = capacity / used;
-    normalized.waiting_time *= scale;
-    normalized.loss_time *= scale;
-    normalized.downtime *= scale;
-    normalized.runtime_snp *= scale;
-    normalized.runtime_gnp *= scale;
+    let overage = cleanNumber(used - capacity);
+
+    for (const key of [...componentKeys].reverse()) {
+      if (overage <= 0) break;
+
+      const reduction = Math.min(normalized[key], overage);
+      normalized[key] = cleanNumber(normalized[key] - reduction);
+      overage = cleanNumber(overage - reduction);
+    }
   }
 
-  const adjustedUsed = normalized.waiting_time + normalized.loss_time + normalized.downtime + normalized.runtime_snp + normalized.runtime_gnp;
+  const adjustedUsed = componentKeys.reduce((total, key) => total + normalized[key], 0);
   normalized.spare_time = Math.max(capacity - adjustedUsed, 0);
 
   return normalized;
 }
 
-function calculateBreakdownPercentages(values, availableCapacity) {
+function calculateBreakdownPercentages(values, availableCapacity, stacks = BREAKDOWN_STACKS) {
   const capacity = Number(availableCapacity || 0);
 
   if (capacity <= 0) {
-    return Object.fromEntries(BREAKDOWN_STACKS.map((stack) => [stack.key, 0]));
+    return Object.fromEntries(stacks.map((stack) => [stack.key, 0]));
   }
 
-  const rawPercentages = BREAKDOWN_STACKS.map((stack) => {
+  const rawPercentages = stacks.map((stack) => {
     const rawPercentage = (Math.max(Number(values[stack.key] || 0), 0) / capacity) * 100;
     return {
       key: stack.key,
@@ -1965,7 +2083,7 @@ function calculateBreakdownPercentages(values, availableCapacity) {
   if (roundedTotal > 100) {
     let overage = cleanNumber(roundedTotal - 100);
 
-    for (const stack of [...BREAKDOWN_STACKS].reverse()) {
+    for (const stack of [...stacks].reverse()) {
       if (overage <= 0) break;
 
       const reduction = Math.min(percentages[stack.key] || 0, overage);
@@ -2046,14 +2164,21 @@ function formatRuntimeSegmentLabel(segment) {
   return "▲";
 }
 
-function formatRuntimeDetailLabel(segment) {
-  return segment?.label || "Run Time";
-}
-
 function formatRuntimeSegmentDetail(segment, isTwin = false) {
+  const complexityText = formatRuntimeComplexityCode(segment);
   const speedText = formatEffectiveSpeed(segment?.effective_speed, isTwin);
   const printOrderText = formatPrintOrderVolume(segment?.print_order, isTwin);
-  return [speedText, printOrderText].filter(Boolean).join(" | ");
+  return [complexityText, printOrderText, speedText].filter(Boolean).join(" | ");
+}
+
+function formatRuntimeComplexityCode(segment) {
+  const code = String(segment?.complexity_code || "").trim().toUpperCase();
+  if (/^C(?:[1-9]|1[0-5])$/.test(code)) return code;
+
+  const label = String(segment?.label || "").trim().toUpperCase();
+  if (/^C(?:[1-9]|1[0-5])$/.test(label)) return label;
+
+  return "";
 }
 
 function calculateRuntimeLabelFontSize(label, segmentHeight, barWidth) {
@@ -2072,7 +2197,7 @@ function formatEffectiveSpeed(value, isTwin = false) {
   const raw = Number(value || 0);
   if (raw <= 0) return "";
   const speed = isTwin ? raw / 2 : raw;
-  return `${formatCompactQuantity(speed)} CPH`;
+  return `Speed: ${formatCompactQuantity(speed)} CPH`;
 }
 
 function formatPrintOrderVolume(value, isTwin = false) {

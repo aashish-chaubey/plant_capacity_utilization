@@ -515,7 +515,7 @@ def _build_llm_summary(intelligence: dict[str, Any]) -> tuple[dict[str, Any], di
                 "and GNP Complex is the complex variant within GNP. Focus only on interesting, non-obvious executive insights: "
                 "complexity impact on machine/folder speed, high-level folder utilization comparison, and meaningful loss-time drivers. "
                 "Avoid redundant threshold-style statements. Return concise JSON with keys: headline, key_summary_points, recommended_actions. "
-                "Treat spare time and idle time as separate facts; spare is active-folder remaining time, idle is unscheduled capacity. "
+                "Treat spare time and unplanned time as separate facts; spare is active-folder remaining time, idle is unscheduled capacity. "
                 "key_summary_points and recommended_actions must be arrays of short, concrete strings."
             ),
         },
