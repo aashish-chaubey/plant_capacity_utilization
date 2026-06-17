@@ -36,6 +36,8 @@ TWIN_FOLDER_MODE_COLUMN = "Twin Folder Mode"
 TWIN_FOLDER_GROUP_COLUMN = "Twin Folder Group"
 UV_TOWER_CONFIG_FILENAME = "uv_towers.json"
 FOLDER_LIST_CONFIG_FILENAME = "folder_list.json"
+EFFECTIVE_RUNTIME_COLUMN = "Effective Runtime Minutes"
+EFFECTIVE_PRINT_ORDER_COLUMN = "Effective Print Order"
 
 
 def parse_general(workbook: pd.ExcelFile) -> pd.DataFrame:
@@ -786,10 +788,6 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
     metrics["runtime"] = (
         metrics["gross_runtime"] - metrics["total_downtime"]
     ).clip(lower=0)
-    metrics["runtime_segments"] = metrics.apply(
-        lambda row: _scale_runtime_segments(row.get("runtime_segments"), row["runtime"]),
-        axis=1,
-    )
 
     calculated_lost_time = (
         metrics["waiting_time"]
@@ -801,6 +799,23 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
         metrics["available_capacity"] - metrics["runtime"] - metrics["downtime"]
     ).clip(lower=0)
     metrics["lost_time"] = calculated_lost_time.clip(upper=remaining_capacity)
+    compliance_minutes = metrics["Plant Name"].apply(_pf_compliance_minutes)
+
+    over_compliance_minutes = (
+        metrics["runtime"]
+        + metrics["downtime"]
+        + metrics["lost_time"]
+        - compliance_minutes
+    ).clip(lower=0)
+    for column in ["runtime", "downtime", "lost_time"]:
+        reduction = pd.concat([metrics[column], over_compliance_minutes], axis=1).min(axis=1)
+        metrics[column] = (metrics[column] - reduction).clip(lower=0)
+        over_compliance_minutes = (over_compliance_minutes - reduction).clip(lower=0)
+
+    metrics["runtime_segments"] = metrics.apply(
+        lambda row: _scale_runtime_segments(row.get("runtime_segments"), row["runtime"]),
+        axis=1,
+    )
 
     # Strict railguard:
     # runtime + downtime + lost_time + buffer_time + idle_time must equal 240.
@@ -811,7 +826,6 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
         + metrics["downtime"]
         + metrics["lost_time"]
     )
-    compliance_minutes = metrics["Plant Name"].apply(_pf_compliance_minutes)
 
     metrics["buffer_time"] = (
         compliance_minutes - fixed_used_minutes
@@ -995,6 +1009,8 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
         "Window End",
         "Effective Start DateTime",
         "Effective End DateTime",
+        EFFECTIVE_RUNTIME_COLUMN,
+        EFFECTIVE_PRINT_ORDER_COLUMN,
     ]
 
     if df.empty:
@@ -1020,11 +1036,32 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
         effective_end = min(end_dt, window_end)
 
         if effective_start < effective_end:
+            original_duration = max((end_dt - start_dt).total_seconds() / 60, 0.0)
+            effective_duration = max((effective_end - effective_start).total_seconds() / 60, 0.0)
+            source_runtime = _parse_minutes_value(row.get("Total Run Time (mnts)"))
+            source_print_order = _parse_count_value(row.get("Print Order"))
+            runtime_ratio = (
+                min(max(effective_duration / original_duration, 0.0), 1.0)
+                if original_duration > 0
+                else 1.0
+            )
+            effective_runtime = (
+                min(source_runtime * runtime_ratio, effective_duration)
+                if source_runtime > 0
+                else effective_duration
+            )
+            source_runtime_ratio = (
+                min(max(effective_runtime / source_runtime, 0.0), 1.0)
+                if source_runtime > 0
+                else runtime_ratio
+            )
             row = row.copy()
             row["Window Start"] = window_start
             row["Window End"] = window_end
             row["Effective Start DateTime"] = effective_start
             row["Effective End DateTime"] = effective_end
+            row[EFFECTIVE_RUNTIME_COLUMN] = _clean_number(effective_runtime)
+            row[EFFECTIVE_PRINT_ORDER_COLUMN] = _clean_number(source_print_order * source_runtime_ratio)
             kept_rows.append(row)
 
     if not kept_rows:
@@ -1340,6 +1377,8 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
         "Effective End DateTime",
         "Print Order",
         "Total Run Time (mnts)",
+        EFFECTIVE_RUNTIME_COLUMN,
+        EFFECTIVE_PRINT_ORDER_COLUMN,
         "Reflong"
     ]
     df = book_df.drop_duplicates(
@@ -1352,8 +1391,8 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
 
         for _, row in group.iterrows():
             classification = _categorize_complexity(row.get("Complexities"))
-            runtime_minutes = _parse_minutes_value(row.get("Total Run Time (mnts)"))
-            print_order = _parse_count_value(row.get("Print Order"))
+            runtime_minutes = _effective_runtime_minutes(row)
+            print_order = _effective_print_order(row)
 
             if runtime_minutes <= 0:
                 continue
@@ -1477,6 +1516,37 @@ def _edition_display_name(row: pd.Series) -> str:
     return _clean_text(row.get("Issue Id"))
 
 
+def _effective_runtime_minutes(row: pd.Series) -> float:
+    runtime = _parse_minutes_value(row.get(EFFECTIVE_RUNTIME_COLUMN))
+    if runtime > 0:
+        return runtime
+
+    source_runtime = _parse_minutes_value(row.get("Total Run Time (mnts)"))
+    start_dt = row.get("Effective Start DateTime")
+    end_dt = row.get("Effective End DateTime")
+    if pd.notna(start_dt) and pd.notna(end_dt):
+        interval_runtime = max((pd.Timestamp(end_dt) - pd.Timestamp(start_dt)).total_seconds() / 60, 0.0)
+        if source_runtime > 0:
+            return min(source_runtime, interval_runtime)
+        return interval_runtime
+
+    return source_runtime
+
+
+def _effective_print_order(row: pd.Series) -> float:
+    print_order = _parse_count_value(row.get(EFFECTIVE_PRINT_ORDER_COLUMN))
+    if print_order > 0:
+        return print_order
+
+    source_print_order = _parse_count_value(row.get("Print Order"))
+    source_runtime = _parse_minutes_value(row.get("Total Run Time (mnts)"))
+    effective_runtime = _effective_runtime_minutes(row)
+    if source_print_order > 0 and source_runtime > 0 and effective_runtime < source_runtime:
+        return source_print_order * min(max(effective_runtime / source_runtime, 0.0), 1.0)
+
+    return source_print_order
+
+
 def _scale_runtime_segments(value: Any, runtime_minutes: float) -> list[dict[str, Any]]:
     if not isinstance(value, list) or runtime_minutes <= 0:
         return []
@@ -1512,6 +1582,8 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
         "Effective End DateTime",
         "Print Order",
         "Total Run Time (mnts)",
+        EFFECTIVE_RUNTIME_COLUMN,
+        EFFECTIVE_PRINT_ORDER_COLUMN,
         "Reflong",
     ]
     df = rows.drop_duplicates(
@@ -1521,8 +1593,8 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
 
     for _, row in df.iterrows():
         classification = _categorize_complexity(row.get("Complexities"))
-        source_runtime_minutes = _parse_minutes_value(row.get("Total Run Time (mnts)"))
-        print_order = _parse_count_value(row.get("Print Order"))
+        source_runtime_minutes = _effective_runtime_minutes(row)
+        print_order = _effective_print_order(row)
 
         if source_runtime_minutes <= 0:
             continue
@@ -1856,6 +1928,8 @@ def calculate_tower_day_metrics(
             "Complexities",
             "Print Order",
             "Total Run Time (mnts)",
+            EFFECTIVE_RUNTIME_COLUMN,
+            EFFECTIVE_PRINT_ORDER_COLUMN,
         ]
     ].drop_duplicates()
 

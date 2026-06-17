@@ -7,7 +7,6 @@ const CAUSE_ORDER = [
   "high_downtime",
   "high_wait_time",
   "high_lost_time",
-  "high_print_order",
 ];
 
 const ROOT_CAUSE_THRESHOLDS = {
@@ -17,7 +16,6 @@ const ROOT_CAUSE_THRESHOLDS = {
   speed_loss_minutes: 10,
   complex_minutes: 30,
   complex_share_pct: 40,
-  print_order_minutes: 10,
 };
 
 const CAUSE_META = {
@@ -46,11 +44,6 @@ const CAUSE_META = {
     color: "#d97706",
     pill: "bg-amber-50 text-amber-700",
   },
-  high_print_order: {
-    label: "High Print Order",
-    color: "#ea580c",
-    pill: "bg-orange-50 text-orange-700",
-  },
 };
 
 export default function DelayedPrintFinishWidget({ details }) {
@@ -62,7 +55,7 @@ export default function DelayedPrintFinishWidget({ details }) {
   if (!details || details.length === 0) return null;
 
   return (
-    <div className="mt-4 border-t border-slate-100 pt-4">
+    <div className="min-w-0">
       <div className="flex items-start gap-2">
         <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-700">
           <AlertTriangle className="h-4 w-4" aria-hidden="true" />
@@ -344,17 +337,12 @@ function calculateCauseScores(row, baseline) {
   const downtime = positiveNumber(row.downtime);
   const nonWaitLostTime = calculateNonWaitLostTime(row, waitingTime);
   const runtime = positiveNumber(row.runtime);
-  const avgSpeed = computeAverageSpeed(row);
   const printOrder = computeTotalPrintOrder(row);
   const baselineSpeed = positiveNumber(baseline.avg_speed);
-  const baselinePrintOrder = positiveNumber(baseline.avg_print_order);
   const complexMinutes = computeComplexMinutes(row);
   const complexShare = runtime > 0 ? (complexMinutes / runtime) * 100 : 0;
   const speedLossMinutes = baselineSpeed > 0 && printOrder > 0
     ? Math.max(runtime - (printOrder / baselineSpeed) * 60, 0)
-    : 0;
-  const printOrderMinutes = avgSpeed > 0 && baselinePrintOrder > 0
-    ? Math.max((printOrder - baselinePrintOrder) / avgSpeed * 60, 0)
     : 0;
   const scores = {
     low_speed: speedLossMinutes >= ROOT_CAUSE_THRESHOLDS.speed_loss_minutes ? speedLossMinutes : 0,
@@ -365,7 +353,6 @@ function calculateCauseScores(row, baseline) {
     high_downtime: downtime >= ROOT_CAUSE_THRESHOLDS.downtime_minutes ? downtime : 0,
     high_wait_time: waitingTime >= ROOT_CAUSE_THRESHOLDS.waiting_time_minutes ? waitingTime : 0,
     high_lost_time: nonWaitLostTime >= ROOT_CAUSE_THRESHOLDS.lost_time_minutes ? nonWaitLostTime : 0,
-    high_print_order: printOrderMinutes >= ROOT_CAUSE_THRESHOLDS.print_order_minutes ? printOrderMinutes : 0,
   };
 
   if (Object.values(scores).some((value) => value > 0)) {
@@ -378,7 +365,6 @@ function calculateCauseScores(row, baseline) {
     high_downtime: downtime,
     high_wait_time: waitingTime,
     high_lost_time: nonWaitLostTime,
-    high_print_order: printOrderMinutes || (printOrder > 0 ? runtime : 0),
   });
 }
 
@@ -423,18 +409,14 @@ function buildBaselines(rows, keyGetter) {
 
 function computeBaseline(rows) {
   const speedValues = [];
-  const printOrderValues = [];
 
   for (const row of rows) {
     const speed = computeAverageSpeed(row);
-    const printOrder = computeTotalPrintOrder(row);
     if (speed > 0) speedValues.push(speed);
-    if (printOrder > 0) printOrderValues.push(printOrder);
   }
 
   return {
     avg_speed: average(speedValues),
-    avg_print_order: average(printOrderValues),
   };
 }
 
