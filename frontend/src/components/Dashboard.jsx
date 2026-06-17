@@ -7,8 +7,10 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, MessageSquare, Send, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+
+const CHAT_API_BASE = String(import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 
 import CapacityIntelligenceWidget from "./CapacityIntelligenceWidget.jsx";
 import LossTimeThresholdWidget from "./LossTimeThresholdWidget.jsx";
@@ -84,8 +86,7 @@ const BREAKDOWN_STACKS = [
 const UNPLANNED_BREAKDOWN_STACK = {
   key: "idle_time",
   label: "Unplanned Time",
-  color: CAPACITY_SPLIT_COLORS.idle_time,
-  pattern: "idle"
+  color: CAPACITY_SPLIT_COLORS.idle_time
 };
 const FOLDER_BREAKDOWN_STACKS = [...BREAKDOWN_STACKS, UNPLANNED_BREAKDOWN_STACK];
 const DEFAULT_BREAKDOWN_KEYS = FOLDER_BREAKDOWN_STACKS.map((stack) => stack.key);
@@ -93,6 +94,86 @@ const DEFAULT_BREAKDOWN_KEYS = FOLDER_BREAKDOWN_STACKS.map((stack) => stack.key)
 export default function Dashboard({ data, intelligence, intelligenceLoading, intelligenceError }) {
   const [focusedDay, setFocusedDay] = useState("");
   const [selectedBreakdownKeys, setSelectedBreakdownKeys] = useState(DEFAULT_BREAKDOWN_KEYS);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatSize, setChatSize] = useState({ width: 360, height: 480 });
+  const chatEndRef = useRef(null);
+  const prevIntelligenceRef = useRef(null);
+  const chatSizeRef = useRef({ width: 360, height: 480 });
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
+
+  // When the timeframe/plant/folder changes, intelligence is re-fetched.
+  // Clear stale chat history so the LLM doesn't see answers from the old context.
+  useEffect(() => {
+    if (
+      intelligence !== null &&
+      prevIntelligenceRef.current !== null &&
+      prevIntelligenceRef.current !== intelligence
+    ) {
+      setChatMessages([]);
+    }
+    prevIntelligenceRef.current = intelligence;
+  }, [intelligence]);
+
+  function startChatResize(e, direction) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = chatSizeRef.current.width;
+    const startH = chatSizeRef.current.height;
+
+    function onMove(ev) {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      const next = {
+        width: (direction === "nw" || direction === "w") ? Math.max(280, Math.min(900, startW - dx)) : startW,
+        height: (direction === "nw" || direction === "n") ? Math.max(300, Math.min(900, startH - dy)) : startH,
+      };
+      chatSizeRef.current = next;
+      setChatSize(next);
+    }
+
+    function onUp() {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  async function handleChatSend() {
+    const text = chatInput.trim();
+    if (!text || chatLoading) return;
+    setChatInput("");
+    const nextMessages = [...chatMessages, { role: "user", content: text }];
+    setChatMessages(nextMessages);
+    setChatLoading(true);
+    try {
+      const response = await fetch(`${CHAT_API_BASE}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          intelligence: intelligence || {},
+          tower_details: data.tower_details || [],
+          history: chatMessages,
+        }),
+      });
+      const payload = await response.json();
+      setChatMessages([...nextMessages, { role: "assistant", content: payload.answer || "No response." }]);
+    } catch {
+      setChatMessages([...nextMessages, { role: "assistant", content: "Error connecting to the assistant." }]);
+    } finally {
+      setChatLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (focusedDay && !data.daily.some((day) => day.run_date === focusedDay)) {
@@ -280,6 +361,120 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
       />
 
       {/* <LossTimeThresholdWidget details={data.details} /> */}
+
+      {/* ── AI Chatbot ─────────────────────────────────────────── */}
+      <div style={{ position: "fixed", bottom: "24px", right: "24px", zIndex: 50 }}>
+        {chatOpen && (
+          <div
+            className="absolute bottom-16 right-0 flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+            style={{ width: chatSize.width, height: chatSize.height }}
+          >
+            {/* Resize: left edge */}
+            <div onMouseDown={(e) => startChatResize(e, "w")} style={{ position: "absolute", top: 16, left: 0, bottom: 0, width: 5, cursor: "ew-resize", zIndex: 20 }} />
+            {/* Resize: top edge */}
+            <div onMouseDown={(e) => startChatResize(e, "n")} style={{ position: "absolute", top: 0, left: 16, right: 0, height: 5, cursor: "ns-resize", zIndex: 20 }} />
+            {/* Resize: top-left corner grip */}
+            <div
+              onMouseDown={(e) => startChatResize(e, "nw")}
+              title="Drag to resize"
+              style={{ position: "absolute", top: 0, left: 0, width: 16, height: 16, cursor: "nw-resize", zIndex: 21, display: "flex", alignItems: "center", justifyContent: "center" }}
+            >
+              <svg width="9" height="9" viewBox="0 0 9 9" fill="none" style={{ opacity: 0.35 }}>
+                <circle cx="2" cy="2" r="1.2" fill="#64748b" />
+                <circle cx="7" cy="2" r="1.2" fill="#64748b" />
+                <circle cx="2" cy="7" r="1.2" fill="#64748b" />
+                <circle cx="7" cy="7" r="1.2" fill="#64748b" />
+              </svg>
+            </div>
+            {/* Header */}
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-100 bg-slate-50 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="h-4 w-4 text-blue-600" aria-hidden="true" />
+                <span className="text-sm font-semibold text-slate-800">Ask the data</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setChatOpen(false)}
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            {/* Messages */}
+            <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+              {chatMessages.length === 0 && (
+                <p className="mt-8 text-center text-xs text-slate-400">
+                  Ask about towers, folders, utilization, or loss time.
+                </p>
+              )}
+              {chatMessages.map((msg, idx) => (
+                <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div
+                    className={`max-w-[82%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed ${
+                      msg.role === "user"
+                        ? "rounded-br-sm bg-blue-600 text-white"
+                        : "rounded-bl-sm bg-slate-100 text-slate-800"
+                    }`}
+                  >
+                    {msg.content}
+                  </div>
+                </div>
+              ))}
+              {chatLoading && (
+                <div className="flex justify-start">
+                  <div className="rounded-2xl rounded-bl-sm bg-slate-100 px-3 py-2.5">
+                    <div className="flex items-center gap-1">
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400" style={{ animationDelay: "0ms" }} />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400" style={{ animationDelay: "150ms" }} />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400" style={{ animationDelay: "300ms" }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Input */}
+            <div className="shrink-0 border-t border-slate-100 p-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChatSend(); } }}
+                  placeholder={intelligenceLoading ? "Loading new data…" : "Ask a question…"}
+                  disabled={chatLoading || intelligenceLoading}
+                  className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none transition focus:border-blue-400 focus:bg-white focus:ring-1 focus:ring-blue-100 disabled:opacity-60"
+                />
+                <button
+                  type="button"
+                  onClick={handleChatSend}
+                  disabled={chatLoading || intelligenceLoading || !chatInput.trim()}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white transition hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400"
+                >
+                  <Send className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Toggle button */}
+        <button
+          type="button"
+          onClick={() => setChatOpen((open) => !open)}
+          className={`flex h-14 w-14 items-center justify-center rounded-full shadow-lg transition ${
+            chatOpen ? "bg-slate-700 hover:bg-slate-800" : "bg-blue-600 hover:bg-blue-700"
+          }`}
+          title={chatOpen ? "Close chat" : "Ask the data"}
+        >
+          {chatOpen
+            ? <X className="h-6 w-6 text-white" aria-hidden="true" />
+            : <MessageSquare className="h-6 w-6 text-white" aria-hidden="true" />
+          }
+        </button>
+      </div>
     </div>
   );
 }
@@ -954,7 +1149,7 @@ function BreakdownComponentSelector({ options, selectedKeys, onToggle }) {
                 />
                 <span
                   className="h-2.5 w-2.5 rounded-full"
-                  style={getBreakdownSwatchStyle(option)}
+                  style={{ backgroundColor: option.color }}
                 />
                 {option.label}
               </label>
@@ -987,7 +1182,6 @@ function UtilizationBreakdownChart({
   );
   const yAxisLabelOffset = -6;
   const chartMargin = { top: 8, right: 16, left: 4, bottom: 8 };
-  const idlePatternId = `utilizationIdlePattern-${nameKey}`;
 
   const machineColors = useMemo(() => {
     const machines = [...new Set(
@@ -1057,12 +1251,6 @@ function UtilizationBreakdownChart({
           <div className="relative w-full" style={{ height: chartHeight }}>
             <ResponsiveContainer>
               <BarChart data={data} layout="vertical" margin={chartMargin}>
-                <defs>
-                  <pattern id={idlePatternId} patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(35)">
-                    <rect width="8" height="8" fill={CAPACITY_SPLIT_COLORS.idle_time} opacity="0.55" />
-                    <line x1="0" y1="0" x2="0" y2="8" stroke="#94a3b8" strokeWidth="1" opacity="0.55" />
-                  </pattern>
-                </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" horizontal={false} />
                 <XAxis
                   type="number"
@@ -1092,8 +1280,8 @@ function UtilizationBreakdownChart({
                     dataKey={`${option.key}_percentage`}
                     name={option.label}
                     stackId="engaged"
-                    fill={getBreakdownStackFill(option, idlePatternId)}
-                    stroke={option.pattern === "idle" ? "#cbd5e1" : "#f8fafc"}
+                    fill={option.color}
+                    stroke="#f8fafc"
                     strokeWidth={1.25}
                     barSize={barSize}
                     radius={index === selectedStacks.length - 1 ? [0, 4, 4, 0] : [0, 0, 0, 0]}
@@ -1170,7 +1358,6 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
             label="Unplanned time"
             value={`${formatMinutes(row.idle_time)} (${formatPercent(row.idle_time_percentage)})`}
             color={CAPACITY_SPLIT_COLORS.idle_time}
-            pattern="idle"
           />
         )}
         {showPlannedNights && (
@@ -1194,35 +1381,19 @@ function splitResourceLabel(value) {
   return [parts[0] || "", parts[1] || parts[0] || ""];
 }
 
-function TooltipRow({ label, value, color, pattern }) {
+function TooltipRow({ label, value, color }) {
   return (
     <div className="flex items-center justify-between gap-4">
       <span className="flex items-center gap-1.5">
         <span
           className="h-2.5 w-2.5 flex-shrink-0 rounded-full"
-          style={getBreakdownSwatchStyle({ color, pattern })}
+          style={{ backgroundColor: color }}
         />
         <span>{label}</span>
       </span>
       <span className="font-bold text-slate-950">{value}</span>
     </div>
   );
-}
-
-function getBreakdownStackFill(option, idlePatternId) {
-  if (option.pattern === "idle") return `url(#${idlePatternId})`;
-  return option.color;
-}
-
-function getBreakdownSwatchStyle(option) {
-  if (option.pattern === "idle") {
-    return {
-      backgroundColor: option.color,
-      backgroundImage: "repeating-linear-gradient(135deg, rgba(100,116,139,0.38) 0 1px, transparent 1px 4px)"
-    };
-  }
-
-  return { backgroundColor: option.color };
 }
 
 function buildCapacitySplitModel(dailyRows, detailRows) {

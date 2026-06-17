@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.services.capacity import build_capacity_response
-from app.services.intelligence import build_capacity_intelligence
+from app.services.intelligence import build_capacity_intelligence, build_chat_response
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -34,6 +34,13 @@ class IntelligenceRequest(BaseModel):
     details: list[dict[str, Any]] = []
     tower_details: list[dict[str, Any]] = []
     scope_label: str = ""
+
+
+class ChatRequest(BaseModel):
+    message: str
+    intelligence: dict[str, Any] = {}
+    tower_details: list[dict[str, Any]] = []
+    history: list[dict[str, str]] = []
 
 
 def _json_default(obj: Any) -> Any:
@@ -100,6 +107,29 @@ def capacity_intelligence(request: IntelligenceRequest) -> JSONResponse:
             "valid": False,
             "intelligence": None,
             "errors": [f"Intelligence generation failed: {exc}"],
+        })
+
+
+@app.post("/api/chat")
+def capacity_chat(request: ChatRequest) -> JSONResponse:
+    try:
+        result = build_chat_response(
+            message=request.message,
+            intelligence=request.intelligence,
+            tower_details=request.tower_details,
+            history=request.history,
+        )
+        return JSONResponse({
+            "valid": True,
+            "answer": result.get("answer", ""),
+            "status": result.get("status", "ok"),
+        })
+    except Exception as exc:
+        return JSONResponse({
+            "valid": False,
+            "answer": "Unable to process your question.",
+            "status": "error",
+            "error": str(exc),
         })
 
 

@@ -1,6 +1,17 @@
 import { useMemo } from "react";
 import { AlertTriangle } from "lucide-react";
 
+const PF_COMPLIANCE_MINUTES_BY_PLANT = {
+  baroda: 180,
+  manesar: 180,
+  trivandrum: 150,
+};
+
+function pfComplianceMinutes(plantName) {
+  const key = String(plantName || "").toLowerCase().trim();
+  return PF_COMPLIANCE_MINUTES_BY_PLANT[key] ?? 240;
+}
+
 const CAUSE_ORDER = [
   "low_speed",
   "high_complexity",
@@ -65,7 +76,7 @@ export default function DelayedPrintFinishWidget({ details }) {
             Folderwise & Plant-Level Delayed PF
           </h3>
           <p className="mt-1 text-sm text-slate-500">
-            Cutoff: 04:00 AM | {formatNumber(analysis.folderBreaches.length)} breach{analysis.folderBreaches.length === 1 ? "" : "es"}
+            {formatNumber(analysis.folderBreaches.length)} breach{analysis.folderBreaches.length === 1 ? "" : "es"}
           </p>
         </div>
       </div>
@@ -184,7 +195,7 @@ function DelayedFinishTable({ rows }) {
                   {row.display_name}
                 </td>
                 <td className="px-3 py-2 font-mono text-slate-700">
-                  {formatFinishTime(row.overrun_minutes)}
+                  {formatFinishTime(row.overrun_minutes, row.plant_name)}
                 </td>
                 <td className="px-3 py-2">
                   <div className="flex flex-wrap gap-1">
@@ -551,8 +562,9 @@ function formatMinutes(value) {
   return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`;
 }
 
-function formatFinishTime(overrunMinutes) {
-  const totalMinutes = 240 + Math.round(Number(overrunMinutes || 0));
+function formatFinishTime(overrunMinutes, plantName) {
+  const baseMinutes = pfComplianceMinutes(plantName);
+  const totalMinutes = baseMinutes + Math.round(Number(overrunMinutes || 0));
   const dayOffset = Math.floor(totalMinutes / 1440);
   const clockMinutes = totalMinutes % 1440;
   const hours = Math.floor(clockMinutes / 60);

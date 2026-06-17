@@ -139,6 +139,10 @@ def parse_down_time(workbook: pd.ExcelFile) -> pd.DataFrame:
     df["IssueID"] = df["IssueID"].apply(_clean_text)
     df["Related"] = df["Related"].apply(_clean_text)
     df["Reason"] = df["Reason"].apply(_clean_text)
+    df["Department"] = df.get(
+        "Department",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
     df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
     return df
 
@@ -690,7 +694,34 @@ def _drop_reflong_down_time_rows(down_time_df: pd.DataFrame) -> pd.DataFrame:
     return down_time_df[~down_time_df["Related"].apply(_is_reflong_related)].copy()
 
 
-def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFrame) -> pd.DataFrame:
+def _build_reflong_issue_ids(book_df: pd.DataFrame) -> set[str]:
+    """Return Issue IDs from Book Wise Details where Reflong == 'Yes'.
+
+    These IDs are used to identify which Down Time rows (Department == 'Reflong - Changeover')
+    should be moved from downtime to the reflong loss-time component.
+    """
+    if book_df.empty or "Reflong" not in book_df.columns or "Issue Id" not in book_df.columns:
+        return set()
+    mask = book_df["Reflong"].apply(_is_reflong_print)
+    return set(book_df.loc[mask, "Issue Id"].apply(_clean_text).dropna().unique())
+
+
+def _is_reflong_downtime_row(row: pd.Series, reflong_issue_ids: set[str]) -> bool:
+    """True when this Down Time entry should count as reflong (not regular downtime).
+
+    Criteria: the Issue ID is a reflong issue (Reflong == 'Yes' in Book Wise Details)
+    AND the Department is 'Reflong - Changeover'.
+    """
+    issue_id = _clean_text(row.get("IssueID"))
+    department = _clean_text(row.get("Department"))
+    return issue_id in reflong_issue_ids and department.casefold() == "reflong - changeover"
+
+
+def calculate_folder_day_metrics(
+    book_df: pd.DataFrame,
+    down_time_df: pd.DataFrame,
+    reflong_issue_ids: set[str] | None = None,
+) -> pd.DataFrame:
     """Calculate one 240-minute capacity unit for each Issue Date + Machine + Folder.
 
     Strict first step:
@@ -748,6 +779,7 @@ def calculate_folder_day_metrics(book_df: pd.DataFrame, down_time_df: pd.DataFra
         book_df,
         down_time_df,
         interval_editions,
+        reflong_issue_ids or set(),
     )
 
     metrics = (
@@ -1074,13 +1106,16 @@ def _aggregate_down_time_by_capacity_unit_filtered(
     book_df: pd.DataFrame,
     down_time_df: pd.DataFrame,
     interval_editions: pd.DataFrame,
+    reflong_issue_ids: set[str],
 ) -> pd.DataFrame:
     """Aggregate downtime only for editions in the Issue Date 00:00-04:00 interval.
 
     Down Time does not have Issue Date, so Report Date is mapped from Book Wise Details
     using IssueID + Machine + Folder.
 
-    Reflong-related downtime is ignored because reflong print rows are excluded.
+    Rows where the IssueID is a reflong issue (Reflong == 'Yes' in Book Wise Details)
+    and Department == 'Reflong - Changeover' are counted as reflong_related_downtime
+    (moved to loss time) rather than regular downtime.
     """
     keys = [REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"]
 
@@ -1143,18 +1178,21 @@ def _aggregate_down_time_by_capacity_unit_filtered(
     if down_rows.empty:
         return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
 
-    down_rows = _drop_reflong_down_time_rows(down_rows)
-
-    if down_rows.empty:
-        return pd.DataFrame(columns=[*keys, "total_downtime", "reflong_related_downtime"])
-
-    down_rows["reflong_related_downtime"] = 0.0
-
+    # Classify each Down Time row: reflong loss or regular downtime.
+    # Reflong: Issue ID is a reflong issue (Reflong='Yes' in Book Wise Details)
+    #          AND Department == 'Reflong - Changeover'.
+    # All other rows count as regular downtime (including any other dept. for reflong issues).
+    is_reflong = down_rows.apply(
+        lambda row: _is_reflong_downtime_row(row, reflong_issue_ids), axis=1
+    )
+    down_rows["_reflong_downtime"] = down_rows["Total Downtime"].where(is_reflong, 0.0)
+    # total_downtime = all downtime (regular + reflong) so the existing formula
+    # downtime = total_downtime - reflong_related_downtime works correctly.
     return (
         down_rows.groupby(keys, dropna=False)
         .agg(
             total_downtime=("Total Downtime", "sum"),
-            reflong_related_downtime=("reflong_related_downtime", "sum"),
+            reflong_related_downtime=("_reflong_downtime", "sum"),
         )
         .reset_index()
     )
@@ -1165,8 +1203,10 @@ def _aggregate_down_time_by_tower(
     issue_tower_lookup: dict[tuple[str, str, str], list[str]],
     issue_plant_lookup: dict[tuple[str, str, str], str],
     issue_date_lookup: dict[tuple[str, str, str], date],
+    reflong_issue_ids: set[str] | None = None,
 ) -> dict[tuple[date, str, str, str, str], dict[str, float]]:
     totals: dict[tuple[date, str, str, str, str], dict[str, float]] = {}
+    _reflong_ids = reflong_issue_ids or set()
 
     if down_time_df.empty:
         return totals
@@ -1187,13 +1227,15 @@ def _aggregate_down_time_by_tower(
         if total_downtime <= 0:
             continue
 
-        if _is_reflong_related(row.get("Related")):
-            continue
+        is_reflong = _is_reflong_downtime_row(row, _reflong_ids)
 
         for tower in towers:
             key = (report_date, plant_name, machine, folder, tower)
             totals.setdefault(key, {"downtime": 0.0, "reflong_related_downtime": 0.0})
-            totals[key]["downtime"] += total_downtime
+            if is_reflong:
+                totals[key]["reflong_related_downtime"] += total_downtime
+            else:
+                totals[key]["downtime"] += total_downtime
 
     return totals
 
@@ -1821,6 +1863,7 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     ).clip(lower=0)
 
     daily["capacity_folders_count"] = capacity_folders_count
+    daily["active_folder_capacity"] = daily["active_folders_count"] * CAPACITY_MINUTES_PER_FOLDER_DAY
     daily["available_capacity"] = fixed_daily_capacity
     daily["idle_time"] = idle_time + daily["active_idle_time"]
     daily = daily.drop(columns=["active_idle_time", "capacity_folder_units"])
@@ -1874,6 +1917,7 @@ def calculate_tower_day_metrics(
     down_time_df: pd.DataFrame,
     general_df: pd.DataFrame,
     uv_tower_lookup: dict[str, dict[str, set[str]]] | None = None,
+    reflong_issue_ids: set[str] | None = None,
 ) -> pd.DataFrame:
     """Calculate engaged minutes for each tower in the Issue Date 00:00-04:00 window."""
     columns = [
@@ -1970,6 +2014,7 @@ def calculate_tower_day_metrics(
         issue_tower_lookup,
         issue_plant_lookup,
         issue_date_lookup,
+        reflong_issue_ids,
     )
 
     records = []
@@ -2074,7 +2119,11 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
     total_buffer_time = float(daily_df["buffer_time"].sum()) if not daily_df.empty else 0.0
     total_idle_time = float(daily_df["idle_time"].sum()) if not daily_df.empty and "idle_time" in daily_df else 0.0
-    planned_available_time = max(total_available - total_idle_time, 0.0)
+    total_active_folder_capacity = (
+        float(daily_df["active_folder_capacity"].sum())
+        if not daily_df.empty and "active_folder_capacity" in daily_df
+        else max(total_available - total_idle_time, 0.0)
+    )
 
     return {
         "total_available_capacity": _clean_number(total_available),
@@ -2084,7 +2133,7 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
         "total_buffer_time": _clean_number(total_buffer_time),
         "total_idle_time": _clean_number(total_idle_time),
         "average_utilization_percentage": _clean_number(_percentage(total_runtime, total_available)),
-        "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, planned_available_time)),
+        "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, total_active_folder_capacity)),
         "idle_capacity_percentage": _clean_number(_percentage(total_idle_time, total_available)),
         "active_folder_days": int(daily_df["active_folders_count"].sum()) if not daily_df.empty else 0,
     }
@@ -2170,12 +2219,20 @@ def _calculate_effective_speed(print_order: float, runtime_minutes: float) -> fl
 def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
     general_df = parse_general(workbook)
     folder_lookup = _load_folder_list_lookup()
-    book_df = _drop_reflong_print_rows(
-        _canonicalize_book_folders(parse_book_wise_details(workbook), folder_lookup)
+
+    # Canonicalize book rows BEFORE dropping reflong print rows so we can extract
+    # reflong Issue IDs for the downtime split step.
+    canonical_book_df = _canonicalize_book_folders(parse_book_wise_details(workbook), folder_lookup)
+    reflong_issue_ids = _build_reflong_issue_ids(canonical_book_df)
+    book_df = _drop_reflong_print_rows(canonical_book_df)
+
+    # Keep all Down Time rows (including Department == 'Reflong - Changeover').
+    # Pass canonical_book_df so reflong IssueIDs can be resolved to the right folder.
+    # The aggregation step will classify each row as regular downtime or reflong loss time.
+    down_time_df = _canonicalize_down_time_folders(
+        parse_down_time(workbook), folder_lookup, canonical_book_df
     )
-    down_time_df = _drop_reflong_down_time_rows(
-        _canonicalize_down_time_folders(parse_down_time(workbook), folder_lookup, book_df)
-    )
+
     plant_date_universe = _build_plant_date_universe(book_df)
     twin_lookup = _load_twin_folder_lookup()
     uv_tower_lookup = _load_uv_tower_lookup()
@@ -2187,9 +2244,9 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
         "IssueID",
         issue_twin_targets,
     )
-    folder_day_df = calculate_folder_day_metrics(folder_book_df, folder_down_time_df)
+    folder_day_df = calculate_folder_day_metrics(folder_book_df, folder_down_time_df, reflong_issue_ids)
     folder_day_df = _add_unplanned_folder_day_rows(folder_day_df, folder_lookup, plant_date_universe)
-    tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df, uv_tower_lookup)
+    tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df, uv_tower_lookup, reflong_issue_ids)
     daily_df = calculate_daily_metrics(folder_day_df)
 
     return {

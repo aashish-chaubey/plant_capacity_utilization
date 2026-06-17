@@ -16,18 +16,277 @@ CAPACITY_MINUTES_PER_FOLDER_DAY = 240.0
 REQUEST_TIMEOUT_SECONDS = 35
 
 LOSS_COMPONENTS = [
-    ("waiting_time", "Waiting time"),
     ("change_over_time", "Changeover time"),
     ("late_start_time", "LPR to print start"),
     ("reflong_related_downtime", "Reflong time"),
 ]
 
 LOSS_DRIVER_INFERENCES = {
-    "waiting_time": "waiting before editions were ready or between editions",
     "change_over_time": "changeover and sequencing gaps between editions",
     "late_start_time": "late start at the beginning of the 00:00-04:00 window",
     "reflong_related_downtime": "reflong-related interruption time",
 }
+
+
+def build_chat_response(
+    message: str,
+    intelligence: dict[str, Any],
+    tower_details: list[dict[str, Any]],
+    history: list[dict[str, str]],
+) -> dict[str, Any]:
+    endpoint = _get_env("AZURE_ENDPOINT")
+    api_key = (
+        _get_env("API_KEY")
+        or _get_env("AZURE_API_KEY")
+        or _get_env("AZURE_OPENAI_API_KEY")
+        or _get_env("AZURE_INFERENCE_KEY")
+    )
+
+    if not endpoint or not api_key:
+        return {"answer": "LLM is not configured.", "status": "unconfigured"}
+
+    context = _build_chat_context(intelligence, tower_details)
+    context_json = json.dumps(context, separators=(",", ":"), ensure_ascii=True)
+
+    system_content = (
+        "You are a concise analytics assistant for a print plant production dashboard. "
+        "The production window is midnight to 4 AM (00:00–04:00). "
+        "Answer ONLY from the JSON context supplied — never guess or invent values. "
+        "Be brief and direct — no preamble, no filler. "
+        "For ranked results use a short numbered list. "
+        "Convert minutes to h:mm format when it aids readability. "
+        "If the answer is genuinely absent from the data, say: Not available in the current data.\n\n"
+        "Schema key:\n"
+        "- resource: 'Machine / Folder' display name\n"
+        "- utilization_pct / utilization_percentage: runtime ÷ total possible capacity (incl. unplanned nights)\n"
+        "- active_day_utilization_pct: runtime ÷ capacity only on nights the folder was active\n"
+        "- runtime_minutes / runtime_min: actual print runtime\n"
+        "- lost_time_min / lost_time_minutes: Loss Time = changeover + late-start + reflong ONLY. "
+        "WAITING TIME IS NOT INCLUDED IN LOSS TIME — it is a completely separate metric.\n"
+        "- waiting_time_min / waiting_time_minutes: time waiting for editions; SEPARATE from loss_time, NEVER add it to loss_time\n"
+        "- buffer_time_min / buffer_time_minutes: Spare Time — leftover capacity WITHIN an active night. "
+        "This is the ONLY definition of spare time. NEVER add unplanned_time to spare time.\n"
+        "- unplanned_time_min (folders): fully unscheduled nights where the folder had NO activity. "
+        "This is NOT spare time — do not include it when reporting spare capacity.\n"
+        "- loss_components: breakdown of loss_time into change_over_time, late_start_time, reflong_related_downtime\n"
+        "- average_speed_cph: copies per hour\n"
+        "- complex_runtime_share_percentage: share of runtime that was complex-category print\n"
+        "- top_folders_by_loss: folders contributing most loss time on that day\n"
+        "- unplanned_capacity_min (towers): capacity from nights the tower was not scheduled at all\n"
+        "- spare_time_min (towers): leftover capacity within nights the tower was active\n"
+        "- unplanned_nights (towers): number of production nights with no activity for that tower\n"
+        "- uv_tower: true if the tower is a UV tower\n"
+        "- uv_towers / non_uv_towers: pre-split lists by UV type\n"
+        "- downtime_min (folders): mechanical machine stoppage time\n"
+        "- load_share_pct: this folder's share of total plant runtime\n"
+        "- variability_pct: std deviation of daily runtime % — high = inconsistent usage\n"
+        "- unused_folders: list of folders with zero active nights in the period\n"
+        "- complexity_vs_loss: per-complexity-category avg loss share and total lost/downtime\n"
+        "- speed.by_category: speed and runtime share for each print category (SNP, GNP, SNP Complex, GNP Complex)\n"
+        "- dominant_complexity (speed.by_folder): the category that ran most on that folder\n"
+        "CRITICAL RULES: (1) spare_time = buffer_time ONLY. unplanned_time is NEVER spare. "
+        "(2) waiting_time is NOT a loss time component — always report them separately. "
+        "(3) Plant spare time = sum of buffer_time across folders, never include unplanned_time.\n\n"
+        f"Dashboard context:\n{context_json}"
+    )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+    for turn in (history or [])[-8:]:
+        role = _clean_text(turn.get("role", ""))
+        content = _clean_text(turn.get("content", ""))
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": _clean_text(message)})
+
+    try:
+        answer = _call_plain_chat_completion(endpoint, api_key, messages)
+        return {"answer": answer.strip(), "status": "ok"}
+    except Exception as exc:
+        return {
+            "answer": "Unable to generate a response right now.",
+            "status": "error",
+            "detail": _sanitize_error_message(exc, api_key),
+        }
+
+
+def _build_chat_context(
+    intelligence: dict[str, Any],
+    tower_details: list[dict[str, Any]],
+) -> dict[str, Any]:
+    sections = intelligence.get("sections") or {}
+    folder_util = sections.get("folder_utilization") or {}
+    loss_time_sec = sections.get("loss_time") or {}
+    complexity = sections.get("complexity_speed") or {}
+
+    # Aggregate tower metrics across all dates
+    production_days = _number((intelligence.get("scope") or {}).get("production_days"))
+    tower_buckets: dict[str, dict] = {}
+    for row in tower_details:
+        tower = _display_resource_name(row.get("tower") or "")
+        if not tower:
+            continue
+        bucket = tower_buckets.setdefault(tower, {
+            "runtime": 0.0, "available": 0.0, "buffer": 0.0,
+            "downtime": 0.0, "waiting_time": 0.0,
+            "change_over_time": 0.0, "late_start_time": 0.0,
+            "reflong_related_downtime": 0.0, "dates": set(),
+            "uv_tower": False,
+        })
+        bucket["runtime"] += _number(row.get("runtime"))
+        bucket["available"] += _number(row.get("available_capacity"))
+        bucket["buffer"] += _number(row.get("buffer_time"))
+        bucket["downtime"] += _number(row.get("downtime"))
+        bucket["waiting_time"] += _number(row.get("waiting_time"))
+        bucket["change_over_time"] += _number(row.get("change_over_time"))
+        bucket["late_start_time"] += _number(row.get("late_start_time"))
+        bucket["reflong_related_downtime"] += _number(row.get("reflong_related_downtime"))
+        if row.get("uv_tower"):
+            bucket["uv_tower"] = True
+        date = _clean_text(row.get("run_date"))
+        if date:
+            bucket["dates"].add(date)
+
+    tower_rows = []
+    for t, v in tower_buckets.items():
+        active_nights = len(v["dates"])
+        unplanned_nights = max(int(production_days) - active_nights, 0) if production_days > 0 else 0
+        unplanned_capacity_min = unplanned_nights * CAPACITY_MINUTES_PER_FOLDER_DAY
+        non_wait_lost_time = v["change_over_time"] + v["late_start_time"] + v["reflong_related_downtime"]
+        tower_rows.append({
+            "tower": t,
+            "uv_tower": v["uv_tower"],
+            "runtime_min": _clean_number(v["runtime"]),
+            "downtime_min": _clean_number(v["downtime"]),
+            "lost_time_min": _clean_number(non_wait_lost_time),
+            "waiting_time_min": _clean_number(v["waiting_time"]),
+            "change_over_time_min": _clean_number(v["change_over_time"]),
+            "late_start_time_min": _clean_number(v["late_start_time"]),
+            "reflong_downtime_min": _clean_number(v["reflong_related_downtime"]),
+            "spare_time_min": _clean_number(v["buffer"]),
+            "unplanned_capacity_min": _clean_number(unplanned_capacity_min),
+            "active_nights": active_nights,
+            "unplanned_nights": unplanned_nights,
+            "utilization_pct": _percentage(v["runtime"], v["available"]),
+        })
+    tower_rows.sort(key=lambda r: -r["utilization_pct"])
+
+    def _slim_day(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "run_date": row.get("run_date"),
+            "runtime_min": row.get("runtime_minutes"),
+            "lost_time_min": row.get("lost_time_minutes"),
+            "waiting_time_min": row.get("waiting_time_minutes"),
+            "available_capacity_min": row.get("available_capacity_minutes"),
+            "loss_pct": row.get("loss_percentage"),
+            "dominant_driver": (row.get("dominant_driver") or {}).get("label"),
+            "loss_components": {
+                c.get("key"): c.get("minutes")
+                for c in (row.get("components") or [])
+                if c and c.get("minutes", 0) > 0
+            },
+            "top_folders_by_loss": [
+                {"folder": f.get("resource"), "lost_min": f.get("lost_time_minutes")}
+                for f in (row.get("top_folders") or [])
+            ],
+        }
+
+    def _slim_folder(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "resource": row.get("resource"),
+            "utilization_pct": row.get("utilization_percentage"),
+            "active_day_utilization_pct": row.get("active_day_utilization_percentage"),
+            "runtime_min": row.get("runtime_minutes"),
+            "lost_time_min": row.get("lost_time_minutes"),
+            "waiting_time_min": row.get("waiting_time_minutes"),
+            "downtime_min": row.get("downtime_minutes"),
+            "buffer_time_min": row.get("buffer_time_minutes"),
+            "unplanned_time_min": row.get("unplanned_time_minutes"),
+            "active_days": row.get("active_days"),
+            "unplanned_days": row.get("idle_days"),
+            "loss_share_pct": row.get("loss_share_percentage"),
+            "load_share_pct": row.get("load_share_percentage"),
+            "variability_pct": row.get("runtime_variability_percentage_points"),
+            "classification": row.get("classification"),
+        }
+
+    def _slim_speed(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "resource": row.get("resource"),
+            "avg_speed_cph": row.get("average_speed_cph"),
+            "simple_speed_cph": row.get("simple_speed_cph"),
+            "complex_speed_cph": row.get("complex_speed_cph"),
+            "complex_share_pct": row.get("complex_runtime_share_percentage"),
+            "dominant_complexity": row.get("dominant_complexity"),
+            "runtime_min": row.get("runtime_minutes"),
+        }
+
+    all_days = [_slim_day(r) for r in (loss_time_sec.get("days") or [])]
+    all_folders = [_slim_folder(r) for r in (folder_util.get("folders") or [])]
+    speed_by_folder = [_slim_speed(r) for r in (complexity.get("by_folder") or [])]
+    speed_by_machine = [_slim_speed(r) for r in (complexity.get("by_machine") or [])]
+
+    # Unused folders: active_days == 0 across the entire period
+    unused_folders = [f["resource"] for f in all_folders if not f.get("active_days")]
+
+    # Complexity-vs-loss correlation: join speed dominant_complexity with folder loss share
+    speed_lookup = {r.get("resource"): r for r in speed_by_folder if r.get("resource")}
+    complexity_loss_groups: dict[str, list[dict[str, Any]]] = {}
+    for f in all_folders:
+        res = f.get("resource")
+        speed_row = speed_lookup.get(res, {})
+        cat = _clean_text(speed_row.get("dominant_complexity")) or "Unknown"
+        if cat == "Unknown":
+            continue
+        complexity_loss_groups.setdefault(cat, []).append({
+            "resource": res,
+            "loss_share_pct": _number(f.get("loss_share_pct")),
+            "lost_time_min": _number(f.get("lost_time_min")),
+            "downtime_min": _number(f.get("downtime_min")),
+            "runtime_min": _number(f.get("runtime_min")),
+        })
+
+    complexity_loss_summary = []
+    for cat, entries in sorted(complexity_loss_groups.items()):
+        loss_shares = [e["loss_share_pct"] for e in entries]
+        complexity_loss_summary.append({
+            "complexity": cat,
+            "folder_count": len(entries),
+            "avg_loss_share_pct": _clean_number(_average(loss_shares)),
+            "total_lost_time_min": _clean_number(sum(e["lost_time_min"] for e in entries)),
+            "total_downtime_min": _clean_number(sum(e["downtime_min"] for e in entries)),
+            "total_runtime_min": _clean_number(sum(e["runtime_min"] for e in entries)),
+        })
+
+    # UV vs non-UV tower split
+    uv_towers = [t for t in tower_rows if t.get("uv_tower")]
+    non_uv_towers = [t for t in tower_rows if not t.get("uv_tower")]
+
+    return {
+        "scope": intelligence.get("scope") or {},
+        "summary": intelligence.get("summary") or {},
+        "folders": all_folders,
+        "unused_folders": unused_folders,
+        "speed": {
+            "overall": complexity.get("overall") or {},
+            "by_category": (complexity.get("by_category") or []),
+            "by_folder": speed_by_folder,
+            "by_machine": speed_by_machine,
+            "fastest": (complexity.get("fastest_folders") or [])[:5],
+            "slowest": (complexity.get("slowest_folders") or [])[:5],
+            "highest_complexity_share": (complexity.get("highest_complexity_share_folders") or [])[:5],
+        },
+        "complexity_vs_loss": complexity_loss_summary,
+        "loss_time": {
+            "dominant_driver": loss_time_sec.get("dominant_driver"),
+            "driver_totals": loss_time_sec.get("driver_totals"),
+            "top_loss_days": (loss_time_sec.get("top_loss_days") or [])[:6],
+            "low_loss_days": (loss_time_sec.get("low_loss_days") or [])[:4],
+            "all_days": all_days,
+        },
+        "towers": tower_rows,
+        "uv_towers": uv_towers,
+        "non_uv_towers": non_uv_towers,
+    }
 
 
 def build_capacity_intelligence(payload: dict[str, Any]) -> dict[str, Any]:
@@ -87,9 +346,9 @@ def _build_deterministic_intelligence(
             "total_runtime": _clean_number(summary.get("total_runtime")),
             "total_lost_time": _clean_number(summary.get("total_lost_time")),
             "total_spare_time": _clean_number(summary.get("total_buffer_time")),
-            "total_idle_time": _clean_number(summary.get("total_idle_time")),
+            "total_unplanned_time": _clean_number(summary.get("total_idle_time")),
             "spare_capacity_percentage": _clean_number(summary.get("spare_capacity_percentage")),
-            "idle_capacity_percentage": _clean_number(summary.get("idle_capacity_percentage")),
+            "unplanned_capacity_percentage": _clean_number(summary.get("idle_capacity_percentage")),
             "average_speed_cph": complexity_speed["overall"]["average_speed_cph"],
             "simple_speed_cph": complexity_speed["overall"]["simple_speed_cph"],
             "complex_speed_cph": complexity_speed["overall"]["complex_speed_cph"],
@@ -291,19 +550,21 @@ def _build_folder_utilization_analysis(
         )
         active_capacity = sum(_available_minutes(row) for row in rows)
         runtime = sum(_number(row.get("runtime")) for row in rows)
-        lost_time = sum(_number(row.get("lost_time")) for row in rows)
+        lost_time_raw = sum(_number(row.get("lost_time")) for row in rows)
+        waiting_time = sum(_number(row.get("waiting_time")) for row in rows)
+        non_wait_lost_time = max(lost_time_raw - waiting_time, 0)
         downtime = sum(_number(row.get("downtime")) for row in rows)
         buffer_time = sum(_number(row.get("buffer_time")) for row in rows)
         if buffer_time <= 0 and rows:
-            buffer_time = max(active_capacity - runtime - lost_time - downtime, 0)
+            buffer_time = max(active_capacity - runtime - lost_time_raw - downtime, 0)
         active_days = len({row.get("run_date") for row in rows if row.get("run_date")})
-        idle_days = max(production_days - active_days, 0)
-        idle_time = max(possible_capacity - active_capacity, 0)
+        unplanned_days = max(production_days - active_days, 0)
+        unplanned_time = max(possible_capacity - active_capacity, 0)
         daily_runtime_percentages = _daily_folder_runtime_percentages(rows, dates)
         variability = pstdev(daily_runtime_percentages) if len(daily_runtime_percentages) > 1 else 0.0
         utilization = _percentage(runtime, possible_capacity)
         active_day_utilization = _percentage(runtime, active_capacity)
-        loss_share = _percentage(lost_time, runtime + lost_time) if runtime + lost_time > 0 else 0
+        loss_share = _percentage(non_wait_lost_time, runtime + non_wait_lost_time) if runtime + non_wait_lost_time > 0 else 0
 
         folder_summaries.append(
             {
@@ -311,10 +572,11 @@ def _build_folder_utilization_analysis(
                 "machine": machine,
                 "folder": folder_name,
                 "runtime_minutes": _clean_number(runtime),
-                "lost_time_minutes": _clean_number(lost_time),
+                "lost_time_minutes": _clean_number(non_wait_lost_time),
+                "waiting_time_minutes": _clean_number(waiting_time),
                 "downtime_minutes": _clean_number(downtime),
                 "buffer_time_minutes": _clean_number(buffer_time),
-                "idle_time_minutes": _clean_number(idle_time),
+                "unplanned_time_minutes": _clean_number(unplanned_time),
                 "possible_capacity_minutes": _clean_number(possible_capacity),
                 "active_capacity_minutes": _clean_number(active_capacity),
                 "utilization_percentage": utilization,
@@ -322,7 +584,7 @@ def _build_folder_utilization_analysis(
                 "loss_share_percentage": _clean_number(loss_share),
                 "load_share_percentage": _percentage(runtime, total_runtime),
                 "active_days": active_days,
-                "idle_days": idle_days,
+                "idle_days": unplanned_days,
                 "runtime_variability_percentage_points": _clean_number(variability),
                 "classification": _folder_utilization_classification(
                     utilization=utilization,
@@ -388,7 +650,9 @@ def _build_loss_time_analysis(
         daily = daily_by_day.get(day, {})
         available = _number(daily.get("available_capacity")) or sum(_available_minutes(row) for row in details)
         runtime = _number(daily.get("runtime")) or sum(_number(row.get("runtime")) for row in details)
-        lost_time = _number(daily.get("lost_time")) or sum(_number(row.get("lost_time")) for row in details)
+        lost_time_raw = _number(daily.get("lost_time")) or sum(_number(row.get("lost_time")) for row in details)
+        waiting_time = sum(_number(row.get("waiting_time")) for row in details)
+        lost_time = max(lost_time_raw - waiting_time, 0)
         component_values = {
             key: sum(_number(row.get(key)) for row in details)
             for key, _ in LOSS_COMPONENTS
@@ -405,6 +669,7 @@ def _build_loss_time_analysis(
                 "run_date": day,
                 "runtime_minutes": _clean_number(runtime),
                 "lost_time_minutes": _clean_number(lost_time),
+                "waiting_time_minutes": _clean_number(waiting_time),
                 "available_capacity_minutes": _clean_number(available),
                 "loss_percentage": _percentage(lost_time, available),
                 "loss_per_runtime_percentage": _percentage(lost_time, runtime),
@@ -515,7 +780,7 @@ def _build_llm_summary(intelligence: dict[str, Any]) -> tuple[dict[str, Any], di
                 "and GNP Complex is the complex variant within GNP. Focus only on interesting, non-obvious executive insights: "
                 "complexity impact on machine/folder speed, high-level folder utilization comparison, and meaningful loss-time drivers. "
                 "Avoid redundant threshold-style statements. Return concise JSON with keys: headline, key_summary_points, recommended_actions. "
-                "Treat spare time and unplanned time as separate facts; spare is active-folder remaining time, idle is unscheduled capacity. "
+                "Treat spare time and unplanned time as entirely separate facts: spare (buffer_time) is leftover capacity on active nights; unplanned is capacity on nights with no scheduled activity. NEVER combine them. Waiting time is separate from loss time — do not include waiting in loss time figures. "
                 "key_summary_points and recommended_actions must be arrays of short, concrete strings."
             ),
         },
@@ -888,6 +1153,43 @@ def _call_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, 
                 except URLError as exc:
                     last_error = exc
                     break
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("LLM request failed.")
+
+
+def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, str]]) -> str:
+    """Like _call_chat_completion but never requests JSON mode — returns plain text."""
+    url = _build_chat_completion_url(endpoint)
+    urls = [url]
+    if not _get_env("AZURE_API_VERSION") and "api-version=" in url:
+        urls.append(_without_api_version(url))
+
+    payload: dict[str, Any] = {"messages": messages, "temperature": 0.2, "max_tokens": 600}
+    model = _get_env("AZURE_MODEL") or _get_env("AZURE_OPENAI_MODEL") or _get_env("AZURE_DEPLOYMENT")
+    if model:
+        payload["model"] = model
+
+    auth_modes = ["api-key", "bearer"]
+    last_error: Exception | None = None
+
+    for request_url in urls:
+        for auth_mode in auth_modes:
+            try:
+                response = _post_json(request_url, payload, api_key, auth_mode)
+                text = _extract_llm_text(response)
+                if text:
+                    return text
+                raise RuntimeError("LLM response did not contain text content.")
+            except HTTPError as exc:
+                last_error = exc
+                if exc.code in {400, 401, 403, 404}:
+                    continue
+                raise
+            except URLError as exc:
+                last_error = exc
+                break
 
     if last_error:
         raise last_error
