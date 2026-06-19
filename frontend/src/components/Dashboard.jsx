@@ -1149,7 +1149,7 @@ function CapacityDaySummary({ summary, style, onClose }) {
           <span className="font-semibold text-slate-950">{summary.activeFolders}/{summary.totalFolders}</span>
         </div>
         <div className="flex items-center justify-between gap-3">
-          <span className="font-medium text-slate-600">Utilization</span>
+          <span className="font-medium text-slate-600">Utilized time</span>
           <span className="font-semibold text-slate-950">
             {formatCapacitySummaryValue(summary.utilization, summary.totalCapacity)}
           </span>
@@ -2027,8 +2027,7 @@ function buildPlantCapacityTicks(maxCapacity) {
 }
 
 function formatPlantCapacityTick(minutes) {
-  const hours = Number(minutes || 0) / 60;
-  return `${formatNumber(hours)}h`;
+  return formatMinutes(minutes);
 }
 
 function formatDayLabel(dateStr) {

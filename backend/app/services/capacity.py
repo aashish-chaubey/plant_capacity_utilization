@@ -2145,6 +2145,7 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
     total_lost_time = float(daily_df["lost_time"].sum()) if not daily_df.empty else 0.0
     total_downtime = float(daily_df["downtime"].sum()) if not daily_df.empty else 0.0
+    total_utilized_time = total_runtime + total_lost_time + total_downtime
     total_buffer_time = float(daily_df["buffer_time"].sum()) if not daily_df.empty else 0.0
     total_idle_time = float(daily_df["idle_time"].sum()) if not daily_df.empty and "idle_time" in daily_df else 0.0
     planned_available_time = max(total_available - total_idle_time, 0.0)
@@ -2154,10 +2155,11 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
         "total_runtime": _clean_number(total_runtime),
         "total_lost_time": _clean_number(total_lost_time),
         "total_downtime": _clean_number(total_downtime),
+        "total_utilized_time": _clean_number(total_utilized_time),
         "total_buffer_time": _clean_number(total_buffer_time),
         "total_idle_time": _clean_number(total_idle_time),
         "average_utilization_percentage": _clean_number(
-            _percentage(total_runtime + total_downtime + total_lost_time, total_available)
+            _percentage(total_utilized_time, total_available)
         ),
         "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, planned_available_time)),
         "idle_capacity_percentage": _clean_number(_percentage(total_idle_time, total_available)),

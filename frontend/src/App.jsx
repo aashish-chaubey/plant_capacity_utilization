@@ -43,8 +43,8 @@ const METRIC_DEFINITIONS = [
     definition: "The efficiency ratio of spare time relative to the window that was actually available. Formula: Spare Capacity = (Spare Time / (Total Available Time - Unplanned Time)) * 100."
   },
   {
-    term: "Utilisation",
-    definition: "Loss Time + Downtime + Run Time. Wait Time, Spare Time, and Unplanned Time are not included."
+    term: "Utilized Time / Utilisation",
+    definition: "Runtime (SNP + GNP) + Loss Time + Downtime. Wait Time, Spare Time, and Unplanned Time are not included."
   },
   {
     term: "GNP/UV Night",
@@ -951,6 +951,7 @@ function calculateSummary(dailyRows) {
     total_runtime: cleanNumber(totalRuntime),
     total_lost_time: cleanNumber(totalLostTime),
     total_downtime: cleanNumber(totalDowntime),
+    total_utilized_time: cleanNumber(utilizedTime),
     total_buffer_time: cleanNumber(totalBufferTime),
     total_idle_time: cleanNumber(totalIdleTime),
     average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.min((utilizedTime / totalAvailable) * 100, 100) : 0),

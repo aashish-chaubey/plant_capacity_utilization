@@ -109,8 +109,10 @@ def build_chat_response(
             "1. Go to the primary_source listed in the plan and locate the relevant rows/fields\n"
             "2. Apply any filters from the plan (folder name, date, complexity, etc.)\n"
             "3. Perform the computation described step by step, quoting exact values\n"
-            "4. Self-validate: check values are non-negative where expected; "
-            "spot-check that runtime + loss + downtime + wait + spare ≈ available_capacity\n"
+            "4. Self-validate internally before answering: check values are non-negative where expected; "
+            "verify Utilized Time = Runtime (SNP + GNP) + Loss Time + Downtime; "
+            "spot-check that runtime + loss + downtime + wait + spare ≈ available_capacity. "
+            "Do not reveal private reasoning; only return the answer.\n"
             "5. Format your response as specified in output_format\n\n"
         )
 
@@ -126,9 +128,12 @@ def build_chat_response(
         "delayed_pf, max_allowable_loss_time, editions_* tables) before using summary aggregates. "
         "Do not assume access to anything outside this JSON context. "
         "Prefer exact_dashboard values over derived summaries whenever a numeric answer is available. "
+        "Before responding, internally identify the metric, filters, numerator, denominator, and formula. "
+        "Validate the arithmetic against the JSON, then provide only the final concise answer. "
         "Be brief and direct — no preamble, no filler. "
         "For ranked results use a short numbered list. "
-        "Convert minutes to h:mm format when it aids readability. "
+        "Always report duration values in minutes. Do not convert durations into hours or h:mm. "
+        "Clock times such as 03:00 or 04:00 may remain clock times. "
         "If the answer is genuinely absent from the data, say: Not available in the current data.\n\n"
 
         "QUERY INTERPRETATION RULES:\n"
@@ -141,8 +146,9 @@ def build_chat_response(
         "- 'loss time' / 'losses': total lost_time (changeover + late-start + reflong). Waiting time is always separate.\n"
         "- 'spare time' / 'spare capacity': always buffer_time (= spare_time_min in exact_dashboard.folders), never unplanned_time.\n"
         "- 'average spare time per folder' or 'spare time for each folder': use exact_dashboard.folders[].spare_time_min / active_nights. "
-        "List every folder with its avg spare time per active night in h:mm format.\n"
-        "- 'utilization' with no qualifier: overall utilization_pct = runtime + downtime + lost_time. "
+        "List every folder with its average spare time per active night in minutes.\n"
+        "- 'utilized time' / 'utilised time' / 'utilization' with no qualifier: "
+        "Utilized Time = Runtime (SNP + GNP) + Loss Time + Downtime. "
         "Waiting time, spare time, and unplanned time are excluded.\n"
         "- 'MALT' / 'Maximum Allowable Loss Time': use max_allowable_loss_time from context. "
         "Always state the formula used: MALT = 240 - P50(Wait) - P85(MOT) - P30(Spare), where MOT = Run Time + Downtime. "
@@ -163,7 +169,8 @@ def build_chat_response(
         "- Spare Time: unused capacity inside the reference window after all other components are accounted for. "
         "Formula: Spare Time = 240 - (Wait + Loss + Downtime + Run). It cannot be negative.\n"
         "- Unplanned Time: periods where the folder or tower was not scheduled or available for production.\n"
-        "- Utilisation: Loss Time + Downtime + Run Time. Do not include Wait Time, Spare Time, or Unplanned Time.\n"
+        "- Utilized Time / Utilisation: Runtime (SNP + GNP) + Loss Time + Downtime. "
+        "Do not include Wait Time, Spare Time, or Unplanned Time.\n"
         "- Spare Capacity: (Spare Time / (Total Available Time - Unplanned Time)) * 100.\n\n"
 
         "PREDICTION & EXTRAPOLATION RULES:\n"
@@ -180,8 +187,8 @@ def build_chat_response(
 
         "Schema key:\n"
         "- resource: 'Machine / Folder' display name\n"
-        "- utilization_pct / utilization_percentage: (runtime + downtime + lost_time) ÷ total possible capacity (incl. unplanned nights)\n"
-        "- active_day_utilization_pct: (runtime + downtime + lost_time) ÷ capacity only on nights the folder was active\n"
+        "- utilization_pct / utilization_percentage: (Runtime (SNP + GNP) + Loss Time + Downtime) ÷ total possible capacity (incl. unplanned nights)\n"
+        "- active_day_utilization_pct: (Runtime (SNP + GNP) + Loss Time + Downtime) ÷ capacity only on nights the folder was active\n"
         "- runtime_minutes / runtime_min: actual print runtime (all complexity types combined)\n"
         "- lost_time_min / lost_time_minutes: Loss Time = changeover + late-start + reflong ONLY. "
         "WAITING TIME IS NOT INCLUDED IN LOSS TIME.\n"
@@ -914,6 +921,7 @@ def _build_exact_dashboard_context(
             "total_loss_time_min": _clean_number(total_loss_time or summary.get("total_lost_time")),
             "total_waiting_time_min": _clean_number(total_waiting_time),
             "total_downtime_min": _clean_number(total_downtime or summary.get("total_downtime")),
+            "total_utilized_time_min": _clean_number(total_utilized_time),
             "total_spare_time_min": _clean_number(total_spare_time or summary.get("total_buffer_time")),
             "total_unplanned_time_min": _clean_number(total_unplanned_time or summary.get("total_idle_time")),
             "average_utilization_pct": _percentage(
@@ -1217,7 +1225,7 @@ def _answer_downtime_reason_question(question: str, context: dict[str, Any]) -> 
 def _asks_summary_metric(question: str) -> bool:
     metric_terms = [
         "runtime", "run time", "downtime", "down time", "loss time", "lost time", "wait time",
-        "waiting time", "spare", "unplanned", "utilization", "utilisation", "available", "mot",
+        "waiting time", "spare", "unplanned", "utilized", "utilised", "utilization", "utilisation", "available", "mot",
     ]
     return any(term in question for term in metric_terms) and any(
         term in question for term in ["total", "overall", "how much", "show", "what is", "what was"]
@@ -1247,7 +1255,18 @@ def _answer_summary_metric_question(question: str, context: dict[str, Any]) -> s
         parts.append(f"Spare Time: {summary.get('total_spare_time_min')} min")
     if "unplanned" in question:
         parts.append(f"Unplanned Time: {summary.get('total_unplanned_time_min')} min")
-    if "utilization" in question or "utilisation" in question:
+    if "utilized time" in question or "utilised time" in question:
+        utilized_time = (
+            _number(summary.get("total_utilized_time_min"))
+            or _number(summary.get("total_runtime_min"))
+            + _number(summary.get("total_loss_time_min"))
+            + _number(summary.get("total_downtime_min"))
+        )
+        parts.append(
+            f"Utilized Time: {_clean_number(utilized_time)} min "
+            "(Runtime (SNP + GNP) + Loss Time + Downtime)"
+        )
+    elif "utilization" in question or "utilisation" in question:
         parts.append(f"Utilisation: {summary.get('average_utilization_pct')}%")
     if "available" in question:
         parts.append(f"Available Capacity: {summary.get('total_available_capacity_min')} min")
@@ -1320,6 +1339,13 @@ def _daily_average_metric_spec(question: str) -> dict[str, Any] | None:
         return {"label": "Wait Time", "daily_key": "waiting_time_min", "summary_key": "total_waiting_time_min", "unit": "min"}
     if "spare" in question:
         return {"label": "Spare Time", "daily_key": "spare_time_min", "summary_key": "total_spare_time_min", "unit": "min"}
+    if "utilized time" in question or "utilised time" in question:
+        return {
+            "label": "Utilized Time",
+            "daily_keys": ["runtime_min", "loss_time_min", "downtime_min"],
+            "summary_keys": ["total_runtime_min", "total_loss_time_min", "total_downtime_min"],
+            "unit": "min",
+        }
     if "unplanned" in question:
         return {
             "label": "Unplanned Time",
@@ -3512,10 +3538,10 @@ def _call_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, 
         base["model"] = model
 
     payloads = [
-        {**base, "max_completion_tokens": 900, "response_format": {"type": "json_object"}},
-        {**base, "max_tokens": 900, "response_format": {"type": "json_object"}},
-        {**base, "max_completion_tokens": 900},
-        {**base, "max_tokens": 900},
+        {**base, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
+        {**base, "max_tokens": 1800, "response_format": {"type": "json_object"}},
+        {**base, "max_completion_tokens": 1800},
+        {**base, "max_tokens": 1800},
     ]
     auth_modes = ["api-key", "bearer"]
     last_error: Exception | None = None
@@ -3558,7 +3584,7 @@ def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict
             response_urls.append(_without_api_version(response_url))
 
         for request_url in response_urls:
-            for payload in _responses_payloads(messages, model, reasoning_effort, max_output_tokens=10000):
+            for payload in _responses_payloads(messages, model, reasoning_effort, max_output_tokens=20000):
                 for auth_mode in auth_modes:
                     try:
                         response = _post_json(request_url, payload, api_key, auth_mode)
@@ -3581,7 +3607,7 @@ def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict
         chat_urls.append(_without_api_version(chat_url))
 
     for request_url in chat_urls:
-        for payload in _chat_completion_payloads(messages, model, reasoning_effort, max_tokens=3000):
+        for payload in _chat_completion_payloads(messages, model, reasoning_effort, max_tokens=6000):
             for auth_mode in auth_modes:
                 try:
                     response = _post_json(request_url, payload, api_key, auth_mode)
@@ -3745,7 +3771,7 @@ def _select_reasoning_effort(messages: list[dict[str, str]], model: str) -> str:
     ]
     if any(term in latest_user for term in hard_reasoning_terms):
         return "high"
-    return "medium"
+    return "high"
 
 
 def _normalize_reasoning_effort(value: str, model: str) -> str:
