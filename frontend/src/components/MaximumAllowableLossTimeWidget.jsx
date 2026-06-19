@@ -4,8 +4,8 @@ import { Gauge } from "lucide-react";
 const AVAILABLE_MINUTES = 240;
 const DEFAULT_CONFIG = {
   pWait: 50,
-  pMot: 75,
-  pSpare: 25,
+  pMot: 85,
+  pSpare: 30,
   mediumConfidenceNights: 30,
   highConfidenceNights: 60,
 };
@@ -35,7 +35,7 @@ export default function MaximumAllowableLossTimeWidget({ details }) {
             Maximum Allowable Loss Time
           </h3>
           <p className="mt-1 text-sm text-slate-500">
-            MALT = 240 - P{DEFAULT_CONFIG.pWait} wait - P{DEFAULT_CONFIG.pMot} machine operating time - P{DEFAULT_CONFIG.pSpare} spare.
+            MALT = 240 - P{DEFAULT_CONFIG.pWait} wait - P{DEFAULT_CONFIG.pMot} MOT - P{DEFAULT_CONFIG.pSpare} spare, where MOT = Run Time + Downtime.
           </p>
         </div>
       </div>
@@ -103,7 +103,6 @@ function buildMaltAnalysis(details) {
 
     const key = [
       sample.plantName,
-      sample.machine,
       sample.complexityKey,
     ].join("||");
 
@@ -111,7 +110,6 @@ function buildMaltAnalysis(details) {
       groups.set(key, {
         key,
         plantName: sample.plantName,
-        machine: sample.machine,
         complexityKey: sample.complexityKey,
         waitValues: [],
         motValues: [],
@@ -136,9 +134,8 @@ function buildMaltAnalysis(details) {
       return {
         key: group.key,
         plantName: group.plantName,
-        machine: group.machine,
         complexityKey: group.complexityKey,
-        scope: formatScope(group.plantName, group.machine),
+        scope: formatScope(group.plantName),
         malt,
         onTimeNights,
         confidence: confidenceLabel(onTimeNights),
@@ -147,8 +144,6 @@ function buildMaltAnalysis(details) {
     .sort((first, second) => {
       const plantCompare = first.plantName.localeCompare(second.plantName);
       if (plantCompare) return plantCompare;
-      const machineCompare = first.machine.localeCompare(second.machine);
-      if (machineCompare) return machineCompare;
       return complexityRank(first.complexityKey) - complexityRank(second.complexityKey);
     });
 
@@ -167,15 +162,13 @@ function buildMaltSample(row) {
   if ([wait, run, down, spare, idle, totalLoss].some((value) => value === null || value < 0)) return null;
   if (overrun !== null && overrun > 0) return null;
 
-  const operatingLoss = Math.max(totalLoss - wait, 0);
+  const operatingLoss = totalLoss;
   const identityTotal = wait + operatingLoss + run + down + spare + idle;
   if (Math.abs(identityTotal - AVAILABLE_MINUTES) > 1) return null;
 
-  const { machine } = parseFolderIdentity(row.folder);
   const complexity = dominantComplexity(row.runtime_segments);
   return {
     plantName: String(row.plant_name || "Unknown plant"),
-    machine,
     complexityKey: complexity.key,
     wait,
     mot: run + down,
@@ -245,8 +238,8 @@ function toFiniteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function formatScope(plantName, machine) {
-  return [plantName, machine].filter(Boolean).join(" / ");
+function formatScope(plantName) {
+  return plantName || "Unknown plant";
 }
 
 function formatMinutes(value) {

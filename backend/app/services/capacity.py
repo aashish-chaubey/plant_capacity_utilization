@@ -86,6 +86,10 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
         "Edition",
         pd.Series("", index=df.index),
     ).apply(_clean_text)
+    df["Edition Name"] = df.get(
+        "Edition Name",
+        pd.Series("", index=df.index),
+    ).apply(_clean_text)
     df["Product Name"] = df.get(
         "Product Name",
         pd.Series("", index=df.index),
@@ -822,13 +826,12 @@ def calculate_folder_day_metrics(
     ).clip(lower=0)
 
     calculated_lost_time = (
-        metrics["waiting_time"]
-        + metrics["late_start_time"]
+        metrics["late_start_time"]
         + metrics["change_over_time"]
         + metrics["reflong_related_downtime"]
     ).clip(lower=0)
     remaining_capacity = (
-        metrics["available_capacity"] - metrics["runtime"] - metrics["downtime"]
+        metrics["available_capacity"] - metrics["runtime"] - metrics["downtime"] - metrics["waiting_time"]
     ).clip(lower=0)
     metrics["lost_time"] = calculated_lost_time.clip(upper=remaining_capacity)
     compliance_minutes = metrics["Plant Name"].apply(_pf_compliance_minutes)
@@ -836,10 +839,11 @@ def calculate_folder_day_metrics(
     over_compliance_minutes = (
         metrics["runtime"]
         + metrics["downtime"]
+        + metrics["waiting_time"]
         + metrics["lost_time"]
         - compliance_minutes
     ).clip(lower=0)
-    for column in ["runtime", "downtime", "lost_time"]:
+    for column in ["runtime", "downtime", "lost_time", "waiting_time"]:
         reduction = pd.concat([metrics[column], over_compliance_minutes], axis=1).min(axis=1)
         metrics[column] = (metrics[column] - reduction).clip(lower=0)
         over_compliance_minutes = (over_compliance_minutes - reduction).clip(lower=0)
@@ -850,12 +854,13 @@ def calculate_folder_day_metrics(
     )
 
     # Strict railguard:
-    # runtime + downtime + lost_time + buffer_time + idle_time must equal 240.
+    # runtime + downtime + waiting_time + lost_time + buffer_time + idle_time must equal 240.
     # For PF-cutoff plants, spare is available only until the compliance time.
     # The post-compliance part of the 00:00-04:00 window is shown as unplanned.
     fixed_used_minutes = (
         metrics["runtime"]
         + metrics["downtime"]
+        + metrics["waiting_time"]
         + metrics["lost_time"]
     )
 
@@ -1551,6 +1556,10 @@ def _edition_display_name(row: pd.Series) -> str:
     if edition:
         return edition
 
+    edition_name = _clean_text(row.get("Edition Name"))
+    if edition_name:
+        return edition_name
+
     product_name = _clean_text(row.get("Product Name"))
     if product_name:
         return product_name
@@ -1863,13 +1872,15 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     ).clip(lower=0)
 
     daily["capacity_folders_count"] = capacity_folders_count
-    daily["active_folder_capacity"] = daily["active_folders_count"] * CAPACITY_MINUTES_PER_FOLDER_DAY
     daily["available_capacity"] = fixed_daily_capacity
     daily["idle_time"] = idle_time + daily["active_idle_time"]
     daily = daily.drop(columns=["active_idle_time", "capacity_folder_units"])
 
     daily["utilization_percentage"] = daily.apply(
-        lambda row: _percentage(row["runtime"], row["available_capacity"]),
+        lambda row: _percentage(
+            row["runtime"] + row["downtime"] + row["lost_time"],
+            row["available_capacity"],
+        ),
         axis=1,
     )
 
@@ -1936,6 +1947,7 @@ def calculate_tower_day_metrics(
         "late_start_time",
         "buffer_time",
         "runtime_segments",
+        "editions",
         "uv_tower",
     ]
 
@@ -2069,6 +2081,19 @@ def calculate_tower_day_metrics(
             CAPACITY_MINUTES_PER_FOLDER_DAY,
         )
         runtime_segments = _calculate_runtime_segments_for_rows(group, runtime_minutes)
+
+        tower_editions: list[str] = []
+        if not group.empty:
+            seen_editions: set[str] = set()
+            sort_col = "Effective Start DateTime"
+            sorted_group = group.sort_values(sort_col) if sort_col in group.columns else group
+            for _, erow in sorted_group.iterrows():
+                edition = _edition_display_name(erow)
+                edition_key = _canonical_text(edition)
+                if edition_key and edition_key not in seen_editions:
+                    tower_editions.append(edition)
+                    seen_editions.add(edition_key)
+
         downtime_minutes = min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         changeover_minutes = min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         waiting_minutes = min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
@@ -2104,6 +2129,7 @@ def calculate_tower_day_metrics(
                 "late_start_time": late_start_minutes,
                 "buffer_time": buffer_minutes,
                 "runtime_segments": runtime_segments,
+                "editions": tower_editions,
                 "uv_tower": _is_uv_tower(plant_name, machine, tower, uv_tower_lookup),
             }
         )
@@ -2117,23 +2143,23 @@ def calculate_tower_day_metrics(
 def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_available = float(daily_df["available_capacity"].sum()) if not daily_df.empty else 0.0
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
+    total_lost_time = float(daily_df["lost_time"].sum()) if not daily_df.empty else 0.0
+    total_downtime = float(daily_df["downtime"].sum()) if not daily_df.empty else 0.0
     total_buffer_time = float(daily_df["buffer_time"].sum()) if not daily_df.empty else 0.0
     total_idle_time = float(daily_df["idle_time"].sum()) if not daily_df.empty and "idle_time" in daily_df else 0.0
-    total_active_folder_capacity = (
-        float(daily_df["active_folder_capacity"].sum())
-        if not daily_df.empty and "active_folder_capacity" in daily_df
-        else max(total_available - total_idle_time, 0.0)
-    )
+    planned_available_time = max(total_available - total_idle_time, 0.0)
 
     return {
         "total_available_capacity": _clean_number(total_available),
         "total_runtime": _clean_number(total_runtime),
-        "total_lost_time": _clean_number(daily_df["lost_time"].sum() if not daily_df.empty else 0),
-        "total_downtime": _clean_number(daily_df["downtime"].sum() if not daily_df.empty else 0),
+        "total_lost_time": _clean_number(total_lost_time),
+        "total_downtime": _clean_number(total_downtime),
         "total_buffer_time": _clean_number(total_buffer_time),
         "total_idle_time": _clean_number(total_idle_time),
-        "average_utilization_percentage": _clean_number(_percentage(total_runtime, total_available)),
-        "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, total_active_folder_capacity)),
+        "average_utilization_percentage": _clean_number(
+            _percentage(total_runtime + total_downtime + total_lost_time, total_available)
+        ),
+        "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, planned_available_time)),
         "idle_capacity_percentage": _clean_number(_percentage(total_idle_time, total_available)),
         "active_folder_days": int(daily_df["active_folders_count"].sum()) if not daily_df.empty else 0,
     }
@@ -2255,6 +2281,7 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
         "daily": _daily_records(daily_df),
         "details": _detail_records(folder_day_df),
         "tower_details": _tower_detail_records(tower_day_df),
+        "downtime_reasons": _downtime_reason_records(folder_down_time_df),
         "errors": [],
     }
 
@@ -2548,6 +2575,55 @@ def _format_run_date(value: Any) -> str:
     return parsed.isoformat() if parsed else ""
 
 
+def _downtime_reason_records(down_time_df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Aggregate downtime events by plant/machine/folder/reason for chat context."""
+    if down_time_df.empty:
+        return []
+
+    required = {"Machine", "Folder", "Reason", "Total Downtime"}
+    if not required.issubset(down_time_df.columns):
+        return []
+
+    df = down_time_df[
+        down_time_df["Machine"].ne("") &
+        down_time_df["Folder"].ne("") &
+        down_time_df["Reason"].ne("")
+    ].copy()
+
+    if df.empty:
+        return []
+
+    has_plant = "Plant Name" in df.columns
+    group_keys = ["Machine", "Folder", "Reason"]
+    if has_plant:
+        group_keys = ["Plant Name"] + group_keys
+
+    grouped = (
+        df.groupby(group_keys, dropna=False)
+        .agg(
+            count=("Total Downtime", "count"),
+            total_minutes=("Total Downtime", "sum"),
+        )
+        .reset_index()
+        .sort_values("count", ascending=False)
+    )
+
+    records = []
+    for _, row in grouped.iterrows():
+        record: dict[str, Any] = {
+            "machine": _clean_text(row.get("Machine")),
+            "folder": _clean_text(row.get("Folder")),
+            "reason": _clean_text(row.get("Reason")),
+            "count": int(row.get("count", 0)),
+            "total_minutes": _clean_number(float(row.get("total_minutes", 0))),
+        }
+        if has_plant:
+            record["plant"] = _clean_text(row.get("Plant Name"))
+        records.append(record)
+
+    return records[:200]
+
+
 def _daily_records(daily_df: pd.DataFrame) -> list[dict[str, Any]]:
     if daily_df.empty:
         return []
@@ -2639,6 +2715,7 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "late_start_time",
                 "buffer_time",
                 "runtime_segments",
+                "editions",
                 "uv_tower",
             ]
         ]

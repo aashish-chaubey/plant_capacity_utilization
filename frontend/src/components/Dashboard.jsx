@@ -162,14 +162,23 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
         body: JSON.stringify({
           message: text,
           intelligence: intelligence || {},
+          summary: data.summary || {},
+          daily: data.daily || [],
+          details: data.details || [],
           tower_details: data.tower_details || [],
-          history: chatMessages,
+          downtime_reasons: data.downtime_reasons || [],
+          history: chatMessages.map(({ role, content }) => ({ role, content })),
         }),
       });
       const payload = await response.json();
-      setChatMessages([...nextMessages, { role: "assistant", content: payload.answer || "No response." }]);
+      setChatMessages([...nextMessages, {
+        role: "assistant",
+        content: payload.answer || "No response.",
+        plan: payload.plan || null,
+        detail: payload.status === "error" ? payload.detail : null,
+      }]);
     } catch {
-      setChatMessages([...nextMessages, { role: "assistant", content: "Error connecting to the assistant." }]);
+      setChatMessages([...nextMessages, { role: "assistant", content: "Error connecting to the assistant.", plan: null, detail: null }]);
     } finally {
       setChatLoading(false);
     }
@@ -347,6 +356,7 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
             rowHeight={54}
             emptyMessage="No folder usage found for this selection."
             showPlannedNights={!focusedDay}
+            patternedUnplanned
           />
         </div>
       </section>
@@ -410,14 +420,43 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
               )}
               {chatMessages.map((msg, idx) => (
                 <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                  <div
-                    className={`max-w-[82%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed ${
-                      msg.role === "user"
-                        ? "rounded-br-sm bg-blue-600 text-white"
-                        : "rounded-bl-sm bg-slate-100 text-slate-800"
-                    }`}
-                  >
-                    {msg.content}
+                  <div className={`max-w-[82%] ${msg.role === "user" ? "" : "flex flex-col gap-1"}`}>
+                    <div
+                      className={`whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed ${
+                        msg.role === "user"
+                          ? "rounded-br-sm bg-blue-600 text-white"
+                          : "rounded-bl-sm bg-slate-100 text-slate-800"
+                      }`}
+                    >
+                      {msg.content}
+                    </div>
+                    {msg.role === "assistant" && msg.detail && (
+                      <div className="ml-1 rounded-xl border border-red-100 bg-red-50 px-3 py-1.5 text-xs text-red-600">
+                        {msg.detail}
+                      </div>
+                    )}
+                    {msg.role === "assistant" && msg.plan && (
+                      <details className="ml-1">
+                        <summary className="cursor-pointer select-none text-xs text-slate-400 hover:text-slate-600 list-none flex items-center gap-1">
+                          <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M4 2l4 4-4 4"/>
+                          </svg>
+                          How I answered this
+                        </summary>
+                        <div className="mt-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 space-y-1">
+                          {msg.plan.intent && <div><span className="font-medium text-slate-500">Intent:</span> {msg.plan.intent}</div>}
+                          {msg.plan.primary_source && (
+                            <div><span className="font-medium text-slate-500">Source:</span> {msg.plan.primary_source}{msg.plan.secondary_sources?.length > 0 ? `, ${msg.plan.secondary_sources.join(", ")}` : ""}</div>
+                          )}
+                          {msg.plan.metrics?.length > 0 && <div><span className="font-medium text-slate-500">Metrics:</span> {msg.plan.metrics.join(", ")}</div>}
+                          {msg.plan.computation && <div><span className="font-medium text-slate-500">Computation:</span> {msg.plan.computation}</div>}
+                          {msg.plan.filters && Object.keys(msg.plan.filters).length > 0 && (
+                            <div><span className="font-medium text-slate-500">Filters:</span> {Object.entries(msg.plan.filters).map(([k, v]) => `${k}=${v}`).join(", ")}</div>
+                          )}
+                          {msg.plan.output_format && <div><span className="font-medium text-slate-500">Output:</span> {msg.plan.output_format}</div>}
+                        </div>
+                      </details>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1172,7 +1211,8 @@ function UtilizationBreakdownChart({
   barSize,
   rowHeight,
   emptyMessage,
-  showPlannedNights
+  showPlannedNights,
+  patternedUnplanned = false
 }) {
   const isTowerChart = nameKey === "tower";
   const effectiveRowHeight = isTowerChart ? Math.max(rowHeight, 44) : rowHeight;
@@ -1182,6 +1222,7 @@ function UtilizationBreakdownChart({
   );
   const yAxisLabelOffset = -6;
   const chartMargin = { top: 8, right: 16, left: 4, bottom: 8 };
+  const idlePatternId = `${nameKey}-utilization-idle-pattern`;
 
   const machineColors = useMemo(() => {
     const machines = [...new Set(
@@ -1251,6 +1292,12 @@ function UtilizationBreakdownChart({
           <div className="relative w-full" style={{ height: chartHeight }}>
             <ResponsiveContainer>
               <BarChart data={data} layout="vertical" margin={chartMargin}>
+                <defs>
+                  <pattern id={idlePatternId} patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(35)">
+                    <rect width="8" height="8" fill={CAPACITY_SPLIT_COLORS.idle_time} opacity="0.55" />
+                    <line x1="0" y1="0" x2="0" y2="8" stroke="#94a3b8" strokeWidth="1" opacity="0.55" />
+                  </pattern>
+                </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" horizontal={false} />
                 <XAxis
                   type="number"
@@ -1285,6 +1332,11 @@ function UtilizationBreakdownChart({
                     strokeWidth={1.25}
                     barSize={barSize}
                     radius={index === selectedStacks.length - 1 ? [0, 4, 4, 0] : [0, 0, 0, 0]}
+                    shape={
+                      patternedUnplanned && option.key === "idle_time"
+                        ? <PatternedUtilizationBar patternId={idlePatternId} />
+                        : undefined
+                    }
                   />
                 ))}
               </BarChart>
@@ -1293,6 +1345,39 @@ function UtilizationBreakdownChart({
         </div>
       )}
     </section>
+  );
+}
+
+function PatternedUtilizationBar(props) {
+  const { x, y, width, height, patternId } = props;
+  const barX = Number(x || 0);
+  const barY = Number(y || 0);
+  const barWidth = Number(width || 0);
+  const barHeight = Number(height || 0);
+
+  if (barWidth <= 0 || barHeight <= 0) return null;
+
+  const radius = Math.min(4, barWidth / 2, barHeight / 2);
+  const right = barX + barWidth;
+  const bottom = barY + barHeight;
+  const path = [
+    `M ${barX} ${barY}`,
+    `H ${right - radius}`,
+    `Q ${right} ${barY} ${right} ${barY + radius}`,
+    `V ${bottom - radius}`,
+    `Q ${right} ${bottom} ${right - radius} ${bottom}`,
+    `H ${barX}`,
+    "Z"
+  ].join(" ");
+
+  return (
+    <path
+      d={path}
+      fill={`url(#${patternId})`}
+      stroke="#cbd5e1"
+      strokeWidth="1.25"
+      vectorEffect="non-scaling-stroke"
+    />
   );
 }
 
@@ -1705,9 +1790,12 @@ function buildRuntimeTooltipDetails(rows) {
       const detailText = formatRuntimeSegmentDetail(segment, row.twin_folder_mode);
       if (!detailText) continue;
 
+      const complexityCode = formatRuntimeComplexityCode(segment);
+      const folderAlias = `F${Number(row.folderIndex || 0) + 1}`;
+
       details.push({
         key: `${row.run_date}||${row.folderKey}||${segment.key}`,
-        folderAlias: `F${Number(row.folderIndex || 0) + 1}`,
+        folderAlias: complexityCode ? `${folderAlias}` : folderAlias,
         minutes: segment.value,
         color: segment.color || CAPACITY_SPLIT_COLORS.runtime,
         detailText,
@@ -1857,8 +1945,7 @@ function normalizeRuntimeSegments(runtimeSegments, targetRuntime, capacityLimit 
 
 function normalizeCapacityValues(detail) {
   const waitingTime = clampMinutes(detail.waiting_time);
-  const lostTime = clampMinutes(detail.lost_time);
-  const lossTime = clampMinutes(lostTime - waitingTime);
+  const lossTime = clampMinutes(detail.lost_time);
   const downtime = clampMinutes(detail.downtime);
   const runtime = clampMinutes(detail.runtime);
   const nonSpareValues = {
@@ -1963,8 +2050,7 @@ function formatDayAxisLabel(dateStr) {
 
 function normalizeResourceBreakdownValues(row) {
   const fallbackLostTime = (
-    Number(row.waiting_time || 0)
-    + Number(row.change_over_time || 0)
+    Number(row.change_over_time || 0)
     + Number(row.reflong_related_downtime || 0)
     + Number(row.late_start_time || 0)
   );
@@ -2067,7 +2153,6 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
         capacityValues.loss_time
       );
       const percentages = calculateBreakdownPercentages(capacityValues, selectedCapacity, breakdownStacks);
-      const lossTimeTotal = capacityValues.waiting_time + capacityValues.loss_time;
 
       return {
         ...row,
@@ -2082,7 +2167,6 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
         change_over_time: cleanNumber(finalNonWaitLoss.change_over_time),
         reflong_related_downtime: cleanNumber(finalNonWaitLoss.reflong_related_downtime),
         late_start_time: cleanNumber(finalNonWaitLoss.late_start_time),
-        loss_time_total: cleanNumber(lossTimeTotal),
         available_capacity: cleanNumber(selectedCapacity),
         planned_capacity: cleanNumber(plannedCapacity),
         planned_nights: row.plannedDates.size,
@@ -2094,8 +2178,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
         runtime_gnp_percentage: percentages.runtime_gnp,
         runtime_percentage: cleanNumber((percentages.runtime_snp || 0) + (percentages.runtime_gnp || 0)),
         spare_time_percentage: percentages.spare_time,
-        idle_time_percentage: percentages.idle_time || 0,
-        loss_time_total_percentage: cleanNumber(percentages.waiting_time + percentages.loss_time)
+        idle_time_percentage: percentages.idle_time || 0
       };
     })
     .sort((a, b) => compareResourceNames(a[nameKey], b[nameKey]));

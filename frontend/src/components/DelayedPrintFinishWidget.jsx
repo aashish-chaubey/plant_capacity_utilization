@@ -472,7 +472,7 @@ function calculateNonWaitLostTime(row, waitingTime) {
   );
 
   if (explicitLoss > 0) return explicitLoss;
-  return Math.max(positiveNumber(row.lost_time) - waitingTime, 0);
+  return positiveNumber(row.lost_time);
 }
 
 function addCauseScores(first, second) {

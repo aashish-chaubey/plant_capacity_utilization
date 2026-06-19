@@ -39,8 +39,12 @@ class IntelligenceRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     intelligence: dict[str, Any] = {}
+    summary: dict[str, Any] = {}
+    daily: list[dict[str, Any]] = []
+    details: list[dict[str, Any]] = []
     tower_details: list[dict[str, Any]] = []
-    history: list[dict[str, str]] = []
+    downtime_reasons: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
 
 
 def _json_default(obj: Any) -> Any:
@@ -116,13 +120,19 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
         result = build_chat_response(
             message=request.message,
             intelligence=request.intelligence,
+            summary=request.summary,
+            daily_rows=request.daily,
+            details=request.details,
             tower_details=request.tower_details,
+            downtime_reasons=request.downtime_reasons,
             history=request.history,
         )
         return JSONResponse({
             "valid": True,
             "answer": result.get("answer", ""),
             "status": result.get("status", "ok"),
+            "detail": result.get("detail", ""),
+            "plan": result.get("plan") or None,
         })
     except Exception as exc:
         return JSONResponse({

@@ -1,4 +1,4 @@
-import { AlertCircle, BarChart2, Check, ChevronDown, FileSpreadsheet, Loader2, RotateCcw, UploadCloud, X } from "lucide-react";
+import { AlertCircle, BarChart2, Check, ChevronDown, FileSpreadsheet, Info, Loader2, RotateCcw, UploadCloud, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import Dashboard from "./components/Dashboard.jsx";
@@ -12,6 +12,48 @@ const TIMEFRAME_TABS = [
   ["quarter", "Qtr"],
   ["month", "Month"],
   ["custom", "Custom"]
+];
+const METRIC_DEFINITIONS = [
+  {
+    term: "Wait Time",
+    definition: "Idle time at the start of the 00:00 window where the press cannot operate because editorial LPR has not been issued. Wait ends when LPR is issued. If an earlier edition finishes before LPR for the next edition, the PF-to-LPR gap also counts as Wait."
+  },
+  {
+    term: "Loss Time",
+    definition: "Preparation time after editorial release and before printing. Components are Makeready from LPR to Press Start, Changeover from Print Finish to Press Start when a physical change is required, and Reflong changeover losses."
+  },
+  {
+    term: "Downtime",
+    definition: "Unplanned stoppages that occur during an active run."
+  },
+  {
+    term: "Run Time",
+    definition: "Net productive print time when the press is actively printing. For editions already printing before midnight, only the portion from midnight to Print Finish is counted."
+  },
+  {
+    term: "Spare Time",
+    definition: "Unused capacity remaining within the 00:00-04:00 reference window after all other components are accounted for. Formula: Spare Time = 240 - (Wait + Loss + Downtime + Run). Spare Time cannot be negative."
+  },
+  {
+    term: "Unplanned Time",
+    definition: "Periods where the folder or tower was not scheduled or available for production."
+  },
+  {
+    term: "Spare Capacity",
+    definition: "The efficiency ratio of spare time relative to the window that was actually available. Formula: Spare Capacity = (Spare Time / (Total Available Time - Unplanned Time)) * 100."
+  },
+  {
+    term: "Utilisation",
+    definition: "Loss Time + Downtime + Run Time. Wait Time, Spare Time, and Unplanned Time are not included."
+  },
+  {
+    term: "GNP/UV Night",
+    definition: "Any night where at least one folder runs a GNP or GNP Complex edition, meaning C5-C15. If no GNP or GNP Complex edition runs, the night is SNP/non-UV."
+  },
+  {
+    term: "MALT",
+    definition: "Maximum Allowable Loss Time. Formula: MALT = 240 - P50(Wait) - P85(MOT) - P30(Spare), where MOT = Run Time + Downtime. It is calibrated per plant and complexity using on-time nights only."
+  }
 ];
 
 function normalizeApiBaseUrl(value) {
@@ -53,6 +95,7 @@ export default function App() {
   const [selectedPlant, setSelectedPlant] = useState("");
   const [selectedFolders, setSelectedFolders] = useState([]);
   const [folderMenuOpen, setFolderMenuOpen] = useState(false);
+  const [definitionsOpen, setDefinitionsOpen] = useState(false);
 
   const plantOptions = useMemo(() => buildPlantOptions(result), [result]);
   const folderOptions = useMemo(
@@ -501,9 +544,23 @@ export default function App() {
                 </button>
               </div>
 
+              <button
+                type="button"
+                onClick={() => setDefinitionsOpen(true)}
+                className="flex h-12 shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                title="View metric definitions"
+              >
+                <Info className="h-4 w-4" aria-hidden="true" />
+                <span>Definitions</span>
+              </button>
+
             </div>
           </div>
         </div>
+      )}
+
+      {definitionsOpen && (
+        <MetricDefinitionsModal onClose={() => setDefinitionsOpen(false)} />
       )}
 
       {/* ── Main ────────────────────────────────────────────────── */}
@@ -574,6 +631,42 @@ export default function App() {
           </section>
         )}
       </main>
+    </div>
+  );
+}
+
+function MetricDefinitionsModal({ onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/35 px-4 py-8 backdrop-blur-sm sm:items-center">
+      <section className="flex max-h-[86vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-slate-950">Metric definitions</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Definitions used across the dashboard and AI chat.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+            aria-label="Close metric definitions"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto px-5 py-4">
+          <div className="grid gap-3 md:grid-cols-2">
+            {METRIC_DEFINITIONS.map((item) => (
+              <article key={item.term} className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2.5">
+                <h3 className="text-sm font-bold text-slate-900">{item.term}</h3>
+                <p className="mt-1 text-sm leading-5 text-slate-600">{item.definition}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -710,6 +803,7 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
     const runtime = sumBy(rows, "runtime");
     const lostTime = sumBy(rows, "lost_time");
     const downtime = sumBy(rows, "downtime");
+    const utilizedTime = runtime + downtime + lostTime;
     const bufferTime = sumBy(rows, "buffer_time");
     const activeIdleTime = sumBy(rows, "idle_time");
     const idleTime = Math.max(availableCapacity - activeAvailableCapacity, 0) + activeIdleTime;
@@ -724,7 +818,7 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
       buffer_time: cleanNumber(bufferTime),
       idle_time: cleanNumber(idleTime),
       utilization_percentage: cleanNumber(
-        availableCapacity > 0 ? Math.min((runtime / availableCapacity) * 100, 100) : 0
+        availableCapacity > 0 ? Math.min((utilizedTime / availableCapacity) * 100, 100) : 0
       )
     };
   });
@@ -846,17 +940,20 @@ function filterCapacityData(result, range) {
 function calculateSummary(dailyRows) {
   const totalAvailable = sumBy(dailyRows, "available_capacity");
   const totalRuntime = sumBy(dailyRows, "runtime");
+  const totalLostTime = sumBy(dailyRows, "lost_time");
+  const totalDowntime = sumBy(dailyRows, "downtime");
   const totalBufferTime = sumBy(dailyRows, "buffer_time");
   const totalIdleTime = sumBy(dailyRows, "idle_time");
   const plannedAvailableTime = Math.max(totalAvailable - totalIdleTime, 0);
+  const utilizedTime = totalRuntime + totalDowntime + totalLostTime;
   return {
     total_available_capacity: cleanNumber(totalAvailable),
     total_runtime: cleanNumber(totalRuntime),
-    total_lost_time: cleanNumber(sumBy(dailyRows, "lost_time")),
-    total_downtime: cleanNumber(sumBy(dailyRows, "downtime")),
+    total_lost_time: cleanNumber(totalLostTime),
+    total_downtime: cleanNumber(totalDowntime),
     total_buffer_time: cleanNumber(totalBufferTime),
     total_idle_time: cleanNumber(totalIdleTime),
-    average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalRuntime / totalAvailable) * 100, 100) : 0),
+    average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.min((utilizedTime / totalAvailable) * 100, 100) : 0),
     spare_capacity_percentage: cleanNumber(plannedAvailableTime > 0 ? Math.min((totalBufferTime / plannedAvailableTime) * 100, 100) : 0),
     idle_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalIdleTime / totalAvailable) * 100, 100) : 0),
     active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count"))
