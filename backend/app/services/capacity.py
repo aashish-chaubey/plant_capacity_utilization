@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from math import isfinite
 from numbers import Real
 from pathlib import Path
 import re
 import warnings
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -38,6 +39,25 @@ UV_TOWER_CONFIG_FILENAME = "uv_towers.json"
 FOLDER_LIST_CONFIG_FILENAME = "folder_list.json"
 EFFECTIVE_RUNTIME_COLUMN = "Effective Runtime Minutes"
 EFFECTIVE_PRINT_ORDER_COLUMN = "Effective Print Order"
+
+_BOOK_DETAIL_LEAN_COLS = [
+    "IssueID",
+    REPORT_DATE_COLUMN,
+    "Run Date",
+    "Edition",
+    "Edition Name",
+    "Products",
+    "Machine",
+    "Folder",
+    "Plant Name",
+    "Total Run Time (mnts)",
+    "Total Downtime",
+    "towers_list",
+    "towers_str",
+    "downtime_total_min",
+    "downtime_count",
+    "downtime_departments",
+]
 
 
 def parse_general(workbook: pd.ExcelFile) -> pd.DataFrame:
@@ -151,6 +171,162 @@ def parse_down_time(workbook: pd.ExcelFile) -> pd.DataFrame:
     return df
 
 
+def _join_book_general_downtime(
+    book_df: pd.DataFrame,
+    general_df: pd.DataFrame,
+    down_time_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Join Book Wise Details + General (towers) + Down Time (aggregated) into the master view.
+
+    Book Wise Details is the grain (one row per print job).
+    General contributes Products, towers_list, towers_str per IssueID.
+    Down Time is pre-aggregated per (IssueID, Machine, Folder) — matching the same key the
+    folder/tower dashboard math uses — before joining, so an edition that printed on more
+    than one machine/folder gets its own accurate downtime figure instead of one figure
+    repeated across every machine/folder it touched.
+    Row count is preserved from Book Wise Details (left joins only).
+    """
+    if book_df.empty:
+        return pd.DataFrame()
+
+    # --- General slim: one row per IssueID with towers pre-split (vectorized) ---
+    _empty_general_slim = pd.DataFrame(columns=["IssueID", "Products", "towers_list", "towers_str"])
+    if general_df.empty:
+        general_slim = _empty_general_slim
+    else:
+        _gwork = pd.DataFrame({
+            "IssueID": general_df["IssueID"].apply(_clean_text) if "IssueID" in general_df.columns else "",
+            "Products": general_df["Products"].apply(_clean_text) if "Products" in general_df.columns else "",
+            "towers_list": general_df["Towers used"].apply(_split_towers) if "Towers used" in general_df.columns else pd.Series([[] for _ in range(len(general_df))]),
+        })
+        _gwork = _gwork[_gwork["IssueID"].ne("")]
+        if _gwork.empty:
+            general_slim = _empty_general_slim
+        else:
+            _gwork["towers_str"] = _gwork["towers_list"].apply(", ".join)
+            general_slim = _gwork.drop_duplicates(subset=["IssueID"]).reset_index(drop=True)
+
+    # --- Down Time aggregated per (IssueID, Machine, Folder) ---
+    downtime_agg = _aggregate_downtime_for_master(down_time_df)
+
+    # --- Left-join onto Book Wise Details ---
+    base = book_df.copy()
+    if "Issue Id" in base.columns and "IssueID" not in base.columns:
+        base = base.rename(columns={"Issue Id": "IssueID"})
+
+    master = (
+        base
+        .merge(general_slim, on="IssueID", how="left")
+        .merge(downtime_agg, on=["IssueID", "Machine", "Folder"], how="left")
+    )
+
+    master["towers_list"] = master["towers_list"].apply(
+        lambda v: v if isinstance(v, list) else []
+    )
+    master["downtime_events"] = master["downtime_events"].apply(
+        lambda v: v if isinstance(v, list) else []
+    )
+    for col, default in [("Products", ""), ("towers_str", ""), ("downtime_departments", "")]:
+        if col in master.columns:
+            master[col] = master[col].fillna(default)
+    for col in ("downtime_total_min", "downtime_count"):
+        if col in master.columns:
+            master[col] = pd.to_numeric(master[col], errors="coerce").fillna(0)
+
+    return master
+
+
+def _aggregate_downtime_for_master(down_time_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate Down Time events per (IssueID, Machine, Folder) for the master view join."""
+    group_keys = ["IssueID", "Machine", "Folder"]
+    empty = pd.DataFrame(
+        columns=[*group_keys, "downtime_events", "downtime_total_min", "downtime_count", "downtime_departments"]
+    )
+    if down_time_df.empty or not all(key in down_time_df.columns for key in group_keys):
+        return empty
+
+    rows: list[dict[str, Any]] = []
+    for (issue_id, machine, folder), group in down_time_df.groupby(group_keys, dropna=False):
+        issue_id_str = _clean_text(issue_id)
+        if not issue_id_str:
+            continue
+        events = [
+            {
+                "Department": _clean_text(r.get("Department")),
+                "Reason": _clean_text(r.get("Reason")),
+                "Start Time": _clean_text(r.get("Start Time")),
+                "End Time": _clean_text(r.get("End Time")),
+                "duration_min": _parse_minutes_value(r.get("Total Downtime")),
+            }
+            for _, r in group.iterrows()
+        ]
+        total_min = sum(e["duration_min"] for e in events)
+        departments = sorted({e["Department"] for e in events if e["Department"]})
+        rows.append({
+            "IssueID": issue_id_str,
+            "Machine": _clean_text(machine),
+            "Folder": _clean_text(folder),
+            "downtime_events": events,
+            "downtime_total_min": total_min,
+            "downtime_count": len(events),
+            "downtime_departments": ", ".join(departments),
+        })
+    return pd.DataFrame(rows) if rows else empty
+
+
+@dataclass
+class MasterView:
+    """Single preprocessing result for the 3 uploaded sheets.
+
+    `book` is the comprehensive master view (one row per print job, enriched with
+    towers/products/downtime) — the source of truth for chat's book_details.
+    `book_active` and `down_time` stay at the same grain the dashboard math already
+    relies on (event-level downtime, reflong rows dropped) so folder/tower aggregation
+    is untouched and numerically identical to before this consolidation.
+    """
+
+    general_df: pd.DataFrame
+    book: pd.DataFrame
+    book_active: pd.DataFrame
+    down_time: pd.DataFrame
+    reflong_issue_ids: set[str] = field(default_factory=set)
+    book_details: list[dict[str, Any]] = field(default_factory=list)
+
+
+def build_master_view(workbook: pd.ExcelFile, folder_lookup: dict[str, Any]) -> MasterView:
+    """Parse and join the General, Book Wise Details, and Down Time sheets exactly once.
+
+    This is the single preprocessing entry point: every downstream consumer (the
+    folder/tower dashboard math and the AI chat's book_details) reads from this result
+    instead of each independently re-parsing/re-canonicalizing the workbook.
+    """
+    general_df = parse_general(workbook)
+
+    # Canonicalize book rows BEFORE dropping reflong print rows so we can extract
+    # reflong Issue IDs for the downtime split step.
+    canonical_book_df = _canonicalize_book_folders(parse_book_wise_details(workbook), folder_lookup)
+    reflong_issue_ids = _build_reflong_issue_ids(canonical_book_df)
+    book_active = _drop_reflong_print_rows(canonical_book_df)
+
+    # Keep all Down Time rows (including Department == 'Reflong - Changeover').
+    # Pass canonical_book_df so reflong IssueIDs can be resolved to the right folder.
+    down_time_df = _canonicalize_down_time_folders(
+        parse_down_time(workbook), folder_lookup, canonical_book_df
+    )
+
+    joined = _join_book_general_downtime(canonical_book_df, general_df, down_time_df)
+    book_details = _book_detail_records(joined)
+
+    return MasterView(
+        general_df=general_df,
+        book=joined,
+        book_active=book_active,
+        down_time=down_time_df,
+        reflong_issue_ids=reflong_issue_ids,
+        book_details=book_details,
+    )
+
+
 def _load_twin_folder_lookup() -> dict[str, dict[str, list[str]]]:
     backend_dir = Path(__file__).resolve().parents[2]
 
@@ -254,20 +430,23 @@ def _canonicalize_book_folders(book_df: pd.DataFrame, folder_lookup: dict[str, A
     if book_df.empty or not folder_lookup.get("plants"):
         return book_df.copy()
 
-    rows = []
-    for _, row in book_df.iterrows():
-        reference = _folder_reference_for_row(row, folder_lookup)
-        if not reference:
-            continue
+    # Collect references without copying any rows — one dict lookup per row
+    references: list[dict[str, str] | None] = [
+        _folder_reference_for_row(row, folder_lookup)
+        for _, row in book_df.iterrows()
+    ]
 
-        next_row = row.copy()
-        _apply_folder_reference(next_row, reference)
-        rows.append(next_row)
-
-    if not rows:
+    valid_indices = [i for i, r in enumerate(references) if r is not None]
+    if not valid_indices:
         return book_df.iloc[0:0].copy()
 
-    return pd.DataFrame(rows).reset_index(drop=True)
+    # Filter the DataFrame once, then assign the 3 canonical columns in bulk
+    df = book_df.iloc[valid_indices].copy()
+    valid_refs = [references[i] for i in valid_indices]
+    df["Plant Name"] = [r["plant_name"] for r in valid_refs]
+    df["Machine"] = [r["machine"] for r in valid_refs]
+    df["Folder"] = [r["folder"] for r in valid_refs]
+    return df.reset_index(drop=True)
 
 
 def _canonicalize_down_time_folders(
@@ -279,8 +458,9 @@ def _canonicalize_down_time_folders(
         return down_time_df.copy()
 
     issue_lookup, issue_only_lookup = _build_issue_folder_reference_lookup(book_df)
-    rows = []
 
+    # Collect references without copying any rows
+    references: list[dict[str, str] | None] = []
     for _, row in down_time_df.iterrows():
         reference = _folder_reference_for_row(row, folder_lookup)
         if not reference:
@@ -291,18 +471,19 @@ def _canonicalize_down_time_folders(
                 _loose_canonical_text(row.get("Folder")),
             )
             reference = issue_lookup.get(issue_key) or issue_only_lookup.get(issue_id)
+        references.append(reference)
 
-        if not reference:
-            continue
-
-        next_row = row.copy()
-        _apply_folder_reference(next_row, reference)
-        rows.append(next_row)
-
-    if not rows:
+    valid_indices = [i for i, r in enumerate(references) if r is not None]
+    if not valid_indices:
         return down_time_df.iloc[0:0].copy()
 
-    return pd.DataFrame(rows).reset_index(drop=True)
+    # Filter once, assign canonical columns in bulk
+    df = down_time_df.iloc[valid_indices].copy()
+    valid_refs = [references[i] for i in valid_indices]
+    df["Plant Name"] = [r["plant_name"] for r in valid_refs]
+    df["Machine"] = [r["machine"] for r in valid_refs]
+    df["Folder"] = [r["folder"] for r in valid_refs]
+    return df.reset_index(drop=True)
 
 
 def _build_issue_folder_reference_lookup(
@@ -1022,9 +1203,10 @@ def _merge_print_intervals(
 
 
 def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only editions that overlap the Issue Date 00:00-04:00 window.
+    """Keep only editions that overlap the Issue Date 00:00-compliance_time window.
 
-    A row is included only if it overlaps the Issue Date window.
+    Vectorized: computes window bounds and clip operations on the full DataFrame
+    rather than looping row by row.
 
     Examples:
     - 03:45 to 05:30 contributes only 15 minutes.
@@ -1032,15 +1214,6 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
     - 04:00 to 04:30 contributes 0 minutes and is excluded.
     """
     source_df = _drop_reflong_print_rows(book_df)
-    df = source_df[
-        (source_df[REPORT_DATE_COLUMN].notna()) &
-        (source_df["Issue Date"].notna()) &
-        (source_df["Machine"].ne("")) &
-        (source_df["Folder"].ne("")) &
-        (source_df["Start DateTime"].notna()) &
-        (source_df["End DateTime"].notna())
-    ].copy()
-
     interval_columns = [
         "Window Start",
         "Window End",
@@ -1050,61 +1223,103 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
         EFFECTIVE_PRINT_ORDER_COLUMN,
     ]
 
+    df = source_df[
+        source_df[REPORT_DATE_COLUMN].notna()
+        & source_df["Issue Date"].notna()
+        & source_df["Machine"].ne("")
+        & source_df["Folder"].ne("")
+        & source_df["Start DateTime"].notna()
+        & source_df["End DateTime"].notna()
+    ].copy()
+
     if df.empty:
-        return pd.DataFrame(columns=[*df.columns, *interval_columns])
+        return pd.DataFrame(columns=[*source_df.columns, *interval_columns])
 
-    kept_rows = []
+    # Window start = midnight on Issue Date (vectorized via ISO string → Timestamp)
+    df["Window Start"] = pd.to_datetime(
+        df["Issue Date"].apply(lambda d: d.isoformat() if hasattr(d, "isoformat") else str(d)),
+        errors="coerce",
+    )
+    # Window end = window start + compliance minutes (depends only on plant, so map via dict)
+    if "Plant Name" in df.columns:
+        compliance = (
+            df["Plant Name"]
+            .apply(_canonical_text)
+            .map(PF_COMPLIANCE_MINUTES_BY_PLANT)
+            .fillna(CAPACITY_MINUTES_PER_FOLDER_DAY)
+        )
+    else:
+        compliance = pd.Series(CAPACITY_MINUTES_PER_FOLDER_DAY, index=df.index)
+    df["Window End"] = df["Window Start"] + pd.to_timedelta(compliance, unit="m")
 
-    for _, row in df.iterrows():
-        issue_date = row["Issue Date"]
-        start_dt = pd.Timestamp(row["Start DateTime"])
-        end_dt = pd.Timestamp(row["End DateTime"])
+    start_ts = pd.to_datetime(df["Start DateTime"])
+    end_ts = pd.to_datetime(df["End DateTime"])
+    win_start = df["Window Start"]
+    win_end = df["Window End"]
 
-        if issue_date is None or pd.isna(start_dt) or pd.isna(end_dt):
-            continue
+    # Discard rows where print end ≤ print start
+    valid = end_ts > start_ts
+    if not valid.all():
+        df = df[valid].copy()
+        start_ts, end_ts = start_ts[valid], end_ts[valid]
+        win_start, win_end = win_start[valid], win_end[valid]
 
-        if end_dt <= start_dt:
-            continue
+    if df.empty:
+        return pd.DataFrame(columns=[*source_df.columns, *interval_columns])
 
-        window_start = pd.Timestamp(datetime.combine(issue_date, time(0, 0)))
-        window_end = window_start + timedelta(minutes=_pf_compliance_minutes(row.get("Plant Name", "")))
+    # Effective start = max(start, win_start);  effective end = min(end, win_end)
+    # Series.clip(lower/upper=Series) does element-wise clamping aligned by index
+    eff_start = start_ts.clip(lower=win_start)
+    eff_end = end_ts.clip(upper=win_end)
 
-        effective_start = max(start_dt, window_start)
-        effective_end = min(end_dt, window_end)
+    # Keep only rows with actual window overlap
+    overlap = eff_start < eff_end
+    if not overlap.all():
+        df = df[overlap].copy()
+        start_ts, end_ts = start_ts[overlap], end_ts[overlap]
+        eff_start, eff_end = eff_start[overlap], eff_end[overlap]
 
-        if effective_start < effective_end:
-            original_duration = max((end_dt - start_dt).total_seconds() / 60, 0.0)
-            effective_duration = max((effective_end - effective_start).total_seconds() / 60, 0.0)
-            source_runtime = _parse_minutes_value(row.get("Total Run Time (mnts)"))
-            source_print_order = _parse_count_value(row.get("Print Order"))
-            runtime_ratio = (
-                min(max(effective_duration / original_duration, 0.0), 1.0)
-                if original_duration > 0
-                else 1.0
-            )
-            effective_runtime = (
-                min(source_runtime * runtime_ratio, effective_duration)
-                if source_runtime > 0
-                else effective_duration
-            )
-            source_runtime_ratio = (
-                min(max(effective_runtime / source_runtime, 0.0), 1.0)
-                if source_runtime > 0
-                else runtime_ratio
-            )
-            row = row.copy()
-            row["Window Start"] = window_start
-            row["Window End"] = window_end
-            row["Effective Start DateTime"] = effective_start
-            row["Effective End DateTime"] = effective_end
-            row[EFFECTIVE_RUNTIME_COLUMN] = _clean_number(effective_runtime)
-            row[EFFECTIVE_PRINT_ORDER_COLUMN] = _clean_number(source_print_order * source_runtime_ratio)
-            kept_rows.append(row)
+    if df.empty:
+        return pd.DataFrame(columns=[*source_df.columns, *interval_columns])
 
-    if not kept_rows:
-        return pd.DataFrame(columns=[*df.columns, *interval_columns])
+    # Duration calculations (minutes) — vectorized
+    original_min = (end_ts - start_ts).dt.total_seconds().div(60)
+    effective_min = (eff_end - eff_start).dt.total_seconds().div(60)
 
-    return pd.DataFrame(kept_rows)
+    source_runtime = df["Total Run Time (mnts)"].apply(_parse_minutes_value)
+    source_print_order = (
+        df["Print Order"].apply(_parse_count_value)
+        if "Print Order" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
+
+    # Runtime ratio: effective / original, clamped [0, 1]
+    runtime_ratio = effective_min.div(original_min.clip(lower=1e-9)).clip(0, 1)
+
+    # Effective runtime: min(source_runtime × ratio, effective_min) when source > 0
+    has_source = source_runtime > 0
+    effective_runtime = effective_min.copy()
+    effective_runtime.loc[has_source] = (
+        (source_runtime.loc[has_source] * runtime_ratio.loc[has_source])
+        .clip(upper=effective_min.loc[has_source])
+    )
+
+    # Source runtime ratio for scaling print order
+    source_runtime_ratio = runtime_ratio.copy()
+    source_runtime_ratio.loc[has_source] = (
+        effective_runtime.loc[has_source]
+        .div(source_runtime.loc[has_source].clip(lower=1e-9))
+        .clip(0, 1)
+    )
+
+    df["Effective Start DateTime"] = eff_start.values
+    df["Effective End DateTime"] = eff_end.values
+    df[EFFECTIVE_RUNTIME_COLUMN] = effective_runtime.apply(_clean_number).values
+    df[EFFECTIVE_PRINT_ORDER_COLUMN] = (
+        source_print_order * source_runtime_ratio
+    ).apply(_clean_number).values
+
+    return df
 
 
 def _aggregate_down_time_by_capacity_unit_filtered(
@@ -2245,22 +2460,48 @@ def _calculate_effective_speed(print_order: float, runtime_minutes: float) -> fl
 
 
 def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
-    general_df = parse_general(workbook)
+    return build_capacity_response_staged(workbook).payload
+
+
+@dataclass
+class StagedCapacityResult:
+    """Result of a full upload computation: the JSON-safe payload plus the
+    underlying DataFrames/records needed to re-scope chat context later
+    (by plant/folder/date) without recomputing from scratch."""
+
+    payload: dict[str, Any]
+    folder_day_df: pd.DataFrame
+    tower_day_df: pd.DataFrame | None
+    book_details: list[dict[str, Any]]
+    downtime_reasons: list[dict[str, Any]]
+
+
+def build_capacity_response_staged(
+    workbook: pd.ExcelFile,
+    on_stage: Callable[[dict[str, Any]], None] | None = None,
+) -> StagedCapacityResult:
+    def emit(stage: str, message: str, progress: int, result: dict[str, Any] | None = None) -> None:
+        if on_stage:
+            on_stage({
+                "stage": stage,
+                "message": message,
+                "progress": progress,
+                "result": result,
+            })
+
+    emit("parsing", "Reading workbook sheets", 10)
     folder_lookup = _load_folder_list_lookup()
 
-    # Canonicalize book rows BEFORE dropping reflong print rows so we can extract
-    # reflong Issue IDs for the downtime split step.
-    canonical_book_df = _canonicalize_book_folders(parse_book_wise_details(workbook), folder_lookup)
-    reflong_issue_ids = _build_reflong_issue_ids(canonical_book_df)
-    book_df = _drop_reflong_print_rows(canonical_book_df)
+    emit("parsing", "Normalizing production rows", 20)
+    emit("preprocessing", "Building master view (Book Wise + General + Down Time)", 32)
+    master = build_master_view(workbook, folder_lookup)
+    general_df = master.general_df
+    book_df = master.book_active
+    down_time_df = master.down_time
+    reflong_issue_ids = master.reflong_issue_ids
+    book_details = master.book_details
 
-    # Keep all Down Time rows (including Department == 'Reflong - Changeover').
-    # Pass canonical_book_df so reflong IssueIDs can be resolved to the right folder.
-    # The aggregation step will classify each row as regular downtime or reflong loss time.
-    down_time_df = _canonicalize_down_time_folders(
-        parse_down_time(workbook), folder_lookup, canonical_book_df
-    )
-
+    emit("folder_dashboard", "Building folder and daily capacity data", 45)
     plant_date_universe = _build_plant_date_universe(book_df)
     twin_lookup = _load_twin_folder_lookup()
     uv_tower_lookup = _load_uv_tower_lookup()
@@ -2272,20 +2513,257 @@ def build_capacity_response(workbook: pd.ExcelFile) -> dict[str, Any]:
         "IssueID",
         issue_twin_targets,
     )
-    folder_day_df = calculate_folder_day_metrics(folder_book_df, folder_down_time_df, reflong_issue_ids)
-    folder_day_df = _add_unplanned_folder_day_rows(folder_day_df, folder_lookup, plant_date_universe)
-    tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df, uv_tower_lookup, reflong_issue_ids)
-    daily_df = calculate_daily_metrics(folder_day_df)
+    quarter_chunks = _fiscal_quarter_chunks(plant_date_universe)
+    available_plants = _available_plants_from_book(book_df)
+    completed_quarters: list[str] = []
+    loaded_folder_day_frames: list[pd.DataFrame] = []
 
+    if quarter_chunks:
+        for index, chunk in enumerate(quarter_chunks, start=1):
+            chunk_dates = set(chunk["dates"])
+            chunk_book_df = _filter_by_report_dates(folder_book_df, chunk_dates)
+            chunk_plant_date_universe = [
+                item for item in plant_date_universe
+                if item[0] in chunk_dates
+            ]
+            chunk_folder_day_df = calculate_folder_day_metrics(chunk_book_df, folder_down_time_df, reflong_issue_ids)
+            chunk_folder_day_df = _add_unplanned_folder_day_rows(
+                chunk_folder_day_df,
+                folder_lookup,
+                chunk_plant_date_universe,
+            )
+            if not chunk_folder_day_df.empty:
+                loaded_folder_day_frames.append(chunk_folder_day_df)
+            completed_quarters.append(chunk["label"])
+
+            cumulative_folder_day_df = _concat_folder_day_frames(loaded_folder_day_frames)
+            partial_result = _build_capacity_payload(
+                cumulative_folder_day_df,
+                tower_day_df=None,
+                downtime_source_df=None,
+                processing_complete=False,
+                partial=True,
+                loaded_quarters=completed_quarters,
+                total_quarters=len(quarter_chunks),
+                available_plants=available_plants,
+            )
+            progress = 35 + int((index / len(quarter_chunks)) * 40)
+            emit(
+                "folder_dashboard_ready",
+                f"Loaded {index} of {len(quarter_chunks)} fiscal quarters",
+                progress,
+                partial_result,
+            )
+
+        folder_day_df = _concat_folder_day_frames(loaded_folder_day_frames)
+    else:
+        folder_day_df = _empty_folder_day_metrics()
+        daily_df = calculate_daily_metrics(folder_day_df)
+        partial_result = {
+            "valid": True,
+            "summary": calculate_summary_metrics(daily_df),
+            "daily": _daily_records(daily_df),
+            "details": _detail_records(folder_day_df),
+            "tower_details": [],
+            "downtime_reasons": [],
+            "processing_complete": False,
+            "partial": True,
+            "loaded_date_range": _loaded_date_range(folder_day_df),
+            "loaded_quarters": [],
+            "total_quarters": 0,
+            "available_plants": available_plants,
+            "errors": [],
+        }
+        emit("folder_dashboard_ready", "Folder and daily dashboard data is ready", 70, partial_result)
+
+    emit("tower_dashboard", "Adding tower and downtime details", 82)
+    tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df, uv_tower_lookup, reflong_issue_ids)
+    downtime_reasons = _downtime_reason_records(folder_down_time_df)
+
+    payload = _build_capacity_payload(
+        folder_day_df,
+        tower_day_df=tower_day_df,
+        downtime_source_df=folder_down_time_df,
+        processing_complete=True,
+        partial=False,
+        loaded_quarters=[chunk["label"] for chunk in quarter_chunks],
+        total_quarters=len(quarter_chunks),
+        available_plants=available_plants,
+        book_details=book_details,
+    )
+
+    return StagedCapacityResult(
+        payload=payload,
+        folder_day_df=folder_day_df,
+        tower_day_df=tower_day_df,
+        book_details=book_details,
+        downtime_reasons=downtime_reasons,
+    )
+
+
+def _build_capacity_payload(
+    folder_day_df: pd.DataFrame,
+    tower_day_df: pd.DataFrame | None,
+    downtime_source_df: pd.DataFrame | None,
+    processing_complete: bool,
+    partial: bool,
+    loaded_quarters: list[str],
+    total_quarters: int,
+    available_plants: list[str],
+    book_details: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    daily_df = calculate_daily_metrics(folder_day_df)
     return {
         "valid": True,
         "summary": calculate_summary_metrics(daily_df),
         "daily": _daily_records(daily_df),
         "details": _detail_records(folder_day_df),
-        "tower_details": _tower_detail_records(tower_day_df),
-        "downtime_reasons": _downtime_reason_records(folder_down_time_df),
+        "tower_details": _tower_detail_records(tower_day_df) if tower_day_df is not None else [],
+        "downtime_reasons": _downtime_reason_records(downtime_source_df) if downtime_source_df is not None else [],
+        "book_details": book_details if book_details is not None else [],
+        "processing_complete": processing_complete,
+        "partial": partial,
+        "loaded_date_range": _loaded_date_range(folder_day_df),
+        "loaded_quarters": loaded_quarters,
+        "total_quarters": total_quarters,
+        "available_plants": available_plants,
         "errors": [],
     }
+
+
+def scope_capacity_result(
+    folder_day_df: pd.DataFrame,
+    tower_day_df: pd.DataFrame | None,
+    book_details: list[dict[str, Any]],
+    downtime_reasons: list[dict[str, Any]],
+    selected_plant: str,
+    selected_folders: list[str] | None,
+    timeframe_start: str,
+    timeframe_end: str,
+) -> dict[str, Any]:
+    """Re-scope a completed upload's computed data by plant/folder/date range for chat.
+
+    Mirrors filterCapacityDataByScope + filterCapacityData (frontend/src/App.jsx) but
+    reuses calculate_daily_metrics/calculate_summary_metrics directly on the underlying
+    DataFrames, so chat's scoped numbers are produced by the exact same code path as
+    the dashboard rather than a second, parallel implementation.
+    """
+    plant = _clean_text(selected_plant)
+    folder_set = {_clean_text(f) for f in (selected_folders or []) if _clean_text(f)}
+
+    def _scope_df(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        if df is None or df.empty:
+            return df
+        scoped = df
+        if plant and "Plant Name" in scoped.columns:
+            scoped = scoped[scoped["Plant Name"].apply(_clean_text) == plant]
+        if folder_set and "Folder" in scoped.columns:
+            scoped = scoped[scoped["Folder"].apply(_clean_text).isin(folder_set)]
+        if (timeframe_start or timeframe_end) and REPORT_DATE_COLUMN in scoped.columns:
+            dates = scoped[REPORT_DATE_COLUMN].apply(_format_run_date)
+            if timeframe_start:
+                scoped = scoped[dates >= timeframe_start]
+                dates = dates[dates >= timeframe_start]
+            if timeframe_end:
+                scoped = scoped[dates <= timeframe_end]
+        return scoped
+
+    scoped_folder_day_df = _scope_df(folder_day_df)
+    scoped_tower_day_df = _scope_df(tower_day_df)
+    daily_df = calculate_daily_metrics(scoped_folder_day_df)
+
+    def _row_in_scope(row: dict[str, Any]) -> bool:
+        if plant and _clean_text(row.get("Plant Name")) != plant:
+            return False
+        if folder_set and _clean_text(row.get("Folder")) not in folder_set:
+            return False
+        run_date = _clean_text(row.get("Report Date"))
+        if timeframe_start and run_date and run_date < timeframe_start:
+            return False
+        if timeframe_end and run_date and run_date > timeframe_end:
+            return False
+        return True
+
+    return {
+        "summary": calculate_summary_metrics(daily_df),
+        "daily": _daily_records(daily_df),
+        "details": _detail_records(scoped_folder_day_df),
+        "tower_details": _tower_detail_records(scoped_tower_day_df) if scoped_tower_day_df is not None else [],
+        # Intentionally not filtered: matches today's frontend behavior, which never
+        # scopes downtime_reasons by plant/folder/date before sending it to chat.
+        "downtime_reasons": downtime_reasons or [],
+        "book_details": [row for row in (book_details or []) if _row_in_scope(row)],
+    }
+
+
+def _concat_folder_day_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    if not frames:
+        return _empty_folder_day_metrics()
+    return (
+        pd.concat(frames, ignore_index=True, sort=False)
+        .reindex(columns=_empty_folder_day_metrics().columns)
+        .sort_values([REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"])
+        .reset_index(drop=True)
+    )
+
+
+def _filter_by_report_dates(df: pd.DataFrame, report_dates: set[date]) -> pd.DataFrame:
+    if df.empty or REPORT_DATE_COLUMN not in df.columns or not report_dates:
+        return df.iloc[0:0].copy()
+    return df[df[REPORT_DATE_COLUMN].isin(report_dates)].copy()
+
+
+def _available_plants_from_book(book_df: pd.DataFrame) -> list[str]:
+    if book_df.empty or "Plant Name" not in book_df.columns:
+        return []
+    return sorted({
+        _clean_text(plant)
+        for plant in book_df["Plant Name"].tolist()
+        if _clean_text(plant)
+    })
+
+
+def _loaded_date_range(folder_day_df: pd.DataFrame) -> dict[str, str]:
+    if folder_day_df.empty or REPORT_DATE_COLUMN not in folder_day_df.columns:
+        return {"start": "", "end": ""}
+    dates = sorted({
+        value for value in folder_day_df[REPORT_DATE_COLUMN].tolist()
+        if value is not None and not pd.isna(value)
+    })
+    if not dates:
+        return {"start": "", "end": ""}
+    return {"start": _format_run_date(dates[0]), "end": _format_run_date(dates[-1])}
+
+
+def _fiscal_quarter_chunks(plant_dates: list[tuple[date, str]]) -> list[dict[str, Any]]:
+    dates = sorted({report_date for report_date, _ in plant_dates if report_date})
+    if not dates:
+        return []
+
+    grouped: dict[tuple[int, int], set[date]] = {}
+    for report_date in dates:
+        fiscal_year, fiscal_quarter = _fiscal_year_quarter(report_date)
+        grouped.setdefault((fiscal_year, fiscal_quarter), set()).add(report_date)
+
+    chunks = []
+    for (fiscal_year, fiscal_quarter), quarter_dates in grouped.items():
+        ordered_dates = sorted(quarter_dates)
+        chunks.append({
+            "key": (fiscal_year, fiscal_quarter),
+            "label": f"FY {fiscal_year}-{str(fiscal_year + 1)[-2:]} Q{fiscal_quarter}",
+            "start": ordered_dates[0],
+            "end": ordered_dates[-1],
+            "dates": ordered_dates,
+        })
+
+    return sorted(chunks, key=lambda chunk: (chunk["start"], chunk["end"]), reverse=True)
+
+
+def _fiscal_year_quarter(report_date: date) -> tuple[int, int]:
+    fiscal_year = report_date.year if report_date.month >= 4 else report_date.year - 1
+    fiscal_month = ((report_date.month - 4 + 12) % 12) + 1
+    fiscal_quarter = ((fiscal_month - 1) // 3) + 1
+    return fiscal_year, fiscal_quarter
 
 
 def _read_sheet(workbook: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
@@ -2722,6 +3200,34 @@ def _tower_detail_records(tower_day_df: pd.DataFrame) -> list[dict[str, Any]]:
             ]
         ]
     )
+
+
+def _book_detail_records(master_df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Lean per-book rows from the master view for chatbot context."""
+    if master_df.empty:
+        return []
+
+    available = [col for col in _BOOK_DETAIL_LEAN_COLS if col in master_df.columns]
+    df = master_df[available].copy()
+
+    for date_col in (REPORT_DATE_COLUMN, "Run Date"):
+        if date_col in df.columns:
+            df[date_col] = df[date_col].apply(_format_run_date)
+
+    records = []
+    for record in df.to_dict(orient="records"):
+        clean: dict[str, Any] = {}
+        for key, value in record.items():
+            if isinstance(value, list):
+                clean[key] = value
+            elif isinstance(value, bool):
+                clean[key] = value
+            elif isinstance(value, Real) and not isinstance(value, bool):
+                clean[key] = _clean_number(value)
+            else:
+                clean[key] = value
+        records.append(clean)
+    return records
 
 
 def _rounded_records(df: pd.DataFrame) -> list[dict[str, Any]]:

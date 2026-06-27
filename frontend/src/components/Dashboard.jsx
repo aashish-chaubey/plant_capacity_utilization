@@ -7,8 +7,10 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import { ChevronLeft, ChevronRight, MessageSquare, Send, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, MessageSquare, Send, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const CHAT_API_BASE = String(import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 
@@ -91,7 +93,16 @@ const UNPLANNED_BREAKDOWN_STACK = {
 const FOLDER_BREAKDOWN_STACKS = [...BREAKDOWN_STACKS, UNPLANNED_BREAKDOWN_STACK];
 const DEFAULT_BREAKDOWN_KEYS = FOLDER_BREAKDOWN_STACKS.map((stack) => stack.key);
 
-export default function Dashboard({ data, intelligence, intelligenceLoading, intelligenceError }) {
+export default function Dashboard({
+  data,
+  intelligence,
+  intelligenceLoading,
+  intelligenceError,
+  jobId,
+  selectedPlant,
+  selectedFolders,
+  timeframeRange,
+}) {
   const [focusedDay, setFocusedDay] = useState("");
   const [selectedBreakdownKeys, setSelectedBreakdownKeys] = useState(DEFAULT_BREAKDOWN_KEYS);
   const [chatOpen, setChatOpen] = useState(false);
@@ -151,6 +162,19 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
   async function handleChatSend() {
     const text = chatInput.trim();
     if (!text || chatLoading) return;
+    if (!jobId) {
+      setChatMessages([
+        ...chatMessages,
+        { role: "user", content: text },
+        {
+          role: "assistant",
+          content: "This dashboard session is no longer available. Please re-upload the file.",
+          plan: null,
+        },
+      ]);
+      setChatInput("");
+      return;
+    }
     setChatInput("");
     const nextMessages = [...chatMessages, { role: "user", content: text }];
     setChatMessages(nextMessages);
@@ -160,13 +184,11 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          job_id: jobId,
           message: text,
-          intelligence: intelligence || {},
-          summary: data.summary || {},
-          daily: data.daily || [],
-          details: data.details || [],
-          tower_details: data.tower_details || [],
-          downtime_reasons: data.downtime_reasons || [],
+          selected_plant: selectedPlant || "",
+          selected_folders: selectedFolders || [],
+          timeframe: timeframeRange ? { start: timeframeRange.start, end: timeframeRange.end } : null,
           history: chatMessages.map(({ role, content }) => ({ role, content })),
         }),
       });
@@ -175,10 +197,13 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
         role: "assistant",
         content: payload.answer || "No response.",
         plan: payload.plan || null,
-        detail: payload.status === "error" ? payload.detail : null,
       }]);
     } catch {
-      setChatMessages([...nextMessages, { role: "assistant", content: "Error connecting to the assistant.", plan: null, detail: null }]);
+      setChatMessages([...nextMessages, {
+        role: "assistant",
+        content: "The assistant service did not respond. Please try again.",
+        plan: null,
+      }]);
     } finally {
       setChatLoading(false);
     }
@@ -402,13 +427,26 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
                 <MessageSquare className="h-4 w-4 text-blue-600" aria-hidden="true" />
                 <span className="text-sm font-semibold text-slate-800">Ask the data</span>
               </div>
-              <button
-                type="button"
-                onClick={() => setChatOpen(false)}
-                className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
-              >
-                <X className="h-4 w-4" aria-hidden="true" />
-              </button>
+              <div className="flex items-center gap-1">
+                {chatMessages.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setChatMessages([])}
+                    title="Clear conversation"
+                    className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setChatOpen(false)}
+                  title="Close chat"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
             </div>
 
             {/* Messages */}
@@ -422,19 +460,14 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
                 <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                   <div className={`max-w-[82%] ${msg.role === "user" ? "" : "flex flex-col gap-1"}`}>
                     <div
-                      className={`whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed ${
+                      className={`rounded-2xl px-3 py-2 text-sm leading-relaxed ${
                         msg.role === "user"
-                          ? "rounded-br-sm bg-blue-600 text-white"
+                          ? "whitespace-pre-wrap rounded-br-sm bg-blue-600 text-white"
                           : "rounded-bl-sm bg-slate-100 text-slate-800"
                       }`}
                     >
-                      {msg.content}
+                      <ChatMessageContent content={msg.content} role={msg.role} />
                     </div>
-                    {msg.role === "assistant" && msg.detail && (
-                      <div className="ml-1 rounded-xl border border-red-100 bg-red-50 px-3 py-1.5 text-xs text-red-600">
-                        {msg.detail}
-                      </div>
-                    )}
                     {msg.role === "assistant" && msg.plan && (
                       <details className="ml-1">
                         <summary className="cursor-pointer select-none text-xs text-slate-400 hover:text-slate-600 list-none flex items-center gap-1">
@@ -514,6 +547,59 @@ export default function Dashboard({ data, intelligence, intelligenceLoading, int
           }
         </button>
       </div>
+    </div>
+  );
+}
+
+const CHAT_MARKDOWN_COMPONENTS = {
+  p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  strong: ({ children }) => <strong className="font-semibold text-slate-900">{children}</strong>,
+  em: ({ children }) => <em className="italic">{children}</em>,
+  a: ({ children, href }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="text-blue-600 underline hover:text-blue-700">
+      {children}
+    </a>
+  ),
+  ul: ({ children }) => <ul className="mb-2 list-disc space-y-0.5 pl-4 last:mb-0">{children}</ul>,
+  ol: ({ children }) => <ol className="mb-2 list-decimal space-y-0.5 pl-4 last:mb-0">{children}</ol>,
+  li: ({ children }) => <li>{children}</li>,
+  h1: ({ children }) => <h1 className="mb-1 text-sm font-bold">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-1 text-sm font-bold">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-1 text-sm font-semibold">{children}</h3>,
+  blockquote: ({ children }) => (
+    <blockquote className="mb-2 border-l-2 border-slate-300 pl-2 text-slate-600 last:mb-0">{children}</blockquote>
+  ),
+  code: ({ children }) => (
+    <code className="rounded bg-slate-200/70 px-1 py-0.5 text-[0.8em] text-slate-800">{children}</code>
+  ),
+  hr: () => <hr className="my-2 border-slate-200" />,
+  table: ({ children }) => (
+    <div className="mb-2 max-w-full overflow-x-auto rounded-md border border-slate-200 bg-white last:mb-0">
+      <table className="min-w-full border-collapse text-left text-xs">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-slate-50 text-slate-600">{children}</thead>,
+  tbody: ({ children }) => <tbody className="divide-y divide-slate-100">{children}</tbody>,
+  tr: ({ children }) => <tr className="odd:bg-white even:bg-slate-50/70">{children}</tr>,
+  th: ({ children }) => (
+    <th scope="col" className="border-b border-slate-200 px-2 py-1.5 font-semibold whitespace-nowrap">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => <td className="px-2 py-1.5 align-top text-slate-700">{children}</td>,
+};
+
+function ChatMessageContent({ content, role }) {
+  const text = String(content || "");
+  if (role !== "assistant") {
+    return text;
+  }
+
+  return (
+    <div className="space-y-1 [&>*:last-child]:mb-0">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={CHAT_MARKDOWN_COMPONENTS}>
+        {text}
+      </ReactMarkdown>
     </div>
   );
 }

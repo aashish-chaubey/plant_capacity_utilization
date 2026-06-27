@@ -20,7 +20,9 @@ PF_COMPLIANCE_MINUTES_BY_PLANT = {
     "manesar": 180.0,
     "trivandrum": 150.0,
 }
-REQUEST_TIMEOUT_SECONDS = 90
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("CAPACITY_CHAT_REQUEST_TIMEOUT_SECONDS", "180") or "180")
+CHAT_RESPONSE_MAX_TOKENS = int(os.getenv("CAPACITY_CHAT_RESPONSE_MAX_TOKENS", "4000") or "4000")
+CHAT_REASONING_RESPONSE_MAX_TOKENS = int(os.getenv("CAPACITY_CHAT_REASONING_RESPONSE_MAX_TOKENS", "8000") or "8000")
 MALT_WAIT_PERCENTILE = 50
 MALT_MOT_PERCENTILE = 85
 MALT_SPARE_PERCENTILE = 30
@@ -47,6 +49,7 @@ def build_chat_response(
     details: list[dict[str, Any]] | None = None,
     tower_details: list[dict[str, Any]] | None = None,
     downtime_reasons: list[dict[str, Any]] | None = None,
+    book_details: list[dict[str, Any]] | None = None,
     history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     intelligence = intelligence or {}
@@ -55,6 +58,7 @@ def build_chat_response(
     details = details or []
     tower_details = tower_details or []
     downtime_reasons = downtime_reasons or []
+    book_details = book_details or []
     history = history or []
 
     if not (intelligence.get("sections") or {}) and (summary or daily_rows or details):
@@ -72,6 +76,7 @@ def build_chat_response(
         daily_rows=daily_rows,
         details=details,
         downtime_reasons=downtime_reasons,
+        book_details=book_details,
         question=message,
     )
     deterministic_answer = _try_deterministic_chat_answer(message, context)
@@ -92,13 +97,18 @@ def build_chat_response(
             return {"answer": fallback_answer, "status": "ok", "plan": None}
         return {"answer": "LLM is not configured.", "status": "unconfigured", "plan": None}
 
-    # Phase 1 — Planner: lightweight call to decide data source + computation
+    # Phase 1 — Planner: use only when the question needs deeper reasoning.
     plan: dict[str, Any] | None = None
-    try:
-        plan = _call_planner(message, endpoint, api_key)
-    except Exception as planner_exc:
-        print(f"[chat] planner skipped: {_sanitize_error_message(planner_exc, api_key)}", flush=True)
-        plan = None
+    if _should_use_chat_planner(message):
+        try:
+            plan = _call_planner(message, endpoint, api_key)
+        except Exception as planner_exc:
+            print(f"[chat] planner skipped: {_sanitize_error_message(planner_exc, api_key)}", flush=True)
+            plan = None
+
+    planned_answer = _answer_from_plan(plan, message, context)
+    if planned_answer:
+        return {"answer": planned_answer, "status": "ok", "plan": plan}
 
     plan_section = ""
     if plan:
@@ -116,7 +126,7 @@ def build_chat_response(
             "5. Format your response as specified in output_format\n\n"
         )
 
-    llm_context = _compact_chat_context_for_llm(context)
+    llm_context = _compact_chat_context_for_llm(context, message)
     context_json = json.dumps(llm_context, separators=(",", ":"), ensure_ascii=True)
 
     system_content = (
@@ -125,25 +135,36 @@ def build_chat_response(
         "Answer ONLY from the JSON context supplied — never invent values. "
         "Use the curated computed JSON tables supplied here "
         "(exact_dashboard.folders, exact_dashboard.daily, towers, tower_availability, downtime_by_reason, "
-        "delayed_pf, max_allowable_loss_time, editions_* tables) before using summary aggregates. "
+        "delayed_pf, max_allowable_loss_time, editions_* tables, book_details) before using summary aggregates. "
         "Do not assume access to anything outside this JSON context. "
         "Prefer exact_dashboard values over derived summaries whenever a numeric answer is available. "
         "Before responding, internally identify the metric, filters, numerator, denominator, and formula. "
         "Validate the arithmetic against the JSON, then provide only the final concise answer. "
         "Be brief and direct — no preamble, no filler. "
-        "For ranked results use a short numbered list. "
         "Always report duration values in minutes. Do not convert durations into hours or h:mm. "
         "Clock times such as 03:00 or 04:00 may remain clock times. "
         "If the answer is genuinely absent from the data, say: Not available in the current data.\n\n"
 
+        "OUTPUT FORMATTING (the response is rendered as Markdown, so use it deliberately):\n"
+        "- Any answer with 2+ rows of comparable data (rankings, breakdowns by folder/tower/date/reason, "
+        "multi-metric comparisons) MUST be a GitHub-flavored Markdown table with a header row and a "
+        "'| --- | --- |' separator row — never a bullet or numbered list of 'label: value' pairs for that case.\n"
+        "- A single headline number gets one short sentence, with the number itself in **bold**.\n"
+        "- Use **bold** for the specific figures and labels that directly answer the question, not for whole sentences.\n"
+        "- Reserve numbered/bulleted lists for short sequences that aren't tabular (e.g. steps, plain names).\n"
+        "- Never wrap the whole answer in a single bullet, and never emit raw pipe characters outside a "
+        "real Markdown table.\n\n"
+
         "QUERY INTERPRETATION RULES:\n"
         "- 'runtime' / 'run time' with no qualifier: total aggregate runtime across ALL complexity types. "
         "Report the combined figure first. Break down by SNP/GNP only if the user explicitly says 'SNP runtime', 'GNP runtime', or 'by type'.\n"
-        "- 'SNP runtime': sum complexity_by_code entries where type='SNP' (codes C1–C3).\n"
-        "- 'GNP runtime': sum complexity_by_code entries where type='GNP' (codes C5–C8).\n"
+        "- 'SNP' / 'standard' as a base category: include SNP and SNP Complex, codes C1-C4, unless the user explicitly separates simple vs complex.\n"
+        "- 'GNP' / 'glossy' / 'UV' as a base category: include GNP and GNP Complex, codes C5-C15, unless the user explicitly separates simple vs complex.\n"
+        "- 'SNP runtime': sum C1-C4 by default. 'GNP runtime': sum C5-C15 by default.\n"
         "- 'complex runtime': sum entries where is_complex=true (C4 + C9–C15).\n"
         "- 'speed' / 'average speed' with no qualifier: overall average_speed_cph. Qualify by type only when asked.\n"
         "- 'loss time' / 'losses': total lost_time (changeover + late-start + reflong). Waiting time is always separate.\n"
+        "- 'unscheduled time' means Unplanned Time, not Loss Time. Unplanned Time is capacity where the folder/tower was not scheduled or available for production.\n"
         "- 'spare time' / 'spare capacity': always buffer_time (= spare_time_min in exact_dashboard.folders), never unplanned_time.\n"
         "- 'average spare time per folder' or 'spare time for each folder': use exact_dashboard.folders[].spare_time_min / active_nights. "
         "List every folder with its average spare time per active night in minutes.\n"
@@ -159,6 +180,25 @@ def build_chat_response(
         "For reason-specific tower questions such as web break, use tower_downtime_reason_attribution.\n"
         "- When the user uses a shorthand metric name without qualification, default to the aggregate and "
         "mention if a breakdown by type/folder is also available.\n\n"
+
+        "OPERATIONAL MODEL:\n"
+        "- A plant has one or more Machines. Each Machine has multiple Towers (the units that print pages) and "
+        "Folders (the units that receive printed output from towers and fold it into finished copies).\n"
+        "- There is NO fixed Tower-Folder mapping. Tower-Folder combinations are configured per edition print and "
+        "can differ between editions on the same machine — never assume a tower always feeds the same folder; "
+        "read towers_list/Folder per row instead.\n"
+        "- A Folder receives output from one Tower-Folder combination at a time, never from multiple simultaneously.\n"
+        "- Printing is Parallel when different editions run at the same time on different Tower-Folder combinations "
+        "on the same machine, and Sequential when editions share the same Tower-Folder combination and must run "
+        "one after another (a combination can't start a new edition until the previous one on it finishes). "
+        "Only state which mode applied when Start/End times in the data actually show it — don't assume.\n"
+        "- An edition print is one row identified by IssueID (one IssueID = one edition printed on one date, "
+        "with its own Towers list and one Folder). Lifecycle: editorial releases the digital page (Last Tiff) → "
+        "machine/Tower-Folder prep → Start Time → End Time, with Print Order (copies) and Total Pages as "
+        "edition attributes.\n"
+        "- In book_details, the raw 'Total Downtime' field INCLUDES Reflong time. True mechanical downtime for "
+        "that row = Total Downtime − Reflong time; don't quote book_details' Total Downtime as Downtime "
+        "without that adjustment (the dashboard's own downtime_min already applies it).\n\n"
 
         "OPERATING DEFINITIONS:\n"
         "- Wait Time: idle time at the start of the 00:00 window where the press cannot operate because editorial LPR has not been issued. "
@@ -206,8 +246,10 @@ def build_chat_response(
         "- speed.by_category: speed and runtime share for SNP, GNP, SNP Complex, GNP Complex\n"
         "- delayed_pf: Delayed Print Finish — folders that printed past the plant compliance cutoff "
         "(04:00 default; 03:00 Baroda/Manesar; 02:30 Trivandrum). overrun_minutes = minutes past cutoff. "
-        "Rows include cutoff_time, estimated_print_finish_time, editions, complexity_codes, runtime/loss/downtime/wait/spare, "
-        "and largest_components. Use for any delayed PF, print finish, threshold breach, late finish, or overrun question.\n"
+        "Rows include night_type (GNP/UV or SNP/non-UV, precomputed per row — use this directly for GNP-vs-SNP-night "
+        "overrun comparisons, no join needed), cutoff_time, estimated_print_finish_time, editions, complexity_codes, "
+        "runtime/loss/downtime/wait/spare, and largest_components. "
+        "Use for any delayed PF, print finish, threshold breach, late finish, or overrun question.\n"
         "- uv_nights / gnp_nights: per-date classification from computed folder complexity data. "
         "A GNP night / UV night is any date where at least one folder ran GNP or GNP Complex editions "
         "(C5-C15). If no GNP/GNP Complex edition ran, it is an SNP night / non-UV night.\n"
@@ -227,20 +269,57 @@ def build_chat_response(
         "- editions_by_folder: unique edition names printed per folder across the period. "
         "Each entry has folder, editions (list), edition_count. "
         "Use for 'what editions ran on folder X' or 'which folder printed edition Y'.\n"
-        "- towers: comprehensive tower totals with runtime/loss/wait/downtime, active_dates, folders, editions, "
-        "complexity_codes, downtime_run_count, and loss_time_run_count.\n"
+        "- towers: per-tower totals across the full period. Fields: tower, machine, tower_name, runtime_min, "
+        "downtime_min, loss_time_min (changeover + late-start + reflong), waiting_time_min, change_over_time_min, "
+        "late_start_time_min, reflong_downtime_min, spare_time_min, active_nights, utilization_pct, "
+        "downtime_run_count, loss_time_run_count, waiting_time_run_count, uv_tower, active_dates, folders, "
+        "editions, complexity_codes. USE THIS for any per-tower metric totals or averages "
+        "(e.g. 'average loss time per tower' = loss_time_min / active_nights).\n"
+        "- tower_days: per-tower PER-DATE rows. Fields: run_date, weekday (Monday-Sunday, precomputed — never "
+        "compute weekday yourself from run_date), month (YYYY-MM, precomputed), plant, machine, tower, "
+        "tower_name, folder, uv_tower, runtime_min, downtime_min, loss_time_min, waiting_time_min, "
+        "spare_time_min, change_over_time_min, late_start_time_min, reflong_time_min, utilization_pct, "
+        "complexity_codes, complexity_categories, editions. "
+        "Use this for a specific-date or per-tower-per-night tower question. On large datasets this table "
+        "is row-capped and may not include every tower/date — for weekday or month PATTERN questions use "
+        "tower_weekday_summary / tower_month_summary instead, which are small, always-complete pre-aggregated tables.\n"
+        "- tower_weekday_summary: per-tower per-weekday AVERAGES, already aggregated (at most towers x 7 rows, "
+        "always complete regardless of dataset size). Fields: tower, tower_name, weekday, night_count, "
+        "avg_runtime_min, avg_downtime_min, avg_loss_time_min, avg_waiting_time_min, avg_utilization_pct. "
+        "USE THIS for ANY weekday-wise/day-of-week tower pattern question — do not group tower_days yourself.\n"
+        "- tower_month_summary: per-tower per-month TOTALS/AVERAGES, already aggregated (towers x number of "
+        "months, always complete regardless of dataset size). Fields: tower, tower_name, month, night_count, "
+        "total_runtime_min, total_downtime_min, total_loss_time_min, total_waiting_time_min, avg_utilization_pct. "
+        "USE THIS for ANY tower-level month-on-month or monthly trend question — do not group tower_days yourself.\n"
         "- tower_availability: total_towers, total_days, active_towers_by_day, and percent-threshold summaries. "
         "Use this for 'how many towers', 'how many days at least X% towers were utilised', or tower availability questions.\n"
         "- tower_downtime_reason_attribution: folder-level downtime reason events attributed to towers that ran the same plant/machine/folder in the selected period. "
         "Use this for questions like web break frequency by individual tower. State that reason attribution is folder-to-tower attribution when giving reason-specific tower counts.\n"
         "- editions_by_tower: unique edition names printed per tower across the period. "
         "Each entry has tower, editions (list), edition_count. Use for 'what editions ran on tower X'.\n"
-        "- exact_dashboard.daily: per-date rows with runtime_min, utilization_pct, loss_time_min, spare_time_min, "
-        "night_type, complexity_codes, and editions — use this for trend analysis and extrapolation.\n"
-        "- exact_dashboard.folder_days: per-folder per-date rows. Fields: folder, run_date, active_night, "
+        "- book_details: per-print-job rows from the master view (Book Wise Details joined with General and Down Time). "
+        "Fields: IssueID, Report Date, Run Date, Edition, Products (from General), Machine, Folder, Plant Name, "
+        "Total Run Time (mnts), Total Downtime, towers_list (list of tower names), towers_str (flat string), "
+        "downtime_total_min, downtime_count, downtime_departments. "
+        "Use for edition-level queries: which towers an edition used, what product ran on which folder, "
+        "or how much downtime a specific edition had.\n"
+        "- exact_dashboard.daily: per-date rows with run_date, weekday (Monday-Sunday, precomputed), "
+        "month (YYYY-MM, ALREADY PRECOMPUTED — group by this field directly for month-on-month/monthly trend "
+        "questions; never refuse for lack of a month rollup and never derive it yourself), runtime_min, "
+        "utilization_pct, loss_time_min, spare_time_min, night_type, complexity_codes, and editions — use this for "
+        "trend analysis, extrapolation, and weekday-wise or month-wise plant-level questions.\n"
+        "- exact_dashboard.folder_days: per-folder per-date rows. Fields: folder, run_date, weekday "
+        "(Monday-Sunday, precomputed), month (YYYY-MM, ALREADY PRECOMPUTED), active_night, "
         "runtime_min, loss_time_min, waiting_time_min, downtime_min, spare_time_min, unplanned_time_min, "
         "utilization_pct, spare_capacity_pct, complexity_codes, editions. "
-        "Use for day-by-day breakdown within a folder, or to filter by a specific date.\n"
+        "Use for day-by-day breakdown within a folder, weekday-wise or month-wise per-folder questions, or to filter by a specific date.\n"
+        "- loss_time.all_days: per-date plant-level loss breakdown. Fields: run_date, weekday (precomputed), "
+        "month (YYYY-MM, ALREADY PRECOMPUTED), runtime_min, lost_time_min (= loss_time_min), waiting_time_min, "
+        "available_capacity_min, loss_pct, dominant_driver, loss_components (a dict keyed by component name — "
+        "changeover/late-start/reflong — with minutes for that date), top_folders_by_loss. "
+        "Use this for any question about the COMPONENTS of loss time (changeover vs late-start vs reflong) over "
+        "time, including month-on-month or weekday-wise component trends — group rows by month or weekday and "
+        "sum each key inside loss_components.\n"
         "- exact_dashboard.folders: per-folder aggregated rows across the full period. Fields: resource (folder name), "
         "runtime_min, loss_time_min, waiting_time_min, downtime_min, spare_time_min (= total buffer/spare time), "
         "unplanned_time_min, possible_capacity_min, active_capacity_min, active_nights, total_nights, "
@@ -251,41 +330,59 @@ def build_chat_response(
         "CRITICAL RULES: (1) spare_time = buffer_time ONLY. unplanned_time is NEVER spare. "
         "(2) waiting_time is NOT a loss component — report separately. "
         "(3) Plant spare time = sum of buffer_time across folders, never add unplanned_time. "
-        "(4) Unqualified metric names → aggregate totals first.\n\n"
+        "(4) Unqualified metric names → aggregate totals first. "
+        "(5) When comparing plants, machines, towers, folders, editions, or categories, always name the metric the "
+        "comparison is based on. "
+        "(6) For 'why' questions, separate observation from cause: an observation (e.g. 'loss time was higher on "
+        "this folder') can be drawn directly from the data; only state a root cause if the data explicitly shows "
+        "it (e.g. a specific downtime reason). If several explanations are possible, say what the data suggests "
+        "without presenting speculation as settled fact.\n\n"
         f"Dashboard context:\n{context_json}"
     )
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
-    for turn in (history or [])[-8:]:
+    history_char_limit = 800
+    for turn in (history or [])[-6:]:
         role = _clean_text(turn.get("role", ""))
         content = _clean_text(turn.get("content", ""))
         if role in ("user", "assistant") and content:
+            if len(content) > history_char_limit:
+                content = content[:history_char_limit] + "… [truncated]"
             messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": _clean_text(message)})
 
     try:
         answer = _call_plain_chat_completion(endpoint, api_key, messages).strip()
+        if _chat_debug_enabled():
+            print(f"[chat-debug] raw_answer={answer!r}", flush=True)
         if _is_weak_chat_answer(answer):
-            fallback_answer = _fallback_answer_from_context(message, context)
+            fallback_answer = _fallback_answer_from_context(message, context, plan)
             if fallback_answer:
                 return {"answer": fallback_answer, "status": "ok", "plan": plan}
         return {"answer": answer, "status": "ok", "plan": plan}
     except Exception as exc:
-        error_detail = _sanitize_error_message(exc, api_key)
-        print(f"[chat] executor error: {error_detail}", flush=True)
-        fallback_answer = _fallback_answer_from_context(message, context)
+        if _chat_debug_enabled():
+            print(f"[chat] executor fallback used: {_chat_error_kind(exc)} — {_sanitize_error_message(exc, api_key)}", flush=True)
+        fallback_answer = _fallback_answer_from_context(message, context, plan)
         if fallback_answer:
             return {
                 "answer": fallback_answer,
                 "status": "ok",
                 "plan": plan,
-                "detail": error_detail,
+            }
+        if _is_timeout_error(exc):
+            return {
+                "answer": (
+                    "This query is too broad for one pass. "
+                    "Please narrow it by plant, date range, folder, tower, or metric."
+                ),
+                "status": "timeout",
+                "plan": plan,
             }
         return {
-            "answer": "It is difficult for me to answer with given context.",
-            "status": "error",
+            "answer": "I could not answer that from the current computed dashboard context.",
+            "status": "unanswered",
             "plan": plan,
-            "detail": error_detail,
         }
 
 
@@ -297,23 +394,50 @@ exact_dashboard.folders — per-folder aggregated totals across all dates
   downtime_min, spare_time_min, unplanned_time_min, possible_capacity_min,
   active_nights, total_nights, utilization_pct, active_day_utilization_pct, spare_capacity_pct
 
-exact_dashboard.folder_days — per-folder per-date rows (use for day-level breakdown or specific date)
-  Fields: folder, run_date, active_night, runtime_min, loss_time_min,
+exact_dashboard.folder_days — per-folder per-date rows (use for day-level breakdown, weekday-wise, month-wise, or specific date)
+  Fields: folder, run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED — use this field directly,
+  never derive weekday from run_date yourself), month (YYYY-MM, ALREADY PRECOMPUTED — use this field
+  directly for month-on-month grouping, never derive it yourself), active_night, runtime_min, loss_time_min,
   waiting_time_min, downtime_min, spare_time_min, unplanned_time_min,
   utilization_pct, spare_capacity_pct, complexity_codes, editions
 
-exact_dashboard.daily — per-date plant-level totals (use for daily trends or plant-wide day queries)
-  Fields: run_date, runtime_min, loss_time_min, waiting_time_min,
+exact_dashboard.daily — per-date plant-level totals (use for daily trends, weekday-wise, month-wise, or plant-wide day queries)
+  Fields: run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED), month (YYYY-MM, ALREADY PRECOMPUTED —
+  use directly for month-on-month trend questions), runtime_min, loss_time_min, waiting_time_min,
   downtime_min, spare_time_min, utilization_pct, night_type
 
-towers — per-tower aggregated totals across all dates
-  Fields: tower, runtime_min, downtime_min, lost_time_min, waiting_time_min,
-  spare_time_min, active_nights, utilization_pct, downtime_run_count, uv_tower,
-  folders, editions, complexity_codes
+loss_time.all_days — per-date plant-level loss breakdown (use for month-on-month or weekday-wise
+  trend questions about the COMPONENTS of loss time: changeover, late-start, reflong)
+  Fields: run_date, weekday (ALREADY PRECOMPUTED), month (YYYY-MM, ALREADY PRECOMPUTED), runtime_min,
+  lost_time_min (= loss_time_min), waiting_time_min, available_capacity_min, loss_pct, dominant_driver,
+  loss_components (dict keyed by component name with minutes for that date), top_folders_by_loss
 
-tower_days — per-tower per-date rows
-  Fields: tower, run_date, runtime_min, downtime_min, loss_time_min,
-  waiting_time_min, spare_time_min, editions
+towers — per-tower aggregated totals across all dates
+  Fields: tower, machine, tower_name, runtime_min, downtime_min, loss_time_min, waiting_time_min,
+  change_over_time_min, late_start_time_min, reflong_downtime_min, spare_time_min,
+  active_nights, utilization_pct, downtime_run_count, loss_time_run_count, waiting_time_run_count,
+  uv_tower, folders, editions, complexity_codes
+
+tower_days — per-tower per-date rows (use for specific-date or per-tower-per-night questions; for
+  weekday PATTERN questions use tower_weekday_summary instead — tower_days is row-capped on large
+  datasets and may not cover every tower/weekday)
+  Fields: tower, run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED — use this field directly,
+  never derive weekday from run_date yourself), month (YYYY-MM, ALREADY PRECOMPUTED), plant, machine,
+  tower_name, folder, uv_tower, runtime_min, downtime_min, loss_time_min, waiting_time_min,
+  spare_time_min, change_over_time_min, late_start_time_min, reflong_time_min, utilization_pct,
+  complexity_codes, complexity_categories, editions
+
+tower_weekday_summary — per-tower per-weekday AVERAGES, already aggregated (towers x at most 7 rows,
+  always complete regardless of dataset size). Use this for any "weekday wise" / day-of-week tower
+  pattern question instead of grouping tower_days yourself.
+  Fields: tower, tower_name, weekday (Monday-Sunday), night_count, avg_runtime_min, avg_downtime_min,
+  avg_loss_time_min, avg_waiting_time_min, avg_utilization_pct
+
+tower_month_summary — per-tower per-month TOTALS/AVERAGES, already aggregated (towers x number of
+  months, always complete regardless of dataset size). Use this for any tower-level month-on-month or
+  monthly trend question instead of grouping tower_days yourself, which is row-capped on large datasets.
+  Fields: tower, tower_name, month (YYYY-MM), night_count, total_runtime_min, total_downtime_min,
+  total_loss_time_min, total_waiting_time_min, avg_utilization_pct
 
 downtime_by_reason — downtime events by reason and folder
   Fields: reason, machine, folder, count (event count), total_minutes
@@ -322,13 +446,22 @@ downtime_by_folder — total incident counts per folder
   Fields: folder, incident_count, total_minutes
 
 delayed_pf — folders with print finish past compliance cutoff (04:00 / 03:00 / 02:30)
-  Fields: folder, run_date, overrun_minutes, cutoff_time, estimated_print_finish_time, editions
+  Fields: folder, run_date, night_type (GNP/UV or SNP/non-UV, ALREADY PRECOMPUTED per row —
+  use this directly for GNP-vs-SNP-night comparisons, never join to a separate nights table),
+  overrun_minutes, cutoff_time, estimated_print_finish_time, editions
 
 editions_by_folder — unique editions printed per folder across the period
   Fields: folder, editions (list of names), edition_count
 
 editions_by_tower — unique editions printed per tower across the period
   Fields: tower, editions (list of names), edition_count
+
+book_details — per-print-job rows from master view (Book Wise + General + Down Time joined)
+  Fields: IssueID, Report Date, Run Date, Edition, Products, Machine, Folder, Plant Name,
+  Total Run Time (mnts), Total Downtime, towers_list (list), towers_str,
+  downtime_total_min, downtime_count, downtime_departments
+  Use for: "which towers did edition X use", "what product ran on folder Y",
+  "how much downtime did edition Z have", cross-referencing edition+product+tower
 
 complexity_by_code — runtime by individual C1-C15 complexity code
   Fields: code, type (SNP/GNP/SNP Complex/GNP Complex), runtime_min, is_complex
@@ -342,8 +475,10 @@ tower_downtime_reason_attribution — downtime reasons attributed to towers
 COMPUTATION NOTES:
 - "average [metric] per folder" → exact_dashboard.folders; divide total_field by active_nights
 - loss_time = changeover + late_start + reflong (NEVER includes waiting_time)
+- unscheduled time = unplanned_time_min, not loss_time
 - spare_time = spare_time_min (buffer time only, NOT unplanned_time_min)
-- SNP: C1-C3 | SNP Complex: C4 | GNP: C5-C8 | GNP Complex: C9-C15
+- Base SNP / standard: C1-C4, including SNP Complex. Base GNP / glossy / UV: C5-C15, including GNP Complex.
+- If the user explicitly asks for simple vs complex buckets, use SNP: C1-C3 | SNP Complex: C4 | GNP: C5-C8 | GNP Complex: C9-C15
 - downtime incident frequency per folder → downtime_by_folder (incident_count)
 - downtime by reason per tower → tower_downtime_reason_attribution
 - editions on a tower/folder → editions_by_tower / editions_by_folder
@@ -364,7 +499,7 @@ def _call_planner(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
         '  "metrics": ["<field names to extract, e.g. spare_time_min, active_nights>"],\n'
         '  "computation": "<plain English: what to compute, e.g. spare_time_min / active_nights for each folder>",\n'
         '  "filters": {"<field>": "<value if any filter applies, else omit>"},\n'
-        '  "group_by": "folder|tower|date|plant|reason|none",\n'
+        '  "group_by": "folder|tower|date|plant|reason|night_type|uv_tower|complexity|none",\n'
         '  "output_format": "table|single_value|list|ranked_list|comparison|trend_chart_description"\n'
         "}"
     )
@@ -386,6 +521,7 @@ def _build_chat_context(
     daily_rows: list[dict[str, Any]] | None = None,
     details: list[dict[str, Any]] | None = None,
     downtime_reasons: list[dict[str, Any]] | None = None,
+    book_details: list[dict[str, Any]] | None = None,
     question: str = "",
 ) -> dict[str, Any]:
     exact_dashboard = _build_exact_dashboard_context(
@@ -464,7 +600,7 @@ def _build_chat_context(
             "uv_tower": v["uv_tower"],
             "runtime_min": _clean_number(v["runtime"]),
             "downtime_min": _clean_number(v["downtime"]),
-            "lost_time_min": _clean_number(non_wait_lost_time),
+            "loss_time_min": _clean_number(non_wait_lost_time),
             "waiting_time_min": _clean_number(v["waiting_time"]),
             "change_over_time_min": _clean_number(v["change_over_time"]),
             "late_start_time_min": _clean_number(v["late_start_time"]),
@@ -489,6 +625,8 @@ def _build_chat_context(
     def _slim_day(row: dict[str, Any]) -> dict[str, Any]:
         return {
             "run_date": row.get("run_date"),
+            "weekday": _weekday_label(row.get("run_date")),
+            "month": _month_label(row.get("run_date")),
             "runtime_min": row.get("runtime_minutes"),
             "lost_time_min": row.get("lost_time_minutes"),
             "waiting_time_min": row.get("waiting_time_minutes"),
@@ -745,7 +883,11 @@ def _build_chat_context(
         "towers": tower_rows,
         "tower_availability": tower_availability,
         "tower_days": tower_day_rows[:1500],
+        "tower_days_all": tower_day_rows,
+        "tower_weekday_summary": _tower_weekday_summary(tower_day_rows),
+        "tower_month_summary": _tower_month_summary(tower_day_rows),
         "tower_downtime_runs": tower_downtime_runs[:1000],
+        "tower_downtime_runs_all": tower_downtime_runs,
         "tower_downtime_reason_attribution": tower_reason_attribution,
         "uv_towers": uv_towers,
         "non_uv_towers": non_uv_towers,
@@ -756,15 +898,78 @@ def _build_chat_context(
         "editions_by_date": editions_by_date,
         "editions_by_folder": editions_by_folder,
         "editions_by_tower": editions_by_tower,
+        "book_details": _select_book_details_for_llm(book_details or [], question, limit=500),
     }
 
 
-def _compact_chat_context_for_llm(context: dict[str, Any]) -> dict[str, Any]:
+def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -> dict[str, Any]:
     exact = context.get("exact_dashboard") or {}
     downtime_by_reason = context.get("downtime_by_reason") or {}
     tower_attribution = context.get("tower_downtime_reason_attribution") or {}
     malt = context.get("max_allowable_loss_time") or {}
-    exact_malt = exact.get("max_allowable_loss_time") or {}
+
+    # tower_days is per-tower-per-date and dominates payload size (hundreds of rows x ~23 fields each).
+    # It's only relevant when the question is actually about towers; for everything else (plant/folder
+    # trends, month-over-month, MALT, etc.) a small safety-net slice is enough and saves real budget
+    # toward the model's context limit, which a multi-month dataset can otherwise exceed.
+    question_cf = _clean_text(question).casefold()
+    wants_tower_detail = "tower" in question_cf
+    # Weekday-PATTERN questions are answered from tower_weekday_summary (a small, always-complete
+    # pre-aggregate), not raw tower_days, so they no longer need a large tower_days slice. Only
+    # questions needing real per-date rows (specific dates, GNP/SNP comparisons, trends) still do.
+    wants_weekday_pattern = any(
+        term in question_cf for term in ["weekday", "week day", "day of week", "day-of-week"]
+    )
+    # Month-on-month / monthly questions are answered from tower_month_summary (also a small,
+    # always-complete pre-aggregate), so they likewise don't need a large tower_days slice.
+    wants_month_pattern = any(
+        term in question_cf
+        for term in ["month on month", "month-on-month", "monthly", "per month", "each month", "month wise", "month-wise"]
+    )
+    wants_specific_day_grain = any(
+        term in question_cf
+        for term in [
+            "daily", "per day", "per night", "each night", "each day", "specific date",
+            "gnp", "snp", " night", "nightly",
+        ]
+    ) or ("trend" in question_cf and not wants_weekday_pattern and not wants_month_pattern)
+    wants_day_grain = wants_weekday_pattern or wants_month_pattern or wants_specific_day_grain
+    if wants_tower_detail and wants_specific_day_grain:
+        tower_days_limit = 220
+    elif wants_tower_detail and (wants_weekday_pattern or wants_month_pattern):
+        # The pattern-specific summary table covers this; tower_days is just a small safety net here.
+        tower_days_limit = 70
+    elif wants_tower_detail:
+        tower_days_limit = 100
+    else:
+        tower_days_limit = 40
+    # Each pre-aggregated summary only needs to be full-sized when its own pattern is asked about —
+    # otherwise a small fallback (still enough for a quick lookup) keeps a generic tower question from
+    # paying for both summaries at once.
+    tower_weekday_summary_limit = 500 if (wants_tower_detail and wants_weekday_pattern) else (60 if wants_tower_detail else 10)
+    tower_month_summary_limit = 500 if (wants_tower_detail and wants_month_pattern) else (60 if wants_tower_detail else 10)
+
+    # The remaining tables below are each specific to one kind of question (editions, delayed print
+    # finish, MALT, GNP/SNP night classification, folder day-grain detail) but were always sent in full
+    # regardless of relevance. On a multi-plant, multi-month dataset that pushes the total payload past
+    # the model's input limit even before the system prompt is added — so each is now full-sized only
+    # when the question actually needs it, with a small safety-net slice otherwise.
+    wants_folder_detail = "folder" in question_cf
+    wants_edition = "edition" in question_cf
+    wants_delay = any(
+        term in question_cf
+        for term in ["delay", "late", "overrun", "finish", "04:00", "03:00", "02:30", "cutoff", "compliance"]
+    )
+    wants_malt = any(term in question_cf for term in ["malt", "allowable loss", "maximum allowable"])
+    wants_night_class = any(
+        term in question_cf for term in ["gnp", "snp", "uv", "night", "glossy", "standard"]
+    )
+
+    folder_days_limit = 150 if (wants_folder_detail or wants_day_grain) else 30
+    delayed_pf_limit = 120 if wants_delay else 20
+    malt_rows_limit = 120 if wants_malt else 15
+    night_detail_limit = 120 if wants_night_class else 15
+    editions_limit = 200 if wants_edition else 30
 
     return {
         "scope": context.get("scope") or {},
@@ -775,16 +980,12 @@ def _compact_chat_context_for_llm(context: dict[str, Any]) -> dict[str, Any]:
             "summary": exact.get("summary") or {},
             "daily": _compact_rows(exact.get("daily") or [], limit=370),
             "folders": _compact_rows(exact.get("folders") or [], limit=200),
-            "folder_days": _compact_rows(exact.get("folder_days") or [], limit=150),
+            "folder_days": _compact_rows(exact.get("folder_days") or [], limit=folder_days_limit),
             "complexity_downtime_by_code": _compact_rows(exact.get("complexity_downtime_by_code") or [], limit=30),
-            "night_classification": exact.get("night_classification") or {},
-            "delayed_pf": _compact_rows(exact.get("delayed_pf") or [], limit=120),
-            "max_allowable_loss_time": {
-                "formula": exact_malt.get("formula"),
-                "percentile_policy": exact_malt.get("percentile_policy"),
-                "rows": _compact_rows(exact_malt.get("rows") or [], limit=120),
-                "night_exceedances": _compact_rows(exact_malt.get("night_exceedances") or [], limit=120),
-            },
+            # night_classification, delayed_pf, and max_allowable_loss_time are computed from the same
+            # inputs as the top-level uv_nights / delayed_pf / max_allowable_loss_time tables below and
+            # are byte-for-byte identical — they're intentionally omitted here (use the top-level tables
+            # instead) since duplicating them roughly doubled this section's size for no extra information.
         },
         "folders": _compact_rows(context.get("folders") or [], limit=200),
         "unused_folders": context.get("unused_folders") or [],
@@ -813,27 +1014,54 @@ def _compact_chat_context_for_llm(context: dict[str, Any]) -> dict[str, Any]:
         "max_allowable_loss_time": {
             "formula": malt.get("formula"),
             "percentile_policy": malt.get("percentile_policy"),
-            "rows": _compact_rows(malt.get("rows") or [], limit=120),
-            "night_exceedances": _compact_rows(malt.get("night_exceedances") or [], limit=120),
+            "rows": _compact_rows(malt.get("rows") or [], limit=malt_rows_limit),
+            "night_exceedances": _compact_rows(malt.get("night_exceedances") or [], limit=malt_rows_limit),
         },
+        # towers already carries a uv_tower boolean per row — uv_towers/non_uv_towers would just be
+        # duplicate copies of the same rows, so they're intentionally omitted from the LLM-facing context.
         "towers": _compact_rows(context.get("towers") or [], limit=200),
+        # Per-tower per-date rows (includes a precomputed weekday field) — needed for any
+        # day-of-week, trend, or specific-date tower question. Previously built but never sent
+        # to the model, even though the planner's own schema told it this table existed.
+        "tower_days": _compact_rows(
+            context.get("tower_days_all") or context.get("tower_days") or [], limit=tower_days_limit
+        ),
+        # Complete per-tower per-weekday averages (towers x at most 7 rows) — always sent in full since
+        # it's small regardless of dataset size. Prefer this over raw tower_days for weekday-pattern
+        # questions, since tower_days itself is row-capped above and may not cover every tower/weekday
+        # on a large multi-plant/multi-month dataset.
+        "tower_weekday_summary": _compact_rows(
+            context.get("tower_weekday_summary") or [], limit=tower_weekday_summary_limit
+        ),
+        # Complete per-tower per-month totals/averages (towers x number of months) — same rationale as
+        # tower_weekday_summary, but grouped by month. Prefer this over raw tower_days for tower-level
+        # month-on-month questions.
+        "tower_month_summary": _compact_rows(
+            context.get("tower_month_summary") or [], limit=tower_month_summary_limit
+        ),
         "tower_availability": context.get("tower_availability") or {},
         "tower_downtime_reason_attribution": {
             "attribution_note": tower_attribution.get("attribution_note"),
-            "by_tower": _compact_rows(tower_attribution.get("by_tower") or [], limit=100),
-            "by_tower_reason": _compact_rows(tower_attribution.get("by_tower_reason") or [], limit=160),
+            "by_tower": _compact_rows(tower_attribution.get("by_tower") or [], limit=60),
+            "by_tower_reason": _compact_rows(tower_attribution.get("by_tower_reason") or [], limit=60),
         },
-        "uv_towers": _compact_rows(context.get("uv_towers") or [], limit=100),
-        "non_uv_towers": _compact_rows(context.get("non_uv_towers") or [], limit=100),
-        "delayed_pf": _compact_rows(context.get("delayed_pf") or [], limit=120),
-        "uv_nights": context.get("uv_nights") or {},
+        "delayed_pf": _compact_rows(context.get("delayed_pf") or [], limit=delayed_pf_limit),
+        "uv_nights": {
+            "definition": (context.get("uv_nights") or {}).get("definition"),
+            # gnp_nights/snp_nights duplicated as uv_nights/non_uv_nights elsewhere in the raw context —
+            # only the canonical pair is sent here.
+            "gnp_nights": (context.get("uv_nights") or {}).get("gnp_nights") or [],
+            "snp_nights": (context.get("uv_nights") or {}).get("snp_nights") or [],
+            "nights": _compact_rows((context.get("uv_nights") or {}).get("nights") or [], limit=night_detail_limit),
+        },
         "downtime_by_reason": {
             "top_reasons": _compact_rows(downtime_by_reason.get("top_reasons") or [], limit=50),
         },
         "downtime_by_folder": _compact_rows(context.get("downtime_by_folder") or [], limit=120),
-        "editions_by_date": _compact_rows(context.get("editions_by_date") or [], limit=370),
-        "editions_by_folder": _compact_rows(context.get("editions_by_folder") or [], limit=200),
-        "editions_by_tower": _compact_rows(context.get("editions_by_tower") or [], limit=200),
+        "editions_by_date": _compact_rows(context.get("editions_by_date") or [], limit=editions_limit),
+        "editions_by_folder": _compact_rows(context.get("editions_by_folder") or [], limit=editions_limit),
+        "editions_by_tower": _compact_rows(context.get("editions_by_tower") or [], limit=editions_limit),
+        "book_details": _compact_rows(context.get("book_details") or [], limit=120),
     }
 
 
@@ -893,6 +1121,7 @@ def _build_exact_dashboard_context(
     exact_daily_rows = _exact_daily_rows(daily_rows, folder_rows, dates, folder_keys)
     exact_folder_rows = _exact_folder_rows(folder_rows, dates)
     exact_folder_day_rows, folder_day_note = _exact_folder_day_rows(folder_rows, question)
+    exact_folder_day_rows_all = [_exact_folder_day_row(row) for row in folder_rows]
     malt = _build_malt_analysis(folder_rows)
     night_classification = _build_gnp_night_classification(folder_rows, dates)
     delayed_pf_rows = _build_delayed_pf_rows(folder_rows)
@@ -948,6 +1177,7 @@ def _build_exact_dashboard_context(
         "daily": exact_daily_rows,
         "folders": exact_folder_rows,
         "folder_days": exact_folder_day_rows,
+        "folder_days_all": exact_folder_day_rows_all,
         "folder_day_note": folder_day_note,
         "complexity_downtime_by_code": complexity_downtime_by_code,
         "night_classification": night_classification,
@@ -965,6 +1195,15 @@ def _try_deterministic_chat_answer(message: str, context: dict[str, Any]) -> str
     question = _clean_text(message).casefold()
     if not question:
         return ""
+
+    if _is_night_type_time_comparison_question(question):
+        return _answer_night_type_time_comparison_question(question, context)
+
+    if _is_base_category_comparison_question(question):
+        return _answer_base_category_comparison_question(question, context)
+
+    if _is_metric_concentration_question(question):
+        return _answer_metric_concentration_question(question, context)
 
     if _is_daily_per_folder_average_metric_question(question):
         return _answer_daily_per_folder_average_metric_question(question, context)
@@ -984,6 +1223,478 @@ def _try_deterministic_chat_answer(message: str, context: dict[str, Any]) -> str
     return ""
 
 
+def _is_base_category_comparison_question(question: str) -> bool:
+    has_category_pair = (
+        ("snp" in question and "gnp" in question)
+        or ("standard" in question and "glossy" in question)
+        or ("non-uv" in question and "uv" in question)
+        or ("non uv" in question and "uv" in question)
+    )
+    has_comparison = any(
+        term in question
+        for term in ["compare", "comparison", "versus", " vs ", "more", "less", "difference", "by how much", "carry"]
+    )
+    has_time_metric = any(
+        term in question
+        for term in [
+            "loss", "lost", "changeover", "change over", "downtime", "down time",
+            "runtime", "run time", "wait", "spare", "utilized", "utilised",
+        ]
+    )
+    return has_category_pair and has_comparison and has_time_metric
+
+
+def _is_night_type_time_comparison_question(question: str) -> bool:
+    has_night_pair = (
+        ("uv" in question and ("non-uv" in question or "non uv" in question))
+        or ("gnp" in question and "snp" in question and "night" in question)
+        or ("glossy" in question and "standard" in question and "night" in question)
+    )
+    has_comparison = any(
+        term in question
+        for term in [
+            "compare", "comparison", "versus", " vs ", "more", "less",
+            "difference", "by how much", "extra", "adds", "added",
+        ]
+    )
+    has_time_metric = any(
+        term in question
+        for term in [
+            "loss", "lost", "changeover", "change over", "downtime", "down time",
+            "runtime", "run time", "wait", "spare", "utilized", "utilised",
+        ]
+    )
+    return has_night_pair and has_comparison and has_time_metric
+
+
+def _answer_night_type_time_comparison_question(question: str, context: dict[str, Any]) -> str:
+    exact = context.get("exact_dashboard") or {}
+    rows = exact.get("daily") or context.get("daily") or []
+    if not rows:
+        return ""
+
+    metric_specs = _base_category_metric_specs(question)
+    if not metric_specs:
+        metric_specs = [("loss_time_min", "Loss Time")]
+
+    buckets = {
+        "uv": _new_night_type_bucket("UV / GNP night"),
+        "non_uv": _new_night_type_bucket("Non-UV / SNP night"),
+    }
+
+    for row in rows:
+        run_date = _clean_text(row.get("run_date"))
+        if not run_date:
+            continue
+        is_uv = bool(row.get("uv_night") or row.get("gnp_night"))
+        night_type = _clean_text(row.get("night_type")).casefold()
+        if "snp" in night_type or "non-uv" in night_type or "non uv" in night_type:
+            is_uv = False
+        elif "gnp" in night_type or "uv" in night_type:
+            is_uv = True
+
+        bucket = buckets["uv" if is_uv else "non_uv"]
+        bucket["night_count"] += 1
+        bucket["dates"].add(run_date)
+        for metric_key, _ in metric_specs:
+            if metric_key == "utilized_time_min":
+                value = (
+                    _number(row.get("runtime_min"))
+                    + _number(row.get("loss_time_min"))
+                    + _number(row.get("downtime_min"))
+                )
+            else:
+                value = _number(row.get(metric_key))
+            bucket[metric_key] += value
+
+    uv_count = buckets["uv"]["night_count"]
+    non_uv_count = buckets["non_uv"]["night_count"]
+    if uv_count <= 0 or non_uv_count <= 0:
+        return "Not available in the current data. The selected window needs both UV/GNP nights and non-UV/SNP nights for this comparison."
+
+    lines = [
+        (
+            f"**Verdict:** Compared on average per night, UV/GNP nights are measured against "
+            f"non-UV/SNP nights across **{uv_count} UV** and **{non_uv_count} non-UV** nights."
+        ),
+        "",
+        "| Metric | UV/GNP avg per night | Non-UV/SNP avg per night | Extra on UV night | UV/GNP total | Non-UV/SNP total |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+
+    for metric_key, label in metric_specs:
+        uv_total = _number(buckets["uv"].get(metric_key))
+        non_uv_total = _number(buckets["non_uv"].get(metric_key))
+        uv_avg = uv_total / uv_count if uv_count else 0.0
+        non_uv_avg = non_uv_total / non_uv_count if non_uv_count else 0.0
+        delta = uv_avg - non_uv_avg
+        lines.append(
+            "| "
+            + " | ".join([
+                label,
+                _format_chat_minutes(uv_avg),
+                _format_chat_minutes(non_uv_avg),
+                _format_signed_chat_minutes(delta),
+                _format_chat_minutes(uv_total),
+                _format_chat_minutes(non_uv_total),
+            ])
+            + " |"
+        )
+
+    lines.extend([
+        "",
+        "Definition: a UV/GNP night is any date where at least one folder ran GNP or GNP Complex editions (C5-C15). If no C5-C15 edition ran, it is treated as a non-UV/SNP night.",
+    ])
+    return "\n".join(lines)
+
+
+def _new_night_type_bucket(label: str) -> dict[str, Any]:
+    return {
+        "label": label,
+        "dates": set(),
+        "night_count": 0,
+        "runtime_min": 0.0,
+        "loss_time_min": 0.0,
+        "change_over_time_min": 0.0,
+        "downtime_min": 0.0,
+        "waiting_time_min": 0.0,
+        "spare_time_min": 0.0,
+        "utilized_time_min": 0.0,
+    }
+
+
+def _answer_base_category_comparison_question(question: str, context: dict[str, Any]) -> str:
+    exact = context.get("exact_dashboard") or {}
+    rows = exact.get("folder_days_all") or exact.get("folder_days") or []
+    if not rows:
+        return ""
+
+    metric_specs = _base_category_metric_specs(question)
+    if not metric_specs:
+        metric_specs = [("loss_time_min", "Loss Time")]
+
+    buckets = {
+        "SNP": _new_base_category_bucket("SNP / standard", "C1-C4, including SNP Complex"),
+        "GNP": _new_base_category_bucket("GNP / glossy", "C5-C15, including GNP Complex"),
+    }
+
+    for row in rows:
+        segments = row.get("runtime_segments") or []
+        if not isinstance(segments, list) or not segments:
+            continue
+
+        segment_total = sum(_number(segment.get("minutes")) for segment in segments if isinstance(segment, dict))
+        if segment_total <= 0:
+            continue
+
+        category_runtime = {"SNP": 0.0, "GNP": 0.0}
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            category = _base_category_for_segment(segment)
+            if category in category_runtime:
+                category_runtime[category] += _number(segment.get("minutes"))
+
+        run_date = _clean_text(row.get("run_date"))
+        for category, runtime_minutes in category_runtime.items():
+            if runtime_minutes <= 0:
+                continue
+            share = runtime_minutes / segment_total
+            bucket = buckets[category]
+            bucket["runtime_min"] += runtime_minutes
+            bucket["folder_day_count"] += 1
+            if run_date:
+                bucket["dates"].add(run_date)
+            for metric_key, _ in metric_specs:
+                if metric_key == "runtime_min":
+                    bucket[metric_key] += runtime_minutes
+                elif metric_key == "utilized_time_min":
+                    utilized = (
+                        _number(row.get("runtime_min"))
+                        + _number(row.get("loss_time_min"))
+                        + _number(row.get("downtime_min"))
+                    )
+                    bucket[metric_key] += utilized * share
+                else:
+                    bucket[metric_key] += _number(row.get(metric_key)) * share
+
+    if not buckets["SNP"]["folder_day_count"] and not buckets["GNP"]["folder_day_count"]:
+        return "Not available in the current data."
+
+    denominator_label = "folder-day" if any(term in question for term in ["per run", "per folder-day", "per folder day"]) else "night"
+    lines = [
+        "Using current dashboard filters and printing-window metrics.",
+        "SNP/standard includes C1-C4; GNP/glossy includes C5-C15. Complex variants are included by default.",
+        "If a folder-day contains both categories, time is allocated by runtime share. Wait, spare, and unplanned time are excluded from loss time.",
+        "",
+    ]
+
+    headers = ["Category", "Nights", "Folder-days", "Runtime"]
+    for _, label in metric_specs:
+        if label != "Run Time":
+            headers.extend([f"{label} total", f"{label}/{denominator_label}"])
+    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+
+    for key in ["SNP", "GNP"]:
+        bucket = buckets[key]
+        denominator = _base_category_denominator(bucket, denominator_label)
+        values = [
+            bucket["label"],
+            str(len(bucket["dates"])),
+            str(bucket["folder_day_count"]),
+            _format_chat_minutes(bucket["runtime_min"]),
+        ]
+        for metric_key, label in metric_specs:
+            if label == "Run Time":
+                continue
+            total_value = bucket.get(metric_key, 0.0)
+            avg_value = total_value / denominator if denominator > 0 else 0.0
+            values.extend([_format_chat_minutes(total_value), _format_chat_minutes(avg_value)])
+        lines.append("| " + " | ".join(values) + " |")
+
+    comparison_metric = _primary_base_category_metric(metric_specs)
+    if comparison_metric:
+        metric_key, label = comparison_metric
+        snp_avg = _base_category_average(buckets["SNP"], metric_key, denominator_label)
+        gnp_avg = _base_category_average(buckets["GNP"], metric_key, denominator_label)
+        delta = gnp_avg - snp_avg
+        direction = "more" if delta > 0 else "less" if delta < 0 else "the same"
+        if direction == "the same":
+            lines.append(f"\nConclusion: GNP/glossy and SNP/standard have the same {label.lower()} per {denominator_label}.")
+        else:
+            pct = _percentage(abs(delta), snp_avg) if snp_avg > 0 else 0
+            lines.append(
+                f"\nConclusion: GNP/glossy carries {_format_chat_minutes(abs(delta))} {direction} "
+                f"{label.lower()} per {denominator_label} than SNP/standard"
+                f"{f' ({pct}% difference)' if pct else ''}."
+            )
+
+    if len(metric_specs) > 1:
+        extra_lines = []
+        for metric_key, label in metric_specs:
+            if comparison_metric and metric_key == comparison_metric[0]:
+                continue
+            snp_avg = _base_category_average(buckets["SNP"], metric_key, denominator_label)
+            gnp_avg = _base_category_average(buckets["GNP"], metric_key, denominator_label)
+            delta = gnp_avg - snp_avg
+            if abs(delta) > 0:
+                direction = "more" if delta > 0 else "less"
+                extra_lines.append(
+                    f"{label}: GNP/glossy is {_format_chat_minutes(abs(delta))} {direction} per {denominator_label}."
+                )
+        if extra_lines:
+            lines.append("Additional comparison: " + " ".join(extra_lines))
+
+    return "\n".join(lines)
+
+
+def _base_category_metric_specs(question: str) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str]] = []
+    has_loss = "loss" in question or "lost" in question
+    has_changeover = "changeover" in question or "change over" in question
+    if has_loss or has_changeover:
+        specs.append(("loss_time_min", "Loss Time"))
+    if has_changeover:
+        specs.append(("change_over_time_min", "Changeover Time"))
+    if "downtime" in question or "down time" in question:
+        specs.append(("downtime_min", "Downtime"))
+    if "runtime" in question or "run time" in question:
+        specs.append(("runtime_min", "Run Time"))
+    if "wait" in question:
+        specs.append(("waiting_time_min", "Wait Time"))
+    if "spare" in question:
+        specs.append(("spare_time_min", "Spare Time"))
+    if "utilized" in question or "utilised" in question:
+        specs.append(("utilized_time_min", "Utilized Time"))
+
+    deduped: list[tuple[str, str]] = []
+    for spec in specs:
+        if spec not in deduped:
+            deduped.append(spec)
+    return deduped
+
+
+def _new_base_category_bucket(label: str, included_codes: str) -> dict[str, Any]:
+    return {
+        "label": label,
+        "included_codes": included_codes,
+        "dates": set(),
+        "folder_day_count": 0,
+        "runtime_min": 0.0,
+        "loss_time_min": 0.0,
+        "change_over_time_min": 0.0,
+        "downtime_min": 0.0,
+        "waiting_time_min": 0.0,
+        "spare_time_min": 0.0,
+        "utilized_time_min": 0.0,
+    }
+
+
+def _base_category_for_segment(segment: dict[str, Any]) -> str:
+    code_number = re_fullmatch_complexity(segment.get("complexity_code"))
+    if code_number:
+        number = int(code_number)
+        if 1 <= number <= 4:
+            return "SNP"
+        if 5 <= number <= 15:
+            return "GNP"
+
+    text = " ".join([
+        _clean_text(segment.get("type")),
+        _clean_text(segment.get("category")),
+        _clean_text(segment.get("label")),
+    ]).casefold()
+    if "gnp" in text or "glossy" in text or "uv" in text:
+        return "GNP"
+    if "snp" in text or "standard" in text:
+        return "SNP"
+    return ""
+
+
+def _base_category_denominator(bucket: dict[str, Any], denominator_label: str) -> int:
+    if denominator_label == "folder-day":
+        return int(bucket.get("folder_day_count") or 0)
+    return len(bucket.get("dates") or [])
+
+
+def _base_category_average(bucket: dict[str, Any], metric_key: str, denominator_label: str) -> float:
+    denominator = _base_category_denominator(bucket, denominator_label)
+    if denominator <= 0:
+        return 0.0
+    return _number(bucket.get(metric_key)) / denominator
+
+
+def _primary_base_category_metric(metric_specs: list[tuple[str, str]]) -> tuple[str, str] | None:
+    for metric_key, label in metric_specs:
+        if metric_key == "loss_time_min":
+            return metric_key, label
+    return metric_specs[0] if metric_specs else None
+
+
+def _is_metric_concentration_question(question: str) -> bool:
+    has_distribution = any(
+        term in question
+        for term in ["spread", "concentrated", "concentration", "clustered", "cluster", "localized", "localised"]
+    )
+    return has_distribution and _concentration_metric_spec(question) is not None
+
+
+def _answer_metric_concentration_question(question: str, context: dict[str, Any]) -> str:
+    spec = _concentration_metric_spec(question)
+    if not spec:
+        return ""
+
+    metric_key, label, definition_note = spec
+    exact = context.get("exact_dashboard") or {}
+    folder_rows = exact.get("folders") or context.get("folders") or []
+    rows = []
+    for row in folder_rows:
+        resource = _clean_text(row.get("resource") or row.get("folder"))
+        value = _number(row.get(metric_key))
+        if resource and value > 0:
+            rows.append({"resource": resource, "value": value})
+
+    if not rows:
+        return f"No {label.lower()} is present in the current dashboard context."
+
+    rows.sort(key=lambda row: (-row["value"], row["resource"]))
+    total = sum(row["value"] for row in rows)
+    top = rows[0]
+    top3 = rows[:3]
+    top_share = _percentage(top["value"], total)
+    top3_share = _percentage(sum(row["value"] for row in top3), total)
+    active_folder_count = len(rows)
+    classification = _concentration_label(top_share, top3_share, active_folder_count)
+    rule_hit = _concentration_rule_hit(top_share, top3_share, active_folder_count)
+
+    lines = [
+        "Verdict",
+        "",
+        "| Metric | Pattern | Total | Folders with value | Top folder | Top folder share | Top 3 share | Rule hit |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        (
+            f"| {label} | {classification} | {_format_chat_minutes(total)} | {active_folder_count} | "
+            f"{top['resource']} | {top_share}% | {top3_share}% | {rule_hit} |"
+        ),
+        "",
+        "Top contributors",
+        "",
+        "| Rank | Folder | Minutes | Share | Cumulative share |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    cumulative = 0.0
+    for index, row in enumerate(rows[:5], start=1):
+        cumulative += row["value"]
+        lines.append(
+            f"| {index} | {row['resource']} | {_format_chat_minutes(row['value'])} | "
+            f"{_percentage(row['value'], total)}% | {_percentage(cumulative, total)}% |"
+        )
+    lines.extend([
+        "",
+        "Definition",
+        "",
+        "| Term | Applied meaning |",
+        "| --- | --- |",
+        f"| {label} | {definition_note} |",
+    ])
+    return "\n".join(lines)
+
+
+def _concentration_metric_spec(question: str) -> tuple[str, str, str] | None:
+    if any(term in question for term in ["unscheduled", "un-scheduled", "unplanned", "un-planned", "idle capacity"]):
+        return (
+            "unplanned_time_min",
+            "Unplanned Time",
+            "Unscheduled time is treated as Unplanned Time, not Loss Time.",
+        )
+    if "downtime" in question or "down time" in question:
+        return ("downtime_min", "Downtime", "Downtime is unplanned stoppage during active production.")
+    if "wait" in question:
+        return ("waiting_time_min", "Wait Time", "Wait Time is separate from Loss Time.")
+    if "spare" in question:
+        return ("spare_time_min", "Spare Time", "Spare Time is remaining available capacity.")
+    if "runtime" in question or "run time" in question:
+        return ("runtime_min", "Run Time", "Run Time is productive print time.")
+    if "utilized" in question or "utilised" in question:
+        return (
+            "runtime_min",
+            "Run Time",
+            "For concentration by folder, runtime is used as the primary utilization driver.",
+        )
+    if "loss" in question or "lost" in question:
+        return (
+            "loss_time_min",
+            "Loss Time",
+            "Loss Time is changeover + LPR-to-start + reflong; it excludes Wait Time and Unplanned Time.",
+        )
+    return None
+
+
+def _concentration_label(top_share: float, top3_share: float, active_folder_count: int) -> str:
+    if active_folder_count <= 1:
+        return "fully concentrated"
+    if top_share >= 50 or top3_share >= 80:
+        return "highly concentrated"
+    if top_share >= 35 or top3_share >= 65:
+        return "moderately concentrated"
+    return "spread across folders"
+
+
+def _concentration_rule_hit(top_share: float, top3_share: float, active_folder_count: int) -> str:
+    if active_folder_count <= 1:
+        return "Only one folder has non-zero minutes"
+    if top_share >= 50:
+        return "Top folder >= 50%"
+    if top3_share >= 80:
+        return "Top 3 >= 80%"
+    if top_share >= 35:
+        return "Top folder >= 35%"
+    if top3_share >= 65:
+        return "Top 3 >= 65%"
+    return "No concentration threshold crossed"
+
+
 def _is_weak_chat_answer(answer: str) -> bool:
     text = _clean_text(answer).casefold()
     if not text:
@@ -1001,10 +1712,18 @@ def _is_weak_chat_answer(answer: str) -> bool:
     return any(phrase in text for phrase in weak_phrases)
 
 
-def _fallback_answer_from_context(message: str, context: dict[str, Any]) -> str:
+def _fallback_answer_from_context(
+    message: str,
+    context: dict[str, Any],
+    plan: dict[str, Any] | None = None,
+) -> str:
     question = _clean_text(message).casefold()
     if not question:
         return ""
+
+    planned = _answer_from_plan(plan, message, context)
+    if planned:
+        return planned
 
     deterministic = _try_deterministic_chat_answer(message, context)
     if deterministic:
@@ -1034,6 +1753,401 @@ def _fallback_answer_from_context(message: str, context: dict[str, Any]) -> str:
     return ""
 
 
+def _answer_from_plan(plan: dict[str, Any] | None, message: str, context: dict[str, Any]) -> str:
+    if not isinstance(plan, dict) or not plan:
+        return ""
+
+    source_key = _clean_text(plan.get("primary_source"))
+    rows = _rows_for_plan_source(source_key, context)
+    if not rows:
+        return ""
+
+    rows = _apply_plan_filters(rows, plan.get("filters") or {})
+    if not rows:
+        return "No rows match the requested filters in the current dashboard context."
+
+    metric_fields = _plan_metric_fields(plan, rows, message)
+    group_field = _plan_group_field(plan, rows, message)
+    intent = _clean_text(plan.get("intent")).casefold()
+    output_format = _clean_text(plan.get("output_format")).casefold()
+    computation = _clean_text(plan.get("computation")).casefold()
+    question = _clean_text(message).casefold()
+    if intent in {"trend", "prediction"}:
+        return ""
+    # A "comparison" intent asking for a rate/frequency/percentage needs a denominator that
+    # usually isn't in primary_source's matched rows alone (e.g. "how often" = matched-row count
+    # ÷ total count per group, where the total often lives in a different table) — the count-only
+    # shortcut below can only return the numerator, which looks like an answer but silently omits
+    # the actual comparison. Defer to the LLM (which gets the full AGENT PLAN + context) instead.
+    wants_rate = any(
+        term in computation for term in ["percentage", "frequency", "ratio", "rate", "%", "how often"]
+    ) or any(term in question for term in ["percentage", "frequency", "ratio", "how often"])
+    if intent == "comparison" and wants_rate:
+        return ""
+    wants_average = (
+        intent == "average"
+        or "average" in computation
+        or "average" in question
+        or re.search(r"\bavg\b", computation)
+        or re.search(r"\bavg\b", question)
+        or ("divide" in computation and any(term in computation for term in ["number of", "count of", "row", "code"]))
+    )
+    wants_count = intent == "count" or (not metric_fields and any(term in computation for term in ["count", "how many"]))
+    wants_ranking = intent == "ranking" or output_format == "ranked_list"
+    wants_comparison = intent == "comparison" or output_format == "comparison" or group_field
+
+    if wants_count:
+        if group_field:
+            counts: dict[str, int] = {}
+            for row in rows:
+                key = _plan_group_value(row, group_field)
+                counts[key] = counts.get(key, 0) + 1
+            ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+            return _format_plan_count_answer(source_key, group_field, ranked)
+        return f"Count from {source_key}: {len(rows)}"
+
+    if not metric_fields:
+        return ""
+
+    if group_field or wants_comparison or wants_ranking:
+        group_field = group_field or _default_group_field(rows)
+        if not group_field:
+            return ""
+        grouped = _aggregate_plan_rows(rows, metric_fields, group_field, wants_average)
+        if not grouped:
+            return ""
+        if wants_ranking and metric_fields:
+            metric = metric_fields[0]
+            grouped = sorted(grouped, key=lambda row: -_number(row.get(metric)))
+        return _format_plan_grouped_answer(source_key, metric_fields, group_field, grouped, wants_average)
+
+    totals = {
+        metric: _clean_number(sum(_number(row.get(metric)) for row in rows))
+        for metric in metric_fields
+    }
+    if wants_average:
+        totals = {
+            metric: _clean_number(_number(value) / len(rows)) if rows else 0
+            for metric, value in totals.items()
+    }
+    label = "Average" if wants_average else "Total"
+    parts = [
+        f"{_humanize_field(metric)}: {_format_plan_metric_value(metric, value)}"
+        for metric, value in totals.items()
+    ]
+    return f"{label} from {source_key}: " + " | ".join(parts)
+
+
+def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+    key = source_key.casefold()
+    exact = context.get("exact_dashboard") or {}
+    source_map: dict[str, Any] = {
+        "exact_dashboard.folders": exact.get("folders"),
+        "exact_dashboard.folder_days": exact.get("folder_days_all") or exact.get("folder_days"),
+        "exact_dashboard.daily": exact.get("daily"),
+        "folders": context.get("folders"),
+        "towers": context.get("towers"),
+        "tower_days": context.get("tower_days_all") or context.get("tower_days"),
+        "tower_weekday_summary": context.get("tower_weekday_summary"),
+        "tower_month_summary": context.get("tower_month_summary"),
+        "tower_downtime_runs": context.get("tower_downtime_runs_all") or context.get("tower_downtime_runs"),
+        "downtime_by_folder": context.get("downtime_by_folder"),
+        "delayed_pf": context.get("delayed_pf"),
+        "editions_by_date": context.get("editions_by_date"),
+        "editions_by_folder": context.get("editions_by_folder"),
+        "editions_by_tower": context.get("editions_by_tower"),
+        "book_details": context.get("book_details"),
+        "complexity_by_code": context.get("complexity_by_code"),
+        "complexity_downtime_by_code": context.get("complexity_downtime_by_code"),
+        "complexity_vs_loss": context.get("complexity_vs_loss"),
+        "max_allowable_loss_time": (context.get("max_allowable_loss_time") or {}).get("rows"),
+        "max_allowable_loss_time.rows": (context.get("max_allowable_loss_time") or {}).get("rows"),
+        "max_allowable_loss_time.night_exceedances": (context.get("max_allowable_loss_time") or {}).get("night_exceedances"),
+        "tower_downtime_reason_attribution.by_tower": (context.get("tower_downtime_reason_attribution") or {}).get("by_tower"),
+        "tower_downtime_reason_attribution.by_tower_reason": (context.get("tower_downtime_reason_attribution") or {}).get("by_tower_reason"),
+        "loss_time.all_days": (context.get("loss_time") or {}).get("all_days"),
+    }
+    downtime_by_reason = context.get("downtime_by_reason") or {}
+    source_map["downtime_by_reason"] = downtime_by_reason.get("top_reasons") or downtime_by_reason.get("by_machine_folder")
+    rows = source_map.get(key)
+    if isinstance(rows, list):
+        return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _apply_plan_filters(rows: list[dict[str, Any]], filters: Any) -> list[dict[str, Any]]:
+    if not isinstance(filters, dict) or not filters:
+        return rows
+    selected = rows
+    for field, expected in filters.items():
+        if expected in (None, "", [], {}):
+            continue
+        field_name = _resolve_row_field(selected, _clean_text(field))
+        if not field_name:
+            continue
+        expected_values = expected if isinstance(expected, list) else [expected]
+        expected_texts = [_clean_text(value).casefold() for value in expected_values if _clean_text(value)]
+        if not expected_texts:
+            continue
+        selected = [
+            row for row in selected
+            if any(expected_text in _row_value_text(row.get(field_name)).casefold() for expected_text in expected_texts)
+        ]
+    return selected
+
+
+def _plan_metric_fields(plan: dict[str, Any], rows: list[dict[str, Any]], message: str) -> list[str]:
+    fields: list[str] = []
+    for metric in plan.get("metrics") or []:
+        field = _resolve_row_field(rows, _clean_text(metric))
+        if field and field not in fields and _field_has_numeric_values(rows, field):
+            fields.append(field)
+
+    if fields:
+        return fields
+
+    question = _clean_text(message).casefold()
+    metric_aliases = [
+        ("runtime_min", ["runtime", "run time", "run"]),
+        ("runtime_minutes", ["runtime", "run time", "run"]),
+        ("downtime_min", ["downtime", "down time"]),
+        ("allocated_downtime_min", ["downtime", "down time"]),
+        ("loss_time_min", ["loss time", "lost time", "loss"]),
+        ("lost_time_min", ["loss time", "lost time", "loss"]),
+        ("waiting_time_min", ["wait time", "waiting time", "wait"]),
+        ("spare_time_min", ["spare time", "spare"]),
+        ("utilization_pct", ["utilization", "utilisation"]),
+        ("print_order", ["print order", "po", "copies"]),
+        ("edition_count", ["edition"]),
+        ("event_count", ["event", "incident", "count"]),
+        ("count", ["event", "incident", "count"]),
+        ("total_minutes", ["minutes", "time"]),
+    ]
+    for field, aliases in metric_aliases:
+        resolved = _resolve_row_field(rows, field)
+        if resolved and _field_has_numeric_values(rows, resolved) and any(alias in question for alias in aliases):
+            fields.append(resolved)
+            break
+    return fields
+
+
+def _plan_group_field(plan: dict[str, Any], rows: list[dict[str, Any]], message: str) -> str:
+    group_by = _clean_text(plan.get("group_by"))
+    computation = _clean_text(plan.get("computation")).casefold()
+    question = _clean_text(message).casefold()
+    source = _clean_text(plan.get("primary_source")).casefold()
+
+    candidates: list[str] = []
+    if group_by and group_by != "none":
+        candidates.append(group_by)
+
+    # Night classification (GNP/UV vs SNP/non-UV) and tower UV status are checked BEFORE the
+    # generic complexity-code heuristic below: "GNP nights" means night_type, not a breakdown by
+    # individual C-code, even though the question also contains "gnp"/"snp".
+    if "night" in question and any(term in question for term in ["gnp", "snp", "uv"]):
+        candidates.append("night_type")
+    if "tower" in question and any(term in question for term in ["uv", "non-uv", "non uv"]):
+        candidates.append("uv_tower")
+
+    for phrase in ["group by", "grouped by", "per", "by"]:
+        match = re.search(rf"{phrase}\s+([a-zA-Z_ ]+)", computation)
+        if match:
+            candidates.append(match.group(1).strip())
+    if "type" in computation or "category" in computation or source == "complexity_by_code":
+        candidates.extend(["type", "category", "complexity"])
+    if any(term in question for term in ["snp", "gnp", "complex"]):
+        candidates.extend(["type", "complexity", "complexity_code"])
+
+    for candidate in candidates:
+        field = _resolve_row_field(rows, candidate)
+        # Reject list-valued fields (complexity_codes, editions, ...) as group keys — each unique
+        # combination would become its own group, which is never what a comparison/breakdown
+        # question actually wants, even when a fuzzy candidate match resolves to one of them.
+        if field and not _is_list_valued_field(rows, field):
+            return field
+    return ""
+
+
+def _is_list_valued_field(rows: list[dict[str, Any]], field: str) -> bool:
+    samples = [row.get(field) for row in rows[:20] if field in row]
+    if not samples:
+        return False
+    return sum(1 for value in samples if isinstance(value, list)) > len(samples) / 2
+
+
+def _resolve_row_field(rows: list[dict[str, Any]], wanted: str) -> str:
+    if not rows or not wanted:
+        return ""
+    available = list(rows[0].keys())
+    wanted_norm = _normalize_field_name(wanted)
+    aliases = _field_aliases(wanted_norm)
+    for key in available:
+        if _normalize_field_name(key) == wanted_norm:
+            return key
+    for alias in aliases:
+        for key in available:
+            if _normalize_field_name(key) == alias:
+                return key
+    for key in available:
+        key_norm = _normalize_field_name(key)
+        if wanted_norm and (wanted_norm in key_norm or key_norm in wanted_norm):
+            return key
+    return ""
+
+
+def _field_aliases(field: str) -> list[str]:
+    aliases = {
+        "folder": ["folder", "foldername", "resource"],
+        "foldername": ["folder", "foldername", "resource"],
+        "tower": ["tower", "towername", "resource"],
+        "date": ["date", "rundate", "reportdate"],
+        "rundate": ["date", "rundate", "reportdate"],
+        "plant": ["plant", "plantname"],
+        "type": ["type", "category", "complexitytype"],
+        "complexity": ["complexity", "complexitycode", "code", "type"],
+        "runtime": ["runtime", "runtimemin", "runtimeminutes", "totalruntimemnts"],
+        "runtime_min": ["runtime", "runtimemin", "runtimeminutes", "totalruntimemnts"],
+        "downtime": ["downtime", "downtimemin", "totaldowntime", "allocateddowntimemin"],
+        "loss": ["loss", "losstime", "losstimemin", "losttime", "losttimemin"],
+        "count": ["count", "eventcount", "incidentcount", "downtimecount", "editioncount"],
+    }
+    return aliases.get(field, [])
+
+
+def _normalize_field_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _clean_text(value).casefold())
+
+
+def _field_has_numeric_values(rows: list[dict[str, Any]], field: str) -> bool:
+    return any(_number(row.get(field)) != 0 for row in rows)
+
+
+def _row_value_text(value: Any) -> str:
+    if isinstance(value, list):
+        return " ".join(_clean_text(item) for item in value)
+    return _clean_text(value)
+
+
+def _default_group_field(rows: list[dict[str, Any]]) -> str:
+    for field in ["type", "category", "resource", "folder", "tower", "run_date", "plant", "reason", "code"]:
+        resolved = _resolve_row_field(rows, field)
+        if resolved:
+            return resolved
+    return ""
+
+
+def _plan_group_value(row: dict[str, Any], group_field: str) -> str:
+    value = row.get(group_field)
+    if isinstance(value, list):
+        return ", ".join(_clean_text(item) for item in value if _clean_text(item)) or "Unknown"
+    return _clean_text(value) or "Unknown"
+
+
+def _aggregate_plan_rows(
+    rows: list[dict[str, Any]],
+    metric_fields: list[str],
+    group_field: str,
+    average: bool,
+) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = _plan_group_value(row, group_field)
+        bucket = groups.setdefault(key, {"group": key, "row_count": 0})
+        bucket["row_count"] += 1
+        for metric in metric_fields:
+            bucket[metric] = bucket.get(metric, 0.0) + _number(row.get(metric))
+
+    result = []
+    for bucket in groups.values():
+        out = {"group": bucket["group"], "row_count": bucket["row_count"]}
+        for metric in metric_fields:
+            value = bucket.get(metric, 0.0)
+            if average:
+                value = value / bucket["row_count"] if bucket["row_count"] else 0.0
+            out[metric] = _clean_number(value)
+        result.append(out)
+    return sorted(result, key=lambda row: row["group"])
+
+
+def _format_plan_grouped_answer(
+    source_key: str,
+    metric_fields: list[str],
+    group_field: str,
+    rows: list[dict[str, Any]],
+    average: bool,
+) -> str:
+    label = "Average" if average else "Total"
+    metric_labels = ", ".join(_humanize_field(metric) for metric in metric_fields)
+    headers = [_humanize_field(group_field), *[_humanize_field(metric) for metric in metric_fields]]
+    if average:
+        headers.append("Rows")
+    lines = [
+        f"{label} {metric_labels} by {_humanize_field(group_field)}:",
+        "",
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows[:20]:
+        values = [str(row.get("group"))]
+        values.extend(_format_plan_metric_value(metric, row.get(metric)) for metric in metric_fields)
+        if average:
+            values.append(str(row.get("row_count")))
+        lines.append("| " + " | ".join(values) + " |")
+    if len(rows) > 20:
+        lines.append(f"\n*... {len(rows) - 20} more groups omitted.*")
+    return "\n".join(lines)
+
+
+def _format_plan_count_answer(source_key: str, group_field: str, counts: list[tuple[str, int]]) -> str:
+    lines = [
+        f"Count by {_humanize_field(group_field)} from {source_key}:",
+        "",
+        f"| {_humanize_field(group_field)} | Count |",
+        "| --- | --- |",
+    ]
+    for group, count in counts[:20]:
+        lines.append(f"| {group} | {count} |")
+    if len(counts) > 20:
+        lines.append(f"\n*... {len(counts) - 20} more groups omitted.*")
+    return "\n".join(lines)
+
+
+def _humanize_field(field: str) -> str:
+    text = re.sub(r"[_\s]+", " ", _clean_text(field)).strip()
+    text = re.sub(r"\bmin\b", "minutes", text)
+    text = text.replace("pct", "%")
+    return text.title() if text else "Value"
+
+
+def _metric_suffix(metric: str) -> str:
+    metric_norm = _normalize_field_name(metric)
+    if "pct" in metric_norm or "percentage" in metric_norm:
+        return "%"
+    if "time" in metric_norm or "runtime" in metric_norm or "downtime" in metric_norm or "minute" in metric_norm or metric_norm.endswith("min"):
+        return " min"
+    return ""
+
+
+def _format_plan_metric_value(metric: str, value: Any) -> str:
+    numeric = _number(value)
+    suffix = _metric_suffix(metric)
+    if suffix == " min":
+        return _format_chat_minutes(numeric)
+    if suffix == "%":
+        return f"{_clean_number(numeric)}%"
+    return str(_clean_number(numeric))
+
+
+def _format_chat_minutes(value: Any) -> str:
+    return f"{int(round(_number(value)))} min"
+
+
+def _format_signed_chat_minutes(value: Any) -> str:
+    numeric = _number(value)
+    sign = "+" if numeric > 0 else ""
+    return f"{sign}{int(round(numeric))} min"
+
+
 def _asks_complexity_downtime(question: str) -> bool:
     return "complex" in question and any(term in question for term in ["downtime", "down time", "stoppage"])
 
@@ -1043,11 +2157,16 @@ def _answer_complexity_downtime_question(context: dict[str, Any]) -> str:
     rows = sorted(rows, key=lambda row: -_number(row.get("allocated_downtime_min")))[:8]
     if not rows:
         return "Not available in the current data."
-    lines = ["Complexity downtime by C-code:"]
+    lines = [
+        "Complexity downtime by C-code:",
+        "",
+        "| Rank | Code | Downtime | Downtime Rows | Runtime |",
+        "| --- | --- | --- | --- | --- |",
+    ]
     for index, row in enumerate(rows, start=1):
         lines.append(
-            f"{index}. {row.get('code')}: {row.get('allocated_downtime_min')} min downtime "
-            f"({row.get('downtime_row_count')} rows), runtime {row.get('runtime_min')} min"
+            f"| {index} | {row.get('code')} | {_format_chat_minutes(row.get('allocated_downtime_min'))} | "
+            f"{row.get('downtime_row_count')} | {_format_chat_minutes(row.get('runtime_min'))} |"
         )
     return "\n".join(lines)
 
@@ -1068,27 +2187,41 @@ def _answer_malt_question(question: str, context: dict[str, Any]) -> str:
 
     if wants_exceedance:
         if not exceedances:
-            return f"{formula}\nNo nights exceed MALT in the current data."
+            return f"**{formula}**\n\nNo nights exceed MALT in the current data."
         ranked = sorted(exceedances, key=lambda row: -_number(row.get("excess_min")))[:10]
-        lines = [formula, "Nights where actual Loss Time exceeds MALT:"]
+        lines = [
+            f"**{formula}**",
+            "",
+            "Nights where actual Loss Time exceeds MALT:",
+            "",
+            "| Rank | Date | Plant | Complexity | Actual Loss | MALT | Excess |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
         for index, row in enumerate(ranked, start=1):
             lines.append(
-                f"{index}. {row.get('run_date')} | {row.get('plant')} | {row.get('complexity')}: "
-                f"actual loss {row.get('actual_loss_min')} min, MALT {row.get('malt_min')} min, "
-                f"excess {row.get('excess_min')} min"
+                f"| {index} | {row.get('run_date')} | {row.get('plant')} | {row.get('complexity')} | "
+                f"{_format_chat_minutes(row.get('actual_loss_min'))} | {_format_chat_minutes(row.get('malt_min'))} | "
+                f"{_format_chat_minutes(row.get('excess_min'))} |"
             )
         return "\n".join(lines)
 
     filtered = _filter_context_rows(rows, question, ["plant", "complexity", "complexity_code"])
     selected = (filtered or rows)[:10]
     if not selected:
-        return f"{formula}\nNot available in the current data."
-    lines = [formula, "MALT by plant and complexity:"]
-    for index, row in enumerate(selected, start=1):
+        return f"**{formula}**\n\nNot available in the current data."
+    lines = [
+        f"**{formula}**",
+        "",
+        "MALT by plant and complexity:",
+        "",
+        "| Plant | Complexity | MALT | Wait P50 | MOT P85 | Spare P30 |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in selected:
         lines.append(
-            f"{index}. {row.get('plant')} | {row.get('complexity')}: MALT {row.get('malt_min')} min "
-            f"(Wait P50 {row.get('wait_min')} min, MOT P85 {row.get('mot_min')} min, "
-            f"Spare P30 {row.get('spare_min')} min)"
+            f"| {row.get('plant')} | {row.get('complexity')} | {_format_chat_minutes(row.get('malt_min'))} | "
+            f"{_format_chat_minutes(row.get('wait_min'))} | {_format_chat_minutes(row.get('mot_min'))} | "
+            f"{_format_chat_minutes(row.get('spare_min'))} |"
         )
     return "\n".join(lines)
 
@@ -1111,15 +2244,22 @@ def _answer_delayed_pf_question(question: str, context: dict[str, Any]) -> str:
     if not selected:
         return "No delayed print finish rows are present in the current data."
 
-    lines = [f"{len(filtered or rows)} delayed print finish rows found in the current data. Top overruns:"]
+    lines = [
+        f"**{len(filtered or rows)}** delayed print finish rows found in the current data. Top overruns:",
+        "",
+        "| Rank | Date | Plant | Folder | Overrun | Cutoff | Finish | Complexity | Editions |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
     for index, row in enumerate(selected, start=1):
         complexities = ", ".join(_string_list(row.get("complexity_codes"))) or "-"
-        editions = ", ".join(_string_list(row.get("editions"))[:3])
-        edition_text = f"; editions: {editions}" if editions else ""
+        editions_list = _string_list(row.get("editions"))
+        editions = ", ".join(editions_list[:3])
+        if len(editions_list) > 3:
+            editions += " …"
         lines.append(
-            f"{index}. {row.get('run_date')} | {row.get('plant')} | {row.get('folder')}: "
-            f"{row.get('overrun_minutes')} min over {row.get('pf_cutoff_time')} "
-            f"(finish {row.get('estimated_print_finish_time')}); {complexities}{edition_text}"
+            f"| {index} | {row.get('run_date')} | {row.get('plant')} | {row.get('folder')} | "
+            f"{_format_chat_minutes(row.get('overrun_minutes'))} | {row.get('pf_cutoff_time')} | "
+            f"{row.get('estimated_print_finish_time')} | {complexities} | {editions or '-'} |"
         )
     return "\n".join(lines)
 
@@ -1180,13 +2320,18 @@ def _answer_editions_question(question: str, context: dict[str, Any]) -> str:
     if not selected:
         return "Not available in the current data."
 
-    lines = [f"Edition list by {label}:"]
+    lines = [
+        f"Edition list by {label}:",
+        "",
+        f"| {label.title()} | Editions | Count |",
+        "| --- | --- | --- |",
+    ]
     for row in selected:
         editions = _string_list(row.get("editions"))
         edition_text = ", ".join(editions[:12])
         if len(editions) > 12:
             edition_text += f" (+{len(editions) - 12} more)"
-        lines.append(f"- {row.get(name_key)}: {edition_text or 'none'}")
+        lines.append(f"| {row.get(name_key)} | {edition_text or 'none'} | {len(editions)} |")
     return "\n".join(lines)
 
 
@@ -1213,11 +2358,16 @@ def _answer_downtime_reason_question(question: str, context: dict[str, Any]) -> 
     selected = rows[:10]
     if not selected:
         return "Not available in the current data."
-    lines = ["Downtime reasons by event count:"]
+    lines = [
+        "Downtime reasons by event count:",
+        "",
+        "| Rank | Reason | Events | Total Time | Machines/Folders Affected |",
+        "| --- | --- | --- | --- | --- |",
+    ]
     for index, row in enumerate(selected, start=1):
         lines.append(
-            f"{index}. {row.get('reason')}: {row.get('count')} events, "
-            f"{row.get('total_minutes')} min, {row.get('affected_machine_folders')} machine/folders"
+            f"| {index} | {row.get('reason')} | {row.get('count')} | "
+            f"{_format_chat_minutes(row.get('total_minutes'))} | {row.get('affected_machine_folders')} |"
         )
     return "\n".join(lines)
 
@@ -1227,6 +2377,16 @@ def _asks_summary_metric(question: str) -> bool:
         "runtime", "run time", "downtime", "down time", "loss time", "lost time", "wait time",
         "waiting time", "spare", "unplanned", "utilized", "utilised", "utilization", "utilisation", "available", "mot",
     ]
+    # A flat plant-wide total is the WRONG shape of answer for any question that's actually asking
+    # for a breakdown/trend/pattern — answering with one number there would be confidently wrong,
+    # not just imprecise, so this matcher must not fire for those (let the LLM/planner handle them).
+    breakdown_terms = [
+        "each", "every", "per ", "per-", "by folder", "by tower", "by date", "by day", "by week",
+        "weekday", "week day", "day of week", "day-of-week", "trend", "pattern", "breakdown",
+        "compare", "comparison", "tabular", "table", "over time",
+    ]
+    if any(term in question for term in breakdown_terms):
+        return False
     return any(term in question for term in metric_terms) and any(
         term in question for term in ["total", "overall", "how much", "show", "what is", "what was"]
     )
@@ -1240,21 +2400,21 @@ def _answer_summary_metric_question(question: str, context: dict[str, Any]) -> s
     parts = []
     if "mot" in question:
         mot = _number(summary.get("total_runtime_min")) + _number(summary.get("total_downtime_min"))
-        parts.append(f"MOT (Run + Down): {_clean_number(mot)} min")
+        parts.append(f"MOT (Run + Down): {_format_chat_minutes(mot)}")
     if "runtime" in question or "run time" in question:
-        parts.append(f"Run Time: {summary.get('total_runtime_min')} min")
+        parts.append(f"Run Time: {_format_chat_minutes(summary.get('total_runtime_min'))}")
     if "downtime" in question or "down time" in question:
-        parts.append(f"Downtime: {summary.get('total_downtime_min')} min")
+        parts.append(f"Downtime: {_format_chat_minutes(summary.get('total_downtime_min'))}")
     if "loss time" in question or "lost time" in question:
-        parts.append(f"Loss Time: {summary.get('total_loss_time_min')} min")
+        parts.append(f"Loss Time: {_format_chat_minutes(summary.get('total_loss_time_min'))}")
     if "wait time" in question or "waiting time" in question or re.search(r"\bwait\b", question):
-        parts.append(f"Wait Time: {summary.get('total_waiting_time_min')} min")
+        parts.append(f"Wait Time: {_format_chat_minutes(summary.get('total_waiting_time_min'))}")
     if "spare capacity" in question:
         parts.append(f"Spare Capacity: {summary.get('spare_capacity_pct')}%")
     elif "spare" in question:
-        parts.append(f"Spare Time: {summary.get('total_spare_time_min')} min")
+        parts.append(f"Spare Time: {_format_chat_minutes(summary.get('total_spare_time_min'))}")
     if "unplanned" in question:
-        parts.append(f"Unplanned Time: {summary.get('total_unplanned_time_min')} min")
+        parts.append(f"Unplanned Time: {_format_chat_minutes(summary.get('total_unplanned_time_min'))}")
     if "utilized time" in question or "utilised time" in question:
         utilized_time = (
             _number(summary.get("total_utilized_time_min"))
@@ -1263,13 +2423,13 @@ def _answer_summary_metric_question(question: str, context: dict[str, Any]) -> s
             + _number(summary.get("total_downtime_min"))
         )
         parts.append(
-            f"Utilized Time: {_clean_number(utilized_time)} min "
+            f"Utilized Time: {_format_chat_minutes(utilized_time)} "
             "(Runtime (SNP + GNP) + Loss Time + Downtime)"
         )
     elif "utilization" in question or "utilisation" in question:
         parts.append(f"Utilisation: {summary.get('average_utilization_pct')}%")
     if "available" in question:
-        parts.append(f"Available Capacity: {summary.get('total_available_capacity_min')} min")
+        parts.append(f"Available Capacity: {_format_chat_minutes(summary.get('total_available_capacity_min'))}")
 
     if not parts:
         return ""
@@ -1415,9 +2575,19 @@ def _answer_daily_average_metric_question(question: str, context: dict[str, Any]
         total = sum(_number(summary.get(key)) for key in summary_keys if key)
 
     average_value = total / days if days > 0 else 0.0
+    average_display = (
+        f"{_clean_number(average_value)}{spec['unit']}"
+        if spec["unit"] == "%"
+        else _format_chat_minutes(average_value)
+    )
+    total_display = (
+        f"{_clean_number(total)}{spec['unit']}"
+        if spec["unit"] == "%"
+        else _format_chat_minutes(total)
+    )
     return (
-        f"Average {spec['label']} per day: {_clean_number(average_value)} {spec['unit']} "
-        f"({spec['label']} total {_clean_number(total)} {spec['unit']} / {days} production days)."
+        f"Average {spec['label']} per day: {average_display} "
+        f"({spec['label']} total {total_display} / {days} production days)."
     )
 
 
@@ -1471,9 +2641,19 @@ def _answer_daily_per_folder_average_metric_question(question: str, context: dic
     denominator = days * folder_count
     average_value = total / denominator if denominator > 0 else 0.0
     folder_label = "towers" if "tower" in question else "folders"
+    average_display = (
+        f"{_clean_number(average_value)}{spec['unit']}"
+        if spec["unit"] == "%"
+        else _format_chat_minutes(average_value)
+    )
+    total_display = (
+        f"{_clean_number(total)}{spec['unit']}"
+        if spec["unit"] == "%"
+        else _format_chat_minutes(total)
+    )
     return (
-        f"Average {spec['label']} per day per {folder_label[:-1]}: {_clean_number(average_value)} {spec['unit']} "
-        f"({spec['label']} total {_clean_number(total)} {spec['unit']} / "
+        f"Average {spec['label']} per day per {folder_label[:-1]}: {average_display} "
+        f"({spec['label']} total {total_display} / "
         f"{days} production days / {folder_count} {folder_label})."
     )
 
@@ -1577,19 +2757,23 @@ def _answer_tower_downtime_frequency_question(question: str, context: dict[str, 
         reason_label = "web break" if wants_web_break else "downtime reason"
         lines = [
             f"Top individual towers for {reason_label} events:",
+            "",
+            "| Rank | Tower | Attributed Events | Attributed Time | Matching Runs | Dates |",
+            "| --- | --- | --- | --- | --- | --- |",
         ]
         for index, row in enumerate(ranked, start=1):
             dates = row.get("matching_dates") or []
-            date_text = f"; dates: {', '.join(dates[:5])}" if dates else ""
+            date_text = ", ".join(dates[:5])
             if len(dates) > 5:
                 date_text += f" (+{len(dates) - 5} more)"
             lines.append(
-                f"{index}. {row.get('tower')}: {row.get('attributed_event_count')} attributed events, "
-                f"{row.get('attributed_minutes')} min, {row.get('matching_tower_run_count')} matching tower runs{date_text}"
+                f"| {index} | {row.get('tower')} | {row.get('attributed_event_count')} | "
+                f"{_format_chat_minutes(row.get('attributed_minutes'))} | {row.get('matching_tower_run_count')} | "
+                f"{date_text or '-'} |"
             )
         note = attribution.get("attribution_note")
         if note:
-            lines.append(f"Note: {note}")
+            lines.append(f"\n*Note: {note}*")
         return "\n".join(lines)
 
     if downtime_runs:
@@ -1610,14 +2794,20 @@ def _answer_tower_downtime_frequency_question(question: str, context: dict[str, 
             key=lambda row: (-row["run_count"], -row["downtime_min"], row["tower"]),
         )[:5]
         if ranked:
-            lines = ["Top individual towers by runs with downtime:"]
+            lines = [
+                "Top individual towers by runs with downtime:",
+                "",
+                "| Rank | Tower | Runs | Downtime | Dates |",
+                "| --- | --- | --- | --- | --- |",
+            ]
             for index, row in enumerate(ranked, start=1):
                 dates = sorted(row["dates"])
-                date_text = f"; dates: {', '.join(dates[:5])}" if dates else ""
+                date_text = ", ".join(dates[:5])
                 if len(dates) > 5:
                     date_text += f" (+{len(dates) - 5} more)"
                 lines.append(
-                    f"{index}. {row['tower']}: {row['run_count']} runs, {_clean_number(row['downtime_min'])} min downtime{date_text}"
+                    f"| {index} | {row['tower']} | {row['run_count']} | "
+                    f"{_format_chat_minutes(row['downtime_min'])} | {date_text or '-'} |"
                 )
             return "\n".join(lines)
 
@@ -1626,11 +2816,16 @@ def _answer_tower_downtime_frequency_question(question: str, context: dict[str, 
         key=lambda row: (-_number(row.get("downtime_run_count")), -_number(row.get("downtime_min")), _clean_text(row.get("tower"))),
     )[:5]
     if ranked_towers:
-        lines = ["Top individual towers by downtime-run count:"]
+        lines = [
+            "Top individual towers by downtime-run count:",
+            "",
+            "| Rank | Tower | Runs | Downtime |",
+            "| --- | --- | --- | --- |",
+        ]
         for index, row in enumerate(ranked_towers, start=1):
             lines.append(
-                f"{index}. {row.get('tower')}: {row.get('downtime_run_count')} runs, "
-                f"{row.get('downtime_min')} min downtime"
+                f"| {index} | {row.get('tower')} | {row.get('downtime_run_count')} | "
+                f"{_format_chat_minutes(row.get('downtime_min'))} |"
             )
         return "\n".join(lines)
 
@@ -1693,6 +2888,8 @@ def _exact_daily_rows(
 
         rows.append({
             "run_date": run_date,
+            "weekday": _weekday_label(run_date),
+            "month": _month_label(run_date),
             "night_type": "GNP/UV" if is_gnp_night else "SNP/non-UV",
             "gnp_night": is_gnp_night,
             "uv_night": is_gnp_night,
@@ -1815,6 +3012,9 @@ def _exact_folder_day_row(row: dict[str, Any]) -> dict[str, Any]:
     runtime = _number(row.get("runtime"))
     loss_time = _loss_time_minutes(row)
     downtime = _number(row.get("downtime"))
+    changeover_time = _number(row.get("change_over_time"))
+    late_start_time = _number(row.get("late_start_time"))
+    reflong_time = _number(row.get("reflong_related_downtime"))
     utilized_time = runtime + downtime + loss_time
     runtime_segments = _runtime_segment_rows(row)
     machine, folder_name = _split_machine_folder(_clean_text(row.get("folder")))
@@ -1822,6 +3022,8 @@ def _exact_folder_day_row(row: dict[str, Any]) -> dict[str, Any]:
     cutoff_minutes = _pf_compliance_minutes(row.get("plant_name"))
     return {
         "run_date": _clean_text(row.get("run_date")),
+        "weekday": _weekday_label(row.get("run_date")),
+        "month": _month_label(row.get("run_date")),
         "plant": _clean_text(row.get("plant_name")),
         "machine": machine,
         "folder_name": folder_name,
@@ -1830,6 +3032,9 @@ def _exact_folder_day_row(row: dict[str, Any]) -> dict[str, Any]:
         "available_capacity_min": _clean_number(available),
         "runtime_min": _clean_number(runtime),
         "loss_time_min": _clean_number(loss_time),
+        "change_over_time_min": _clean_number(changeover_time),
+        "late_start_time_min": _clean_number(late_start_time),
+        "reflong_time_min": _clean_number(reflong_time),
         "waiting_time_min": _clean_number(row.get("waiting_time")),
         "downtime_min": _clean_number(downtime),
         "spare_time_min": _clean_number(spare_time),
@@ -1876,6 +3081,41 @@ def _candidate_matches_question(candidate: str, question_text: str) -> bool:
     return any(part in question_text for part in parts)
 
 
+def _book_detail_matches_question(row: dict[str, Any], question_text: str) -> bool:
+    candidates = [
+        row.get("Edition"),
+        row.get("Edition Name"),
+        row.get("Folder"),
+        row.get("Machine"),
+        row.get("Plant Name"),
+        row.get("Report Date"),
+    ]
+    return any(_candidate_matches_question(_clean_text(c), question_text) for c in candidates if c)
+
+
+def _select_book_details_for_llm(
+    book_details: list[dict[str, Any]],
+    question: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Prioritize book_details rows relevant to the question instead of an arbitrary slice.
+
+    Falls back to most-recent-first (by Report Date) when nothing matches, since the stored
+    order is chronological-ascending — a plain [:limit] slice would otherwise drop recent data
+    first, which is the opposite of what most questions care about.
+    """
+    if not book_details or len(book_details) <= limit:
+        return book_details or []
+
+    question_text = _clean_text(question).casefold()
+    if question_text:
+        matching = [row for row in book_details if _book_detail_matches_question(row, question_text)]
+        if matching:
+            return matching[:limit]
+
+    return sorted(book_details, key=lambda row: _clean_text(row.get("Report Date")), reverse=True)[:limit]
+
+
 def _date_label(value: str) -> str:
     if not value:
         return ""
@@ -1884,6 +3124,134 @@ def _date_label(value: str) -> str:
         return f"{parsed.strftime('%b')} {parsed.day}"
     except ValueError:
         return value
+
+
+def _weekday_label(value: str) -> str:
+    """Full weekday name (e.g. 'Monday') for a run_date — precomputed so the LLM never has
+    to derive day-of-week from raw date strings itself for 'weekday wise' / day-of-week questions."""
+    if not value:
+        return ""
+    try:
+        return datetime.strptime(_clean_text(value), "%Y-%m-%d").strftime("%A")
+    except ValueError:
+        return ""
+
+
+def _month_label(value: str) -> str:
+    """Sortable 'YYYY-MM' month for a run_date — precomputed so the LLM never has to derive or
+    refuse a month/month-on-month grouping itself from raw date strings."""
+    if not value:
+        return ""
+    try:
+        return datetime.strptime(_clean_text(value), "%Y-%m-%d").strftime("%Y-%m")
+    except ValueError:
+        return ""
+
+
+_WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _tower_weekday_summary(tower_day_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per-tower per-weekday averages, pre-aggregated from tower_days.
+
+    tower_days itself gets row-capped for large multi-plant/multi-month datasets to stay within the
+    model's context limit, which would silently under-sample some towers/weekdays. This table is a
+    complete aggregate (every tower x every weekday it has data for) computed before any capping, so
+    it stays small (towers x 7 at most) and accurate regardless of dataset size — use it instead of
+    raw tower_days for any 'weekday wise' / day-of-week tower pattern question.
+    """
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in tower_day_rows:
+        tower = _clean_text(row.get("tower"))
+        weekday = _clean_text(row.get("weekday"))
+        if not tower or not weekday:
+            continue
+        key = (tower, weekday)
+        bucket = buckets.setdefault(key, {
+            "tower": tower,
+            "tower_name": row.get("tower_name"),
+            "weekday": weekday,
+            "night_count": 0,
+            "runtime_min": 0.0,
+            "downtime_min": 0.0,
+            "loss_time_min": 0.0,
+            "waiting_time_min": 0.0,
+            "utilization_pct": 0.0,
+        })
+        bucket["night_count"] += 1
+        for key_name in ("runtime_min", "downtime_min", "loss_time_min", "waiting_time_min", "utilization_pct"):
+            bucket[key_name] += _number(row.get(key_name))
+
+    summary = []
+    for bucket in buckets.values():
+        count = bucket["night_count"]
+        summary.append({
+            "tower": bucket["tower"],
+            "tower_name": bucket["tower_name"],
+            "weekday": bucket["weekday"],
+            "night_count": count,
+            "avg_runtime_min": _clean_number(bucket["runtime_min"] / count) if count else 0,
+            "avg_downtime_min": _clean_number(bucket["downtime_min"] / count) if count else 0,
+            "avg_loss_time_min": _clean_number(bucket["loss_time_min"] / count) if count else 0,
+            "avg_waiting_time_min": _clean_number(bucket["waiting_time_min"] / count) if count else 0,
+            "avg_utilization_pct": _clean_number(bucket["utilization_pct"] / count) if count else 0,
+        })
+
+    summary.sort(key=lambda r: (
+        r["tower"],
+        _WEEKDAY_ORDER.index(r["weekday"]) if r["weekday"] in _WEEKDAY_ORDER else 7,
+    ))
+    return summary
+
+
+def _tower_month_summary(tower_day_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per-tower per-month totals/averages, pre-aggregated from tower_days.
+
+    Same rationale as _tower_weekday_summary: tower_days is row-capped on large multi-plant/multi-month
+    datasets, so grouping it directly for a month-on-month tower question could silently miss whole
+    towers or months. This table is a complete aggregate (every tower x every month it has data for)
+    computed before any capping, so it stays small (towers x number of months) and accurate regardless
+    of dataset size — use it instead of raw tower_days for any tower-level month-on-month question.
+    """
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in tower_day_rows:
+        tower = _clean_text(row.get("tower"))
+        month = _clean_text(row.get("month"))
+        if not tower or not month:
+            continue
+        key = (tower, month)
+        bucket = buckets.setdefault(key, {
+            "tower": tower,
+            "tower_name": row.get("tower_name"),
+            "month": month,
+            "night_count": 0,
+            "runtime_min": 0.0,
+            "downtime_min": 0.0,
+            "loss_time_min": 0.0,
+            "waiting_time_min": 0.0,
+            "utilization_pct": 0.0,
+        })
+        bucket["night_count"] += 1
+        for key_name in ("runtime_min", "downtime_min", "loss_time_min", "waiting_time_min", "utilization_pct"):
+            bucket[key_name] += _number(row.get(key_name))
+
+    summary = []
+    for bucket in buckets.values():
+        count = bucket["night_count"]
+        summary.append({
+            "tower": bucket["tower"],
+            "tower_name": bucket["tower_name"],
+            "month": bucket["month"],
+            "night_count": count,
+            "total_runtime_min": _clean_number(bucket["runtime_min"]),
+            "total_downtime_min": _clean_number(bucket["downtime_min"]),
+            "total_loss_time_min": _clean_number(bucket["loss_time_min"]),
+            "total_waiting_time_min": _clean_number(bucket["waiting_time_min"]),
+            "avg_utilization_pct": _clean_number(bucket["utilization_pct"] / count) if count else 0,
+        })
+
+    summary.sort(key=lambda r: (r["tower"], r["month"]))
+    return summary
 
 
 def _is_active_folder_row(row: dict[str, Any]) -> bool:
@@ -2009,6 +3377,23 @@ def _has_gnp_runtime(rows: list[dict[str, Any]]) -> bool:
     return any(_is_gnp_segment(segment) for row in rows for segment in _runtime_segment_rows(row))
 
 
+def _gnp_night_lookup(folder_rows: list[dict[str, Any]]) -> dict[str, bool]:
+    """Map run_date -> True if that night had at least one GNP/GNP Complex edition (a GNP/UV night).
+
+    Factored out of _build_gnp_night_classification so other per-row tables (like delayed_pf) can
+    attach night_type directly to each row without needing a separate join against a nights table.
+    """
+    rows_by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in folder_rows:
+        run_date = _clean_text(row.get("run_date"))
+        if run_date:
+            rows_by_date.setdefault(run_date, []).append(row)
+    return {
+        run_date: any(_is_gnp_segment(segment) for segment in _runtime_segments_for_rows(date_rows))
+        for run_date, date_rows in rows_by_date.items()
+    }
+
+
 def _build_gnp_night_classification(folder_rows: list[dict[str, Any]], dates: list[str]) -> dict[str, Any]:
     rows_by_date: dict[str, list[dict[str, Any]]] = {date: [] for date in dates}
     for row in folder_rows:
@@ -2049,6 +3434,7 @@ def _build_gnp_night_classification(folder_rows: list[dict[str, Any]], dates: li
 
 
 def _build_delayed_pf_rows(folder_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gnp_night_lookup = _gnp_night_lookup(folder_rows)
     rows = []
     for row in folder_rows:
         overrun = _number(row.get("overrun_minutes"))
@@ -2058,8 +3444,15 @@ def _build_delayed_pf_rows(folder_rows: list[dict[str, Any]]) -> list[dict[str, 
         plant = _clean_text(row.get("plant_name"))
         cutoff_minutes = _pf_compliance_minutes(plant)
         machine, folder_name = _split_machine_folder(_clean_text(row.get("folder")))
+        run_date = _clean_text(row.get("run_date"))
+        is_gnp_night = gnp_night_lookup.get(run_date, False)
         rows.append({
-            "run_date": _clean_text(row.get("run_date")),
+            "run_date": run_date,
+            # Attached directly so GNP-vs-SNP-night questions don't need a join against the
+            # separate night-classification table — that join isn't something the deterministic
+            # plan-answering path can actually perform across two source tables.
+            "night_type": "GNP/UV" if is_gnp_night else "SNP/non-UV",
+            "gnp_night": is_gnp_night,
             "plant": plant,
             "machine": machine,
             "folder_name": folder_name,
@@ -2160,6 +3553,8 @@ def _tower_day_context_rows(tower_details: list[dict[str, Any]]) -> list[dict[st
         runtime = _number(row.get("runtime"))
         rows.append({
             "run_date": _clean_text(row.get("run_date")),
+            "weekday": _weekday_label(row.get("run_date")),
+            "month": _month_label(row.get("run_date")),
             "plant": _clean_text(row.get("plant_name")),
             "machine": machine,
             "tower_name": tower_name,
@@ -2175,9 +3570,6 @@ def _tower_day_context_rows(tower_details: list[dict[str, Any]]) -> list[dict[st
             "change_over_time_min": _clean_number(row.get("change_over_time")),
             "late_start_time_min": _clean_number(row.get("late_start_time")),
             "reflong_time_min": _clean_number(row.get("reflong_related_downtime")),
-            "has_downtime": downtime > 0,
-            "has_loss_time": loss_time > 0,
-            "has_waiting_time": _number(row.get("waiting_time")) > 0,
             "utilization_pct": _percentage(runtime + downtime + loss_time, _available_minutes(row)),
             "complexity_codes": _complexity_codes_for_segments(runtime_segments),
             "complexity_categories": _complexity_categories_for_segments(runtime_segments),
@@ -2279,6 +3671,8 @@ def _build_tower_downtime_reason_attribution(
                 if run_date:
                     tower_entry["matching_dates"].add(run_date)
 
+    # matching_dates/folders/editions are display-only lists — no consumer ever shows more than a
+    # handful, so cap them at the source instead of letting them grow unbounded per row.
     by_tower_reason_rows = [
         {
             "tower": entry["tower"],
@@ -2286,9 +3680,9 @@ def _build_tower_downtime_reason_attribution(
             "attributed_event_count": entry["attributed_event_count"],
             "attributed_minutes": _clean_number(entry["attributed_minutes"]),
             "matching_tower_run_count": entry["matching_tower_run_count"],
-            "matching_dates": sorted(entry["matching_dates"]),
-            "folders": sorted(entry["folders"]),
-            "editions": sorted(entry["editions"]),
+            "matching_dates": sorted(entry["matching_dates"])[-8:],
+            "folders": sorted(entry["folders"])[:10],
+            "editions": sorted(entry["editions"])[:10],
         }
         for entry in by_tower_reason.values()
     ]
@@ -2302,8 +3696,8 @@ def _build_tower_downtime_reason_attribution(
             "attributed_event_count": entry["attributed_event_count"],
             "attributed_minutes": _clean_number(entry["attributed_minutes"]),
             "matching_tower_run_count": entry["matching_tower_run_count"],
-            "reasons": sorted(entry["reasons"]),
-            "matching_dates": sorted(entry["matching_dates"]),
+            "reasons": sorted(entry["reasons"])[:10],
+            "matching_dates": sorted(entry["matching_dates"])[-8:],
         }
         for entry in by_tower.values()
     ]
@@ -3533,7 +4927,7 @@ def _call_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, 
         urls.append(_without_api_version(url))
 
     model = _get_env("AZURE_MODEL") or _get_env("AZURE_OPENAI_MODEL") or _get_env("AZURE_DEPLOYMENT")
-    base: dict[str, Any] = {"messages": messages, "temperature": 0.2}
+    base: dict[str, Any] = {"messages": messages}
     if model:
         base["model"] = model
 
@@ -3542,6 +4936,10 @@ def _call_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, 
         {**base, "max_tokens": 1800, "response_format": {"type": "json_object"}},
         {**base, "max_completion_tokens": 1800},
         {**base, "max_tokens": 1800},
+        {**base, "temperature": 0.2, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
+        {**base, "temperature": 0.2, "max_tokens": 1800, "response_format": {"type": "json_object"}},
+        {**base, "temperature": 0.2, "max_completion_tokens": 1800},
+        {**base, "temperature": 0.2, "max_tokens": 1800},
     ]
     auth_modes = ["api-key", "bearer"]
     last_error: Exception | None = None
@@ -3560,6 +4958,9 @@ def _call_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, 
                     if exc.code in {400, 401, 403, 404}:
                         continue
                     raise
+                except TimeoutError as exc:
+                    last_error = exc
+                    break
                 except URLError as exc:
                     last_error = exc
                     break
@@ -3576,6 +4977,11 @@ def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict
 
     auth_modes = ["api-key", "bearer"]
     last_error: Exception | None = None
+    response_budget = (
+        CHAT_REASONING_RESPONSE_MAX_TOKENS
+        if reasoning_effort and reasoning_effort != "none"
+        else CHAT_RESPONSE_MAX_TOKENS
+    )
 
     if _should_try_responses_api(endpoint, model):
         response_url = _build_responses_url(endpoint)
@@ -3584,7 +4990,7 @@ def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict
             response_urls.append(_without_api_version(response_url))
 
         for request_url in response_urls:
-            for payload in _responses_payloads(messages, model, reasoning_effort, max_output_tokens=20000):
+            for payload in _responses_payloads(messages, model, reasoning_effort, max_output_tokens=response_budget):
                 for auth_mode in auth_modes:
                     try:
                         response = _post_json(request_url, payload, api_key, auth_mode)
@@ -3597,6 +5003,9 @@ def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict
                         if exc.code in {400, 401, 403, 404}:
                             continue
                         raise
+                    except TimeoutError as exc:
+                        last_error = exc
+                        break
                     except URLError as exc:
                         last_error = exc
                         break
@@ -3607,7 +5016,7 @@ def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict
         chat_urls.append(_without_api_version(chat_url))
 
     for request_url in chat_urls:
-        for payload in _chat_completion_payloads(messages, model, reasoning_effort, max_tokens=6000):
+        for payload in _chat_completion_payloads(messages, model, reasoning_effort, max_tokens=response_budget):
             for auth_mode in auth_modes:
                 try:
                     response = _post_json(request_url, payload, api_key, auth_mode)
@@ -3620,6 +5029,9 @@ def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict
                     if exc.code in {400, 401, 403, 404}:
                         continue
                     raise
+                except TimeoutError as exc:
+                    last_error = exc
+                    break
                 except URLError as exc:
                     last_error = exc
                     break
@@ -3678,7 +5090,7 @@ def _should_try_responses_api(endpoint: str, model: str) -> bool:
         return configured.strip().casefold() not in {"0", "false", "no", "off"}
 
     url = endpoint.strip()
-    return "/responses" in url or _is_reasoning_model(model)
+    return "/responses" in url
 
 
 def _responses_payloads(
@@ -3691,20 +5103,25 @@ def _responses_payloads(
     base_payload: dict[str, Any] = {
         "input": input_items,
         "max_output_tokens": max_output_tokens,
-        "text": {"verbosity": "low"},
     }
     if instructions:
         base_payload["instructions"] = instructions
     if model:
         base_payload["model"] = model
 
-    payloads = []
+    payloads: list[dict[str, Any]] = []
+    low_verbosity_payload = {**base_payload, "text": {"verbosity": "low"}}
     if reasoning_effort and reasoning_effort != "none":
-        payloads.append({
+        _append_unique_payload(payloads, {
+            **low_verbosity_payload,
+            "reasoning": {"effort": reasoning_effort},
+        })
+        _append_unique_payload(payloads, {
             **base_payload,
             "reasoning": {"effort": reasoning_effort},
         })
-    payloads.append(base_payload)
+    _append_unique_payload(payloads, low_verbosity_payload)
+    _append_unique_payload(payloads, base_payload)
     return payloads
 
 
@@ -3718,19 +5135,26 @@ def _chat_completion_payloads(
     if model:
         base_payload["model"] = model
 
-    payloads = []
+    payloads: list[dict[str, Any]] = []
     if _is_reasoning_model(model) and reasoning_effort and reasoning_effort != "none":
-        payloads.append({
+        _append_unique_payload(payloads, {
             **base_payload,
             "reasoning_effort": reasoning_effort,
             "max_completion_tokens": max_tokens,
         })
 
-    # Try max_completion_tokens first (required by newer models like gpt-4.1),
-    # then fall back to max_tokens for older deployments.
-    payloads.append({**base_payload, "temperature": 0.2, "max_completion_tokens": max_tokens})
-    payloads.append({**base_payload, "temperature": 0.2, "max_tokens": max_tokens})
+    # Try minimal payloads first. GPT-5.x deployments often reject temperature,
+    # while older chat deployments may still need max_tokens instead of max_completion_tokens.
+    _append_unique_payload(payloads, {**base_payload, "max_completion_tokens": max_tokens})
+    _append_unique_payload(payloads, {**base_payload, "max_tokens": max_tokens})
+    _append_unique_payload(payloads, {**base_payload, "temperature": 0.2, "max_completion_tokens": max_tokens})
+    _append_unique_payload(payloads, {**base_payload, "temperature": 0.2, "max_tokens": max_tokens})
     return payloads
+
+
+def _append_unique_payload(payloads: list[dict[str, Any]], payload: dict[str, Any]) -> None:
+    if payload not in payloads:
+        payloads.append(payload)
 
 
 def _messages_to_responses_input(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
@@ -3750,6 +5174,13 @@ def _messages_to_responses_input(messages: list[dict[str, str]]) -> tuple[str, l
     return instructions, input_items
 
 
+def _should_use_chat_planner(message: str) -> bool:
+    configured = _get_env("CAPACITY_CHAT_USE_PLANNER")
+    if configured:
+        return configured.strip().casefold() not in {"0", "false", "no", "off"}
+    return _question_needs_reasoning(message)
+
+
 def _select_reasoning_effort(messages: list[dict[str, str]], model: str) -> str:
     configured = _get_env("CAPACITY_CHAT_REASONING_EFFORT") or _get_env("OPENAI_REASONING_EFFORT")
     if configured:
@@ -3757,21 +5188,33 @@ def _select_reasoning_effort(messages: list[dict[str, str]], model: str) -> str:
     if not _is_reasoning_model(model):
         return ""
 
-    latest_user = ""
+    latest_user = _latest_user_message(messages)
+
+    if _question_needs_reasoning(latest_user):
+        return "medium"
+    return "none"
+
+
+def _latest_user_message(messages: list[dict[str, str]]) -> str:
     for message in reversed(messages):
         if message.get("role") == "user":
-            latest_user = _clean_text(message.get("content")).casefold()
-            break
+            return _clean_text(message.get("content"))
+    return ""
 
-    hard_reasoning_terms = [
+
+def _question_needs_reasoning(message: str) -> bool:
+    text = _clean_text(message).casefold()
+    if not text:
+        return False
+
+    reasoning_terms = [
         "trend", "interpolate", "interpolation", "forecast", "predict", "projection",
         "why", "reason", "root cause", "cause", "correlation", "relationship",
         "compare", "comparison", "difference", "variance", "pattern", "identify",
         "best", "worst", "optimize", "recommend", "should", "impact",
+        "explain", "derive", "estimate", "analyze", "analyse",
     ]
-    if any(term in latest_user for term in hard_reasoning_terms):
-        return "high"
-    return "high"
+    return any(term in text for term in reasoning_terms)
 
 
 def _normalize_reasoning_effort(value: str, model: str) -> str:
@@ -3887,6 +5330,32 @@ def _is_ssl_certificate_verification_error(exc: URLError) -> bool:
 
     message = str(reason).lower()
     return "certificate_verify_failed" in message or "certificate verify failed" in message
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, TimeoutError):
+        return True
+
+    message = str(reason or exc).casefold()
+    return "timed out" in message or "timeout" in message
+
+
+def _chat_error_kind(exc: BaseException) -> str:
+    if _is_timeout_error(exc):
+        return "timeout"
+    if isinstance(exc, HTTPError):
+        return f"http_{exc.code}"
+    if isinstance(exc, URLError):
+        return "network"
+    return exc.__class__.__name__
+
+
+def _chat_debug_enabled() -> bool:
+    return (_get_env("CAPACITY_CHAT_DEBUG") or "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _extract_llm_text(response: dict[str, Any]) -> str:

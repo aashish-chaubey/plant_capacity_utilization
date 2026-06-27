@@ -81,12 +81,18 @@ async function readApiError(response, fallbackMessage) {
   return fallbackMessage;
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export default function App() {
   const fileInputRef = useRef(null);
   const folderMenuRef = useRef(null);
   const [result, setResult] = useState(null);
+  const [jobId, setJobId] = useState("");
   const [errors, setErrors] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
   const [intelligence, setIntelligence] = useState(null);
   const [intelligenceLoading, setIntelligenceLoading] = useState(false);
   const [intelligenceError, setIntelligenceError] = useState("");
@@ -192,7 +198,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!filteredResult?.daily?.length) {
+    if (!filteredResult?.daily?.length || filteredResult.processing_complete === false) {
       setIntelligence(null);
       setIntelligenceLoading(false);
       setIntelligenceError("");
@@ -238,6 +244,7 @@ export default function App() {
   async function handleUpload(file) {
     if (!file) return;
     setLoading(true);
+    setUploadProgress({ progress: 0, message: "Uploading workbook" });
     setErrors([]);
     setIntelligence(null);
     setIntelligenceError("");
@@ -246,32 +253,67 @@ export default function App() {
     setTimeframe(createDefaultTimeframe());
     setSelectedPlant("");
     setSelectedFolders([]);
+    setJobId("");
 
     const formData = new FormData();
     formData.append("file", file);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/upload`, {
+      const response = await fetch(`${API_BASE_URL}/api/upload/start`, {
         method: "POST",
         body: formData
       });
       if (!response.ok) {
         throw new Error(await readApiError(response, `Upload failed with status ${response.status}`));
       }
-      const payload = await response.json();
-      if (!payload.valid) {
+      const startPayload = await response.json();
+      if (!startPayload.valid || !startPayload.job_id) {
         setResult(null);
         setIntelligence(null);
-        setErrors(payload.errors || ["The workbook could not be processed."]);
+        setJobId("");
+        setErrors(startPayload.errors || ["The workbook could not be processed."]);
         return;
       }
-      setResult(payload);
+      setJobId(startPayload.job_id);
+
+      let finished = false;
+      while (!finished) {
+        await delay(900);
+        const statusResponse = await fetch(`${API_BASE_URL}/api/upload/status/${startPayload.job_id}`);
+        if (!statusResponse.ok) {
+          throw new Error(await readApiError(statusResponse, `Upload status failed with status ${statusResponse.status}`));
+        }
+        const statusPayload = await statusResponse.json();
+        setUploadProgress({
+          progress: statusPayload.progress || 0,
+          message: statusPayload.message || "Processing workbook"
+        });
+
+        if (statusPayload.result?.valid) {
+          setResult(statusPayload.result);
+        }
+
+        if (statusPayload.status === "complete") {
+          finished = true;
+          if (statusPayload.result?.valid) {
+            setResult(statusPayload.result);
+          }
+        } else if (statusPayload.status === "error" || !statusPayload.valid) {
+          setResult(null);
+          setIntelligence(null);
+          setJobId("");
+          setErrors(statusPayload.errors || [statusPayload.message || "The workbook could not be processed."]);
+          finished = true;
+        }
+      }
     } catch (error) {
       setResult(null);
       setIntelligence(null);
+      setJobId("");
       setErrors([error.message || "Unable to connect to the backend API."]);
     } finally {
       setLoading(false);
+      setUploadProgress(null);
     }
   }
 
@@ -588,6 +630,42 @@ export default function App() {
           </section>
         )}
 
+        {loading && uploadProgress && (
+          <section className="mb-4 rounded-xl border border-blue-100 bg-white p-4 shadow-soft">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-950">
+                  {result ? "Finishing full dashboard data" : "Processing uploaded report"}
+                </p>
+                <p className="mt-1 text-sm text-slate-500">{uploadProgress.message}</p>
+              </div>
+              <span className="text-sm font-bold text-blue-700">{Math.round(uploadProgress.progress || 0)}%</span>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+              <div
+                className="h-full rounded-full bg-blue-600 transition-all"
+                style={{ width: `${Math.min(Math.max(Number(uploadProgress.progress || 0), 0), 100)}%` }}
+              />
+            </div>
+          </section>
+        )}
+
+        {result?.partial && (
+          <section className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-amber-950">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">Showing partial data: latest fiscal quarter loaded.</p>
+                <p className="mt-1 text-sm text-amber-800">
+                  Remaining quarters are still processing. {formatPartialLoadSummary(result)}
+                </p>
+              </div>
+              <span className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-bold text-amber-800">
+                {Math.min(result.loaded_quarters?.length || 0, result.total_quarters || 0)} / {result.total_quarters || 0} quarters
+              </span>
+            </div>
+          </section>
+        )}
+
         {/* Multi-plant selection required */}
         {result && plantOptions.length > 1 && !selectedPlant && errors.length === 0 && (
           <section className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-amber-900">
@@ -618,6 +696,10 @@ export default function App() {
             intelligence={intelligence}
             intelligenceLoading={intelligenceLoading}
             intelligenceError={intelligenceError}
+            jobId={jobId}
+            selectedPlant={selectedPlant}
+            selectedFolders={selectedFolders}
+            timeframeRange={timeframeRange}
           />
         )}
 
@@ -734,8 +816,11 @@ function createDefaultTimeframe() {
 
 function buildPlantOptions(result) {
   if (!result) return [];
+  const plantSource = Array.isArray(result.available_plants) && result.available_plants.length > 0
+    ? result.available_plants
+    : (result.details || []).map((row) => row.plant_name);
   return Array.from(
-    new Set((result.details || []).map((row) => row.plant_name).filter(Boolean))
+    new Set(plantSource.filter(Boolean))
   )
     .sort((a, b) => a.localeCompare(b))
     .map((plantName) => ({ value: plantName, label: plantName }));
@@ -753,6 +838,16 @@ function buildFolderOptions(result, selectedPlant) {
   )
     .sort((a, b) => a.localeCompare(b))
     .map((folderName) => ({ value: folderName, label: formatResourceLabel(folderName) }));
+}
+
+function formatPartialLoadSummary(result) {
+  const quarters = Array.isArray(result?.loaded_quarters) ? result.loaded_quarters : [];
+  const quarterText = quarters.length > 0 ? `Loaded: ${quarters.join(", ")}.` : "";
+  const range = result?.loaded_date_range || {};
+  const rangeText = range.start && range.end
+    ? `Current loaded date range: ${formatDateRangeLabel(range.start, range.end)}.`
+    : "";
+  return [quarterText, rangeText].filter(Boolean).join(" ");
 }
 
 function filterCapacityDataByScope(result, selectedPlant, selectedFolders) {
