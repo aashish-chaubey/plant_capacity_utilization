@@ -334,6 +334,7 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
             "status": result.get("status", "ok"),
             "detail": result.get("detail", ""),
             "plan": result.get("plan") or None,
+            "chart": _safe_json(result.get("chart")) if result.get("chart") else None,
         })
     except Exception as exc:
         return JSONResponse({

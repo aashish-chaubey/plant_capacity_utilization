@@ -1080,6 +1080,10 @@ def calculate_folder_day_metrics(
             "reflong_related_downtime",
             "late_start_time",
             "overrun_minutes",
+            "actual_print_finish_time",
+            "last_edition",
+            "last_edition_name",
+            "last_issue_id",
             "runtime_segments",
             "editions",
             "twin_folder_mode",
@@ -1157,6 +1161,10 @@ def _unplanned_folder_day_row(report_date: date, folder_reference: dict[str, str
         "reflong_related_downtime": 0.0,
         "late_start_time": 0.0,
         "overrun_minutes": 0.0,
+        "actual_print_finish_time": None,
+        "last_edition": "",
+        "last_edition_name": "",
+        "last_issue_id": "",
         "runtime_segments": [],
         "editions": [],
         "twin_folder_mode": False,
@@ -1544,6 +1552,10 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                     "change_over_time": 0.0,
                     "natural_buffer_time": CAPACITY_MINUTES_PER_FOLDER_DAY,
                     "overrun_minutes": 0.0,
+                    "actual_print_finish_time": None,
+                    "last_edition": "",
+                    "last_edition_name": "",
+                    "last_issue_id": "",
                 }
             )
             continue
@@ -1586,9 +1598,22 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             if pd.notna(value)
         ]
         overrun_minutes = 0.0
+        actual_print_finish_time = None
+        last_edition = ""
+        last_edition_name = ""
+        last_issue_id = ""
         if actual_end_times:
             actual_last_end = max(actual_end_times)
             overrun_minutes = max((actual_last_end - pd.Timestamp(window_end)).total_seconds() / 60, 0.0)
+            actual_print_finish_time = actual_last_end
+            # Identify which edition produced that last End DateTime, so "what was the last edition
+            # to finish printing that night" can be answered without re-deriving it downstream.
+            last_rows = group[group["End DateTime"] == actual_last_end]
+            if not last_rows.empty:
+                last_row = last_rows.iloc[-1]
+                last_edition = _clean_text(last_row.get("Edition"))
+                last_edition_name = _clean_text(last_row.get("Edition Name"))
+                last_issue_id = _clean_text(last_row.get("IssueID"))
 
         gross_runtime = min(max(gross_runtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         scheduled_runtime = max(scheduled_runtime, 0.0)
@@ -1614,6 +1639,10 @@ def _calculate_interval_metrics_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                 "change_over_time": adjusted_change_over,
                 "natural_buffer_time": natural_buffer_time,
                 "overrun_minutes": overrun_minutes,
+                "actual_print_finish_time": actual_print_finish_time,
+                "last_edition": last_edition,
+                "last_edition_name": last_edition_name,
+                "last_issue_id": last_issue_id,
             }
         )
 
@@ -3055,6 +3084,24 @@ def _format_run_date(value: Any) -> str:
     return parsed.isoformat() if parsed else ""
 
 
+def _format_print_finish_timestamp(value: Any) -> str:
+    """ISO 'YYYY-MM-DD HH:MM' for the actual print finish moment, or '' if absent.
+
+    Kept as a full timestamp (not just a clock time) because the print finish can land on the
+    calendar day after run_date (e.g. a night attributed to 2025-09-20 finishing at 2025-09-21
+    02:15) — callers need the real moment to correctly pick the latest finish across folders.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return ""
+    if pd.isna(ts):
+        return ""
+    return ts.strftime("%Y-%m-%d %H:%M")
+
+
 def _downtime_reason_records(down_time_df: pd.DataFrame) -> list[dict[str, Any]]:
     """Aggregate downtime events by plant/machine/folder/reason for chat context."""
     if down_time_df.empty:
@@ -3129,6 +3176,9 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
     renamed["run_date"] = renamed["run_date"].apply(_format_run_date)
     # Combine machine and folder into a single folder identifier with newline for better display
     renamed["folder"] = renamed["machine"] + "\n" + renamed["folder"]
+    renamed["actual_print_finish_time"] = renamed["actual_print_finish_time"].apply(
+        _format_print_finish_timestamp
+    )
 
     return _rounded_records(
         renamed[
@@ -3150,6 +3200,10 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "reflong_related_downtime",
                 "late_start_time",
                 "overrun_minutes",
+                "actual_print_finish_time",
+                "last_edition",
+                "last_edition_name",
+                "last_issue_id",
                 "runtime_segments",
                 "editions",
                 "twin_folder_mode",
@@ -3263,6 +3317,10 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
             "reflong_related_downtime",
             "late_start_time",
             "overrun_minutes",
+            "actual_print_finish_time",
+            "last_edition",
+            "last_edition_name",
+            "last_issue_id",
             "runtime_segments",
             "editions",
             "twin_folder_mode",

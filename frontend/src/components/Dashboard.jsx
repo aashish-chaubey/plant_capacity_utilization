@@ -2,6 +2,12 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -197,6 +203,7 @@ export default function Dashboard({
         role: "assistant",
         content: payload.answer || "No response.",
         plan: payload.plan || null,
+        chart: payload.chart || null,
       }]);
     } catch {
       setChatMessages([...nextMessages, {
@@ -468,6 +475,9 @@ export default function Dashboard({
                     >
                       <ChatMessageContent content={msg.content} role={msg.role} />
                     </div>
+                    {msg.role === "assistant" && msg.chart && (
+                      <ChatChart chart={msg.chart} />
+                    )}
                     {msg.role === "assistant" && msg.plan && (
                       <details className="ml-1">
                         <summary className="cursor-pointer select-none text-xs text-slate-400 hover:text-slate-600 list-none flex items-center gap-1">
@@ -588,6 +598,70 @@ const CHAT_MARKDOWN_COMPONENTS = {
   ),
   td: ({ children }) => <td className="px-2 py-1.5 align-top text-slate-700">{children}</td>,
 };
+
+const CHAT_CHART_PALETTE = ["#2563eb", "#16a34a", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#64748b"];
+const CHAT_CAPACITY_SLICE_COLORS = {
+  "Run Time": "#8FBB8F",
+  "Loss Time": "#F3C97B",
+  "Downtime": "#FF9AA2",
+  "Wait Time": "#9CA3AF",
+  "Spare Time": "#8FB8E8",
+};
+
+function ChatChart({ chart }) {
+  if (!chart || !Array.isArray(chart.data) || chart.data.length === 0) return null;
+  const unitSuffix = chart.unit ? ` ${chart.unit}` : "";
+  const tooltipFormatter = (value) => [`${value}${unitSuffix}`, chart.metric_label || "Value"];
+
+  return (
+    <div className="mt-1 rounded-xl border border-slate-200 bg-white p-2">
+      {chart.title && <p className="mb-1 text-[11px] font-semibold text-slate-600">{chart.title}</p>}
+      <div style={{ width: "100%", height: chart.type === "pie" ? 220 : 200 }}>
+        <ResponsiveContainer>
+          {chart.type === "line" ? (
+            <LineChart data={chart.data} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="label" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+              <YAxis tick={{ fontSize: 10 }} />
+              <Tooltip formatter={tooltipFormatter} />
+              <Line type="monotone" dataKey="value" stroke="#2563eb" strokeWidth={2} dot={{ r: 2 }} />
+            </LineChart>
+          ) : chart.type === "bar" ? (
+            <BarChart data={chart.data} margin={{ top: 4, right: 8, left: -16, bottom: 24 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-30} textAnchor="end" height={50} />
+              <YAxis tick={{ fontSize: 10 }} />
+              <Tooltip formatter={tooltipFormatter} />
+              <Bar dataKey="value" fill="#2563eb" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          ) : (
+            <PieChart>
+              <Pie
+                data={chart.data}
+                dataKey="value"
+                nameKey="label"
+                cx="50%"
+                cy="50%"
+                outerRadius={70}
+                label={({ percent }) => `${(percent * 100).toFixed(0)}%`}
+                labelLine={false}
+              >
+                {chart.data.map((entry, idx) => (
+                  <Cell
+                    key={entry.label}
+                    fill={CHAT_CAPACITY_SLICE_COLORS[entry.label] || CHAT_CHART_PALETTE[idx % CHAT_CHART_PALETTE.length]}
+                  />
+                ))}
+              </Pie>
+              <Tooltip formatter={tooltipFormatter} />
+              <Legend wrapperStyle={{ fontSize: 10 }} />
+            </PieChart>
+          )}
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
 
 function ChatMessageContent({ content, role }) {
   const text = String(content || "");

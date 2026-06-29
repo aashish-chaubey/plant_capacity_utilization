@@ -79,9 +79,10 @@ def build_chat_response(
         book_details=book_details,
         question=message,
     )
+    chart = _build_chart_payload(message, context)
     deterministic_answer = _try_deterministic_chat_answer(message, context)
     if deterministic_answer:
-        return {"answer": deterministic_answer, "status": "ok"}
+        return {"answer": deterministic_answer, "status": "ok", "chart": chart}
 
     endpoint = _get_env("AZURE_ENDPOINT")
     api_key = (
@@ -94,8 +95,8 @@ def build_chat_response(
     if not endpoint or not api_key:
         fallback_answer = _fallback_answer_from_context(message, context)
         if fallback_answer:
-            return {"answer": fallback_answer, "status": "ok", "plan": None}
-        return {"answer": "LLM is not configured.", "status": "unconfigured", "plan": None}
+            return {"answer": fallback_answer, "status": "ok", "plan": None, "chart": chart}
+        return {"answer": "LLM is not configured.", "status": "unconfigured", "plan": None, "chart": chart}
 
     # Phase 1 — Planner: use only when the question needs deeper reasoning.
     plan: dict[str, Any] | None = None
@@ -108,7 +109,7 @@ def build_chat_response(
 
     planned_answer = _answer_from_plan(plan, message, context)
     if planned_answer:
-        return {"answer": planned_answer, "status": "ok", "plan": plan}
+        return {"answer": planned_answer, "status": "ok", "plan": plan, "chart": chart}
 
     plan_section = ""
     if plan:
@@ -211,7 +212,15 @@ def build_chat_response(
         "- Unplanned Time: periods where the folder or tower was not scheduled or available for production.\n"
         "- Utilized Time / Utilisation: Runtime (SNP + GNP) + Loss Time + Downtime. "
         "Do not include Wait Time, Spare Time, or Unplanned Time.\n"
-        "- Spare Capacity: (Spare Time / (Total Available Time - Unplanned Time)) * 100.\n\n"
+        "- Spare Capacity: (Spare Time / (Total Available Time - Unplanned Time)) * 100.\n"
+        "- Print Finish Time vs Delayed Print Finish — these are NOT the same thing: "
+        "Print Finish Time is the actual clock time printing ended for an edition/folder/night, "
+        "regardless of whether that was on time or late — EVERY active night has one. "
+        "Delayed Print Finish (delayed_pf) is the SUBSET of those finishes that crossed the plant's "
+        "compliance cutoff window (04:00 default; 03:00 Baroda/Manesar; 02:30 Trivandrum) — only late "
+        "nights appear there. If asked for 'the print finish time' / 'when did printing finish' without "
+        "the word 'delayed', use print_finish_time (exact_dashboard.daily / exact_dashboard.folder_days), "
+        "never delayed_pf — delayed_pf would silently omit every on-time night.\n\n"
 
         "PREDICTION & EXTRAPOLATION RULES:\n"
         "When a question asks for a forecast, prediction, projection, or 'what will X be':\n"
@@ -306,12 +315,17 @@ def build_chat_response(
         "- exact_dashboard.daily: per-date rows with run_date, weekday (Monday-Sunday, precomputed), "
         "month (YYYY-MM, ALREADY PRECOMPUTED — group by this field directly for month-on-month/monthly trend "
         "questions; never refuse for lack of a month rollup and never derive it yourself), runtime_min, "
-        "utilization_pct, loss_time_min, spare_time_min, night_type, complexity_codes, and editions — use this for "
-        "trend analysis, extrapolation, and weekday-wise or month-wise plant-level questions.\n"
+        "utilization_pct, loss_time_min, spare_time_min, night_type, complexity_codes, editions, "
+        "print_finish_time (HH:MM, the ACTUAL last print finish across all folders that night, populated "
+        "for every active night — use this for 'what time did printing finish' questions, NOT delayed_pf), "
+        "last_edition / last_edition_name / last_folder (which edition/folder produced that last finish) "
+        "— use this for trend analysis, extrapolation, and weekday-wise or month-wise plant-level questions.\n"
         "- exact_dashboard.folder_days: per-folder per-date rows. Fields: folder, run_date, weekday "
         "(Monday-Sunday, precomputed), month (YYYY-MM, ALREADY PRECOMPUTED), active_night, "
         "runtime_min, loss_time_min, waiting_time_min, downtime_min, spare_time_min, unplanned_time_min, "
-        "utilization_pct, spare_capacity_pct, complexity_codes, editions. "
+        "utilization_pct, spare_capacity_pct, complexity_codes, editions, print_finish_time (HH:MM, that "
+        "folder's actual finish time that night, populated whether on time or late), last_edition / "
+        "last_edition_name (which edition produced it), delayed_print_finish (bool), overrun_minutes. "
         "Use for day-by-day breakdown within a folder, weekday-wise or month-wise per-folder questions, or to filter by a specific date.\n"
         "- loss_time.all_days: per-date plant-level loss breakdown. Fields: run_date, weekday (precomputed), "
         "month (YYYY-MM, ALREADY PRECOMPUTED), runtime_min, lost_time_min (= loss_time_min), waiting_time_min, "
@@ -358,8 +372,8 @@ def build_chat_response(
         if _is_weak_chat_answer(answer):
             fallback_answer = _fallback_answer_from_context(message, context, plan)
             if fallback_answer:
-                return {"answer": fallback_answer, "status": "ok", "plan": plan}
-        return {"answer": answer, "status": "ok", "plan": plan}
+                return {"answer": fallback_answer, "status": "ok", "plan": plan, "chart": chart}
+        return {"answer": answer, "status": "ok", "plan": plan, "chart": chart}
     except Exception as exc:
         if _chat_debug_enabled():
             print(f"[chat] executor fallback used: {_chat_error_kind(exc)} — {_sanitize_error_message(exc, api_key)}", flush=True)
@@ -369,6 +383,7 @@ def build_chat_response(
                 "answer": fallback_answer,
                 "status": "ok",
                 "plan": plan,
+                "chart": chart,
             }
         if _is_timeout_error(exc):
             return {
@@ -378,11 +393,13 @@ def build_chat_response(
                 ),
                 "status": "timeout",
                 "plan": plan,
+                "chart": chart,
             }
         return {
             "answer": "I could not answer that from the current computed dashboard context.",
             "status": "unanswered",
             "plan": plan,
+            "chart": chart,
         }
 
 
@@ -399,12 +416,18 @@ exact_dashboard.folder_days — per-folder per-date rows (use for day-level brea
   never derive weekday from run_date yourself), month (YYYY-MM, ALREADY PRECOMPUTED — use this field
   directly for month-on-month grouping, never derive it yourself), active_night, runtime_min, loss_time_min,
   waiting_time_min, downtime_min, spare_time_min, unplanned_time_min,
-  utilization_pct, spare_capacity_pct, complexity_codes, editions
+  utilization_pct, spare_capacity_pct, complexity_codes, editions, print_finish_time (HH:MM — the
+  ACTUAL print finish time for that folder that night, populated whether on time or late; use this
+  for "print finish time" questions, NOT delayed_pf which only has the late subset), last_edition,
+  last_edition_name (which edition produced that finish), delayed_print_finish (bool), overrun_minutes
 
 exact_dashboard.daily — per-date plant-level totals (use for daily trends, weekday-wise, month-wise, or plant-wide day queries)
   Fields: run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED), month (YYYY-MM, ALREADY PRECOMPUTED —
   use directly for month-on-month trend questions), runtime_min, loss_time_min, waiting_time_min,
-  downtime_min, spare_time_min, utilization_pct, night_type
+  downtime_min, spare_time_min, utilization_pct, night_type, print_finish_time (HH:MM — the ACTUAL
+  latest print finish across ALL folders that night, populated for every active night; use this for
+  "what time did printing finish" questions, NOT delayed_pf), last_edition, last_edition_name,
+  last_folder (which edition/folder produced that last finish)
 
 loss_time.all_days — per-date plant-level loss breakdown (use for month-on-month or weekday-wise
   trend questions about the COMPONENTS of loss time: changeover, late-start, reflong)
@@ -445,7 +468,10 @@ downtime_by_reason — downtime events by reason and folder
 downtime_by_folder — total incident counts per folder
   Fields: folder, incident_count, total_minutes
 
-delayed_pf — folders with print finish past compliance cutoff (04:00 / 03:00 / 02:30)
+delayed_pf — ONLY the folders/nights whose print finish crossed the compliance cutoff (04:00 / 03:00 /
+  02:30). This is a SUBSET, not "print finish time in general" — on-time nights never appear here. For
+  "what time did printing finish" without the word "delayed", use exact_dashboard.daily / .folder_days
+  print_finish_time instead, which is populated for every night.
   Fields: folder, run_date, night_type (GNP/UV or SNP/non-UV, ALREADY PRECOMPUTED per row —
   use this directly for GNP-vs-SNP-night comparisons, never join to a separate nights table),
   overrun_minutes, cutoff_time, estimated_print_finish_time, editions
@@ -483,6 +509,11 @@ COMPUTATION NOTES:
 - downtime by reason per tower → tower_downtime_reason_attribution
 - editions on a tower/folder → editions_by_tower / editions_by_folder
 - delayed print finish / overrun → delayed_pf
+- "print finish time" / "last edition for the day" / "when did printing finish" (WITHOUT the word
+  "delayed") → exact_dashboard.daily (plant-level: print_finish_time, last_edition, last_folder) or
+  exact_dashboard.folder_days (per-folder: print_finish_time, last_edition). Do NOT use delayed_pf for
+  this — it only has the late subset, not every night. Do NOT use editions_by_date — it lists every
+  edition that ran that day, not which one finished LAST or when.
 """
 
 
@@ -1191,10 +1222,178 @@ def _build_exact_dashboard_context(
     }
 
 
+_CHART_PIE_TERMS = [
+    "pie chart", "percentage split", "% split", "proportion of", "proportion between",
+    "share of", "composition of", "split between", "capacity split", "breakdown of capacity",
+    "split of capacity",
+]
+_CHART_LINE_TERMS = [
+    "trend", "trendline", "line chart", "over time", "day by day", "day-by-day",
+    "daily trend", "month on month", "month-on-month", "monthly trend", "trajectory",
+    "progression", "how has", "track the", "plot the",
+]
+_CHART_BAR_TERMS = [
+    "bar chart", "compare", "comparison", "rank", "ranking", "top folders", "top towers",
+    "across folders", "across towers", "by folder", "by tower", "per folder", "per tower",
+    "each folder", "each tower",
+]
+
+
+def _detect_chart_intent(question: str) -> str | None:
+    if any(term in question for term in _CHART_PIE_TERMS):
+        return "pie"
+    if any(term in question for term in _CHART_LINE_TERMS):
+        return "line"
+    if any(term in question for term in _CHART_BAR_TERMS):
+        return "bar"
+    return None
+
+
+def _chart_metric_spec(question: str) -> dict[str, Any]:
+    # Reuses the metric vocabulary already maintained for "average X per day" questions —
+    # same field names (runtime_min, loss_time_min, ...) appear on daily/folder/tower rows alike.
+    spec = _daily_average_metric_spec(question)
+    if spec:
+        return spec
+    return {
+        "label": "Utilisation",
+        "daily_key": "utilization_pct",
+        "summary_key": "average_utilization_pct",
+        "unit": "%",
+        "average_pct": True,
+    }
+
+
+def _chart_metric_value(row: dict[str, Any], spec: dict[str, Any]) -> float:
+    keys = spec.get("daily_keys") or [spec.get("daily_key")]
+    return sum(_number(row.get(key)) for key in keys if key)
+
+
+def _build_line_chart(question: str, exact_dashboard: dict[str, Any]) -> dict[str, Any] | None:
+    daily_rows = exact_dashboard.get("daily") or []
+    if not daily_rows:
+        return None
+    spec = _chart_metric_spec(question)
+    points = []
+    for row in sorted(daily_rows, key=lambda r: _clean_text(r.get("run_date"))):
+        date = _clean_text(row.get("run_date"))
+        if not date:
+            continue
+        points.append({"label": date, "value": _clean_number(_chart_metric_value(row, spec))})
+    if not points:
+        return None
+    unit = spec.get("unit", "")
+    return {
+        "type": "line",
+        "title": f"{spec['label']} trend by day" + (f" ({unit})" if unit else ""),
+        "metric_label": spec["label"],
+        "unit": unit,
+        "data": points[:120],
+    }
+
+
+def _build_pie_chart(question: str, exact_dashboard: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | None:
+    by_folder = any(term in question for term in ["by folder", "per folder", "each folder", "across folders"])
+    by_tower = any(term in question for term in ["by tower", "per tower", "each tower", "across towers"])
+    if by_folder or by_tower:
+        spec = _chart_metric_spec(question)
+        rows = (exact_dashboard.get("folders") or []) if by_folder else (context.get("towers") or [])
+        name_key = "resource" if by_folder else "tower"
+        points = []
+        for row in rows:
+            label = _clean_text(row.get(name_key))
+            if not label:
+                continue
+            value = _chart_metric_value(row, spec)
+            if value <= 0:
+                continue
+            points.append({"label": label, "value": _clean_number(value)})
+        if not points:
+            return None
+        points.sort(key=lambda p: -p["value"])
+        dim_label = "folder" if by_folder else "tower"
+        return {
+            "type": "pie",
+            "title": f"{spec['label']} share by {dim_label}",
+            "metric_label": spec["label"],
+            "unit": spec.get("unit", ""),
+            "data": points[:15],
+        }
+
+    summary = exact_dashboard.get("summary") or {}
+    slices = [
+        ("Run Time", summary.get("total_runtime_min")),
+        ("Loss Time", summary.get("total_loss_time_min")),
+        ("Downtime", summary.get("total_downtime_min")),
+        ("Wait Time", summary.get("total_waiting_time_min")),
+        ("Spare Time", summary.get("total_spare_time_min")),
+    ]
+    points = [{"label": label, "value": _clean_number(value)} for label, value in slices if _number(value) > 0]
+    if not points:
+        return None
+    return {
+        "type": "pie",
+        "title": "Capacity split (minutes)",
+        "metric_label": "Capacity split",
+        "unit": "min",
+        "data": points,
+    }
+
+
+def _build_bar_chart(question: str, exact_dashboard: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | None:
+    by_tower = "tower" in question and "folder" not in question
+    rows = (context.get("towers") or []) if by_tower else (exact_dashboard.get("folders") or [])
+    name_key = "tower" if by_tower else "resource"
+    spec = _chart_metric_spec(question)
+    points = []
+    for row in rows:
+        label = _clean_text(row.get(name_key))
+        if not label:
+            continue
+        points.append({"label": label, "value": _clean_number(_chart_metric_value(row, spec))})
+    if not points or not any(p["value"] for p in points):
+        return None
+    points.sort(key=lambda p: -p["value"])
+    dim_label = "tower" if by_tower else "folder"
+    return {
+        "type": "bar",
+        "title": f"{spec['label']} by {dim_label}",
+        "metric_label": spec["label"],
+        "unit": spec.get("unit", ""),
+        "data": points[:25],
+    }
+
+
+def _build_chart_payload(message: str, context: dict[str, Any]) -> dict[str, Any] | None:
+    question = _clean_text(message).casefold()
+    if not question:
+        return None
+    intent = _detect_chart_intent(question)
+    if not intent:
+        return None
+    exact_dashboard = context.get("exact_dashboard") or {}
+    try:
+        if intent == "line":
+            return _build_line_chart(question, exact_dashboard)
+        if intent == "pie":
+            return _build_pie_chart(question, exact_dashboard, context)
+        if intent == "bar":
+            return _build_bar_chart(question, exact_dashboard, context)
+    except Exception:
+        return None
+    return None
+
+
 def _try_deterministic_chat_answer(message: str, context: dict[str, Any]) -> str:
     question = _clean_text(message).casefold()
     if not question:
         return ""
+
+    if _is_delayed_pf_count_question(question):
+        return _answer_delayed_pf_count_question(question, context)
+
+    if _is_print_finish_lookup_question(question):
+        return _answer_print_finish_lookup_question(question, context)
 
     if _is_night_type_time_comparison_question(question):
         return _answer_night_type_time_comparison_question(question, context)
@@ -1221,6 +1420,106 @@ def _try_deterministic_chat_answer(message: str, context: dict[str, Any]) -> str
         return _answer_tower_availability_threshold_question(question, context)
 
     return ""
+
+
+def _is_delayed_pf_count_question(question: str) -> bool:
+    # delayed_pf has one row per delayed FOLDER per night, so a night with 2 delayed folders is 2
+    # rows — asking an LLM to mentally dedupe run_date across dozens of such rows is exactly the
+    # kind of counting task it gets wrong (observed: counted 4 unique days when only 3 existed).
+    # Compute the distinct-day count in Python instead of letting the model count rows itself.
+    has_count = any(term in question for term in ["count", "how many", "number of"])
+    has_day_unit = any(term in question for term in ["day", "days", "night", "nights", "date", "dates"])
+    return has_count and has_day_unit and _asks_delayed_pf(question)
+
+
+def _answer_delayed_pf_count_question(question: str, context: dict[str, Any]) -> str:
+    rows = context.get("delayed_pf") or (context.get("exact_dashboard") or {}).get("delayed_pf") or []
+    filtered = _filter_context_rows(
+        rows,
+        question,
+        ["run_date", "plant", "machine", "folder_name", "folder", "complexity_codes", "complexity_categories", "editions"],
+    )
+    rows = filtered or rows
+    unique_dates = sorted({_clean_text(row.get("run_date")) for row in rows if _clean_text(row.get("run_date"))})
+    if not unique_dates:
+        return "No delayed print finish days are present in the current data."
+
+    folder_row_count = len(rows)
+    lines = [
+        f"**{len(unique_dates)}** day(s) had at least one delayed print finish "
+        f"(across {folder_row_count} folder/night row(s) in delayed_pf — a day with multiple delayed "
+        f"folders is counted once).",
+        "",
+        "Dates: " + ", ".join(unique_dates),
+    ]
+    return "\n".join(lines)
+
+
+def _is_print_finish_lookup_question(question: str) -> bool:
+    has_print_finish = any(
+        term in question
+        for term in ["print finish", "printing finish", "finish time", "finished print", "finished printing"]
+    )
+    # Bare "print finish" means the actual finish time for every night, NOT the delayed subset —
+    # if the question signals delay/lateness, or asks for a rate/comparison rather than a plain
+    # per-day lookup, let the delayed_pf / comparison paths handle it instead.
+    is_delay_or_comparison = any(
+        term in question
+        for term in [
+            "delayed", "late finish", "overrun", "threshold", "cross", "compliance",
+            "how often", "frequency", "compare", "comparison", " vs ", "versus", "rate",
+        ]
+    )
+    return has_print_finish and not is_delay_or_comparison
+
+
+def _answer_print_finish_lookup_question(question: str, context: dict[str, Any]) -> str:
+    wants_folder = "folder" in question
+    exact = context.get("exact_dashboard") or {}
+    if wants_folder:
+        rows = exact.get("folder_days_all") or exact.get("folder_days") or context.get("folder_days") or []
+        rows = [row for row in rows if _clean_text(row.get("print_finish_time"))]
+        if not rows:
+            return ""
+        rows = sorted(rows, key=lambda row: (row.get("run_date", ""), row.get("folder", "")))
+        lines = [
+            "| Date | Folder | Print Finish Time | Edition |",
+            "| --- | --- | --- | --- |",
+        ]
+        for row in rows:
+            lines.append(
+                "| "
+                + " | ".join([
+                    _clean_text(row.get("run_date")),
+                    _clean_text(row.get("folder")),
+                    _clean_text(row.get("print_finish_time")),
+                    _clean_text(row.get("last_edition")) or _clean_text(row.get("last_edition_name")) or "—",
+                ])
+                + " |"
+            )
+        return "\n".join(lines)
+
+    rows = exact.get("daily") or context.get("daily") or []
+    rows = [row for row in rows if _clean_text(row.get("print_finish_time"))]
+    if not rows:
+        return ""
+    rows = sorted(rows, key=lambda row: row.get("run_date", ""))
+    lines = [
+        "| Date | Last Print Finish Time | Last Edition | Folder |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join([
+                _clean_text(row.get("run_date")),
+                _clean_text(row.get("print_finish_time")),
+                _clean_text(row.get("last_edition")) or _clean_text(row.get("last_edition_name")) or "—",
+                _clean_text(row.get("last_folder")) or "—",
+            ])
+            + " |"
+        )
+    return "\n".join(lines)
 
 
 def _is_base_category_comparison_question(question: str) -> bool:
@@ -2227,9 +2526,12 @@ def _answer_malt_question(question: str, context: dict[str, Any]) -> str:
 
 
 def _asks_delayed_pf(question: str) -> bool:
+    # Bare "print finish" is NOT included here — that phrase alone asks for the actual finish time
+    # (every night has one), not the delayed subset. Only route to delayed_pf when the question
+    # explicitly signals lateness/delay/threshold.
     return any(
         term in question
-        for term in ["delayed pf", "delayed print", "print finish", "pf threshold", "threshold", "overrun", "late finish"]
+        for term in ["delayed pf", "delayed print", "pf threshold", "threshold", "overrun", "late finish", "crossed"]
     )
 
 
@@ -2885,6 +3187,7 @@ def _exact_daily_rows(
         is_gnp_night = any(_is_gnp_segment(segment) for segment in runtime_segments)
         delayed_rows = [row for row in details if _number(row.get("overrun_minutes")) > 0]
         max_overrun = max([_number(row.get("overrun_minutes")) for row in delayed_rows], default=0.0)
+        last_finish = _last_print_finish_for_rows(details)
 
         rows.append({
             "run_date": run_date,
@@ -2893,6 +3196,13 @@ def _exact_daily_rows(
             "night_type": "GNP/UV" if is_gnp_night else "SNP/non-UV",
             "gnp_night": is_gnp_night,
             "uv_night": is_gnp_night,
+            # The latest print finish across ALL folders that night, and which edition/folder it was —
+            # this is a real observed finish time, not derived from delayed_pf (which only covers the
+            # subset of finishes that crossed the compliance window).
+            "print_finish_time": last_finish["print_finish_time"],
+            "last_edition": last_finish["last_edition"],
+            "last_edition_name": last_finish["last_edition_name"],
+            "last_folder": last_finish["last_folder"],
             "active_folders": _clean_number(active_folders),
             "capacity_folders": _clean_number(capacity_folders),
             "available_capacity_min": _clean_number(available),
@@ -3044,6 +3354,13 @@ def _exact_folder_day_row(row: dict[str, Any]) -> dict[str, Any]:
         "delayed_print_finish": overrun > 0,
         "overrun_minutes": _clean_number(overrun),
         "pf_cutoff_time": _format_clock_time(cutoff_minutes),
+        # print_finish_time is the ACTUAL clock time printing ended that night, populated for every
+        # active night regardless of whether it was delayed. estimated_print_finish_time below is the
+        # older, delayed-only field (cutoff + overrun) — kept for backward compatibility, but
+        # print_finish_time is the one to use for "when did printing finish" questions in general.
+        "print_finish_time": _print_finish_clock_time(row.get("actual_print_finish_time")),
+        "last_edition": _clean_text(row.get("last_edition")),
+        "last_edition_name": _clean_text(row.get("last_edition_name")),
         "estimated_print_finish_time": _format_clock_time(cutoff_minutes + overrun) if overrun > 0 else "",
         "complexity_codes": _complexity_codes_for_segments(runtime_segments),
         "complexity_categories": _complexity_categories_for_segments(runtime_segments),
@@ -3146,6 +3463,39 @@ def _month_label(value: str) -> str:
         return datetime.strptime(_clean_text(value), "%Y-%m-%d").strftime("%Y-%m")
     except ValueError:
         return ""
+
+
+def _print_finish_clock_time(value: Any) -> str:
+    """'HH:MM' clock time from a capacity.py 'YYYY-MM-DD HH:MM' print-finish timestamp string."""
+    text = _clean_text(value)
+    if not text or " " not in text:
+        return ""
+    return text.split(" ")[-1]
+
+
+def _last_print_finish_for_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Across a set of folder-day rows for one night, find whichever folder/edition finished
+    printing latest — this is the PLANT-level "last print finish of the night", distinct from any
+    single folder's own finish time. Returns clock time, full timestamp, and which edition it was.
+    """
+    candidates = [row for row in rows if _clean_text(row.get("actual_print_finish_time"))]
+    if not candidates:
+        return {
+            "print_finish_time": "",
+            "print_finish_timestamp": "",
+            "last_edition": "",
+            "last_edition_name": "",
+            "last_folder": "",
+        }
+    last_row = max(candidates, key=lambda row: _clean_text(row.get("actual_print_finish_time")))
+    timestamp = _clean_text(last_row.get("actual_print_finish_time"))
+    return {
+        "print_finish_time": _print_finish_clock_time(timestamp),
+        "print_finish_timestamp": timestamp,
+        "last_edition": _clean_text(last_row.get("last_edition")) or _clean_text(last_row.get("last_edition_name")),
+        "last_edition_name": _clean_text(last_row.get("last_edition_name")),
+        "last_folder": _display_resource_name(last_row.get("folder")),
+    }
 
 
 _WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
