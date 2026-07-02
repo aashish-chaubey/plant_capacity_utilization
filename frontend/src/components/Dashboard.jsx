@@ -494,7 +494,7 @@ export default function Dashboard({
                           {msg.plan.metrics?.length > 0 && <div><span className="font-medium text-slate-500">Metrics:</span> {msg.plan.metrics.join(", ")}</div>}
                           {msg.plan.computation && <div><span className="font-medium text-slate-500">Computation:</span> {msg.plan.computation}</div>}
                           {msg.plan.filters && Object.keys(msg.plan.filters).length > 0 && (
-                            <div><span className="font-medium text-slate-500">Filters:</span> {Object.entries(msg.plan.filters).map(([k, v]) => `${k}=${v}`).join(", ")}</div>
+                            <div><span className="font-medium text-slate-500">Filters:</span> {Object.entries(msg.plan.filters).map(([k, v]) => `${k}${formatPlanFilterValue(v)}`).join(", ")}</div>
                           )}
                           {msg.plan.output_format && <div><span className="font-medium text-slate-500">Output:</span> {msg.plan.output_format}</div>}
                         </div>
@@ -661,6 +661,13 @@ function ChatChart({ chart }) {
       </div>
     </div>
   );
+}
+
+function formatPlanFilterValue(value) {
+  if (value && typeof value === "object" && "op" in value && "value" in value) {
+    return ` ${value.op} ${value.value}`;
+  }
+  return `=${value}`;
 }
 
 function ChatMessageContent({ content, role }) {

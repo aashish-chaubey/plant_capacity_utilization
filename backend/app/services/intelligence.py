@@ -40,6 +40,14 @@ LOSS_DRIVER_INFERENCES = {
     "reflong_related_downtime": "reflong-related interruption time",
 }
 
+# Tolerates common typos ("how may days") so a misspelling doesn't silently fall through a
+# keyword-gated deterministic shortcut straight to the full LLM call.
+_HOW_MANY_RE = re.compile(r"how\s+(?:many|much|may)\b")
+
+
+def _asks_how_many(question: str) -> bool:
+    return bool(_HOW_MANY_RE.search(question))
+
 
 def build_chat_response(
     message: str,
@@ -529,10 +537,39 @@ def _call_planner(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
         '  "secondary_sources": ["<optional additional source_keys>"],\n'
         '  "metrics": ["<field names to extract, e.g. spare_time_min, active_nights>"],\n'
         '  "computation": "<plain English: what to compute, e.g. spare_time_min / active_nights for each folder>",\n'
-        '  "filters": {"<field>": "<value if any filter applies, else omit>"},\n'
+        '  "filters": {"<field>": "<value for an equality/contains match, OR {\\"op\\": \\">|<|>=|<=\\", \\"value\\": <number>} for a numeric threshold, else omit>"},\n'
         '  "group_by": "folder|tower|date|plant|reason|night_type|uv_tower|complexity|none",\n'
         '  "output_format": "table|single_value|list|ranked_list|comparison|trend_chart_description"\n'
-        "}"
+        "}\n\n"
+        "FILTER RULES:\n"
+        "- A question with a comparator word (\"greater than\", \"more than\", \"over\", \"above\", \"at least\" → "
+        "op \">\" or \">=\"; \"less than\", \"under\", \"below\", \"at most\" → op \"<\" or \"<=\") MUST use the "
+        "{\"op\": ..., \"value\": ...} filter shape on the relevant numeric field — never put a comparator "
+        "phrase into a plain equality filter, and never drop the condition from filters.\n"
+        "- A bare number/percentage with NO comparator word (e.g. \"worked with spare capacity 10%\", "
+        "\"nights at 10% utilization\") almost always means a THRESHOLD, not an exact match — interpret it "
+        "as {\"op\": \"<=\", \"value\": 10} (at or below that level), since the real intent is virtually "
+        "always \"how rare/low did this get\", not an exact equality nobody would ask about a continuous metric.\n"
+        "- If the question asks 'how many days/nights/dates' from a source where each row is NOT one "
+        "row per day (e.g. delayed_pf has one row per delayed folder per night), still set intent to "
+        "\"count\" — the day/night deduplication is handled outside the plan, you do not need to do it.\n"
+        "- If the question also asks for 'components', 'breakdown', or 'key components' alongside a count "
+        "or filter, still just set intent/filters normally — the components breakdown is added "
+        "automatically when those words appear in the question; you do not need a special field for it.\n"
+        "- CRITICAL: every field named in filters/metrics MUST actually exist on primary_source's field "
+        "list above — an unresolvable numeric filter field aborts the whole answer rather than silently "
+        "matching every row, so picking the wrong table is worse than a normal mistake. For a plant-level "
+        "night filter on runtime/loss time/downtime/wait time/spare time/utilization/spare capacity, the "
+        "field lives on exact_dashboard.daily (plant-wide) or exact_dashboard.folder_days (per folder) — "
+        "use one of those as primary_source. loss_time.all_days only has run_date, runtime_min, "
+        "lost_time_min, waiting_time_min, loss_pct, dominant_driver, and loss_components — it has NO "
+        "downtime_min or spare_time_min field, so never filter on those there; it is auto-joined for the "
+        "loss_components breakdown regardless of which table you pick as primary_source, so you do not "
+        "need to select it just because the question says 'components'.\n"
+        "- A metric mentioned with NO number at all — \"did we have downtime\", \"how many nights had "
+        "downtime\", \"any downtime\", \"experienced loss time\", \"with delays\" — means that metric was "
+        "PRESENT/non-zero, not literally any value. Use {\"op\": \">\", \"value\": 0} on that field. Do not "
+        "omit the filter just because no explicit number was stated in the question."
     )
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system},
@@ -1419,7 +1456,60 @@ def _try_deterministic_chat_answer(message: str, context: dict[str, Any]) -> str
     if _is_tower_availability_threshold_question(question):
         return _answer_tower_availability_threshold_question(question, context)
 
+    if _is_utilization_threshold_question(question):
+        return _answer_utilization_threshold_question(question, context)
+
     return ""
+
+
+_NUMERIC_CONDITION_PATTERNS = [
+    # "than"/"then" are both accepted — "greater then X" is a common typo for "greater than X"
+    # and the comparator must still be recognized, not silently dropped.
+    (r"(?:greater than or equal to|greater then or equal to|at least|no less than|minimum of)\s*(\d+(?:\.\d+)?)", ">="),
+    (r"(?:less than or equal to|less then or equal to|at most|no more than|maximum of)\s*(\d+(?:\.\d+)?)", "<="),
+    (r"(?:greater than|greater then|more than|more then|over|above|exceed(?:ing|s)?|higher than|higher then)\s*(\d+(?:\.\d+)?)", ">"),
+    (r"(?:less than|less then|under|below|fewer than|fewer then|lower than|lower then)\s*(\d+(?:\.\d+)?)", "<"),
+    (r">=\s*(\d+(?:\.\d+)?)", ">="),
+    (r"<=\s*(\d+(?:\.\d+)?)", "<="),
+    (r">\s*(\d+(?:\.\d+)?)", ">"),
+    (r"<\s*(\d+(?:\.\d+)?)", "<"),
+]
+_COMPARATOR_FUNCS = {
+    ">": lambda value, threshold: value > threshold,
+    "<": lambda value, threshold: value < threshold,
+    ">=": lambda value, threshold: value >= threshold,
+    "<=": lambda value, threshold: value <= threshold,
+}
+_COMPARATOR_LABELS = {">": "greater than", "<": "less than", ">=": "at least", "<=": "at most"}
+
+# Maps question phrasing to the field name carried on delayed_pf / daily / folder rows, so a
+# nested filter clause ("...where loss time is greater than 50 minutes") can be applied in Python
+# instead of asking the LLM to apply a second condition on top of a count — the same failure
+# class as the day-count dedup bug, just with an added filter the model silently dropped.
+_FILTER_METRIC_FIELDS = [
+    (["loss time", "lost time"], "loss_time_min", "Loss Time"),
+    (["overrun", "minutes late", "minutes past", "past cutoff"], "overrun_minutes", "Overrun"),
+    (["downtime", "down time"], "downtime_min", "Downtime"),
+    (["runtime", "run time"], "runtime_min", "Run Time"),
+    (["wait time", "waiting time"], "waiting_time_min", "Wait Time"),
+    (["spare time", "spare"], "spare_time_min", "Spare Time"),
+    (["unplanned"], "unplanned_time_min", "Unplanned Time"),
+]
+
+
+def _extract_numeric_condition(question: str) -> tuple[str, float] | None:
+    for pattern, comparator in _NUMERIC_CONDITION_PATTERNS:
+        match = re.search(pattern, question)
+        if match:
+            return comparator, float(match.group(1))
+    return None
+
+
+def _extract_filter_metric(question: str) -> tuple[str, str] | None:
+    for terms, field, label in _FILTER_METRIC_FIELDS:
+        if any(term in question for term in terms):
+            return field, label
+    return None
 
 
 def _is_delayed_pf_count_question(question: str) -> bool:
@@ -1427,7 +1517,7 @@ def _is_delayed_pf_count_question(question: str) -> bool:
     # rows — asking an LLM to mentally dedupe run_date across dozens of such rows is exactly the
     # kind of counting task it gets wrong (observed: counted 4 unique days when only 3 existed).
     # Compute the distinct-day count in Python instead of letting the model count rows itself.
-    has_count = any(term in question for term in ["count", "how many", "number of"])
+    has_count = any(term in question for term in ["count", "number of"]) or _asks_how_many(question)
     has_day_unit = any(term in question for term in ["day", "days", "night", "nights", "date", "dates"])
     return has_count and has_day_unit and _asks_delayed_pf(question)
 
@@ -1440,13 +1530,32 @@ def _answer_delayed_pf_count_question(question: str, context: dict[str, Any]) ->
         ["run_date", "plant", "machine", "folder_name", "folder", "complexity_codes", "complexity_categories", "editions"],
     )
     rows = filtered or rows
+
+    # Apply a nested numeric clause if the question has one, e.g. "...where loss time is greater
+    # than 50 minutes" — without this, a compound question silently degraded to the unqualified
+    # day count (the metric filter the user asked for was just dropped).
+    filter_note = ""
+    condition = _extract_numeric_condition(question)
+    metric = _extract_filter_metric(question)
+    if metric and not condition:
+        # A metric named with no number at all ("...did we have downtime", "...with downtime")
+        # means that metric was present/non-zero, not "any value including zero" — defaulting to
+        # the unfiltered count here silently drops the condition the question actually asked for.
+        condition = (">", 0.0)
+    if condition and metric:
+        comparator, threshold = condition
+        field, label = metric
+        compare_fn = _COMPARATOR_FUNCS[comparator]
+        rows = [row for row in rows if compare_fn(_number(row.get(field)), threshold)]
+        filter_note = f" where {label} is {_COMPARATOR_LABELS[comparator]} {threshold:g} minutes"
+
     unique_dates = sorted({_clean_text(row.get("run_date")) for row in rows if _clean_text(row.get("run_date"))})
     if not unique_dates:
-        return "No delayed print finish days are present in the current data."
+        return f"**0** days had a delayed print finish{filter_note} in the current data."
 
     folder_row_count = len(rows)
     lines = [
-        f"**{len(unique_dates)}** day(s) had at least one delayed print finish "
+        f"**{len(unique_dates)}** day(s) had at least one delayed print finish{filter_note} "
         f"(across {folder_row_count} folder/night row(s) in delayed_pf — a day with multiple delayed "
         f"folders is counted once).",
         "",
@@ -2061,16 +2170,43 @@ def _answer_from_plan(plan: dict[str, Any] | None, message: str, context: dict[s
     if not rows:
         return ""
 
-    rows = _apply_plan_filters(rows, plan.get("filters") or {})
+    filtered_rows = _apply_plan_filters(rows, plan.get("filters") or {})
+    question = _clean_text(message).casefold()
+    if filtered_rows is None:
+        # A numeric filter named a field that doesn't exist on this source (e.g. the planner picked
+        # a table without the metric it meant to filter on) — reporting an unfiltered count here
+        # would look like an answer but silently ignore the condition. Defer instead of guessing.
+        return ""
+    rows = filtered_rows
     if not rows:
+        if _plan_wants_components_breakdown(question):
+            return f"**0** matching rows from {source_key} for the given filter — no time-component breakdown to show."
         return "No rows match the requested filters in the current dashboard context."
+
+    # A nested "count/list X where <condition> ... and what are the key components" question needs
+    # both a row count AND a breakdown handed back together — the generic count/average/grouped
+    # branches below each return one or the other, so this combo gets its own early path instead of
+    # falling through to a single-number answer that silently drops the "components" half.
+    if _plan_wants_components_breakdown(question):
+        count_unit_field = _plan_count_unit_field(question, rows)
+        if count_unit_field:
+            distinct_values = sorted({
+                _clean_text(row.get(count_unit_field)) for row in rows if _clean_text(row.get(count_unit_field))
+            })
+            headline = (
+                f"**{len(distinct_values)}** distinct {_humanize_field(count_unit_field).lower()}(s) "
+                f"matched from {source_key}."
+            )
+        else:
+            headline = f"**{len(rows)}** matching row(s) from {source_key}."
+        breakdown = _plan_components_breakdown(question, rows, context)
+        return headline + breakdown if breakdown else headline
 
     metric_fields = _plan_metric_fields(plan, rows, message)
     group_field = _plan_group_field(plan, rows, message)
     intent = _clean_text(plan.get("intent")).casefold()
     output_format = _clean_text(plan.get("output_format")).casefold()
     computation = _clean_text(plan.get("computation")).casefold()
-    question = _clean_text(message).casefold()
     if intent in {"trend", "prediction"}:
         return ""
     # A "comparison" intent asking for a rate/frequency/percentage needs a denominator that
@@ -2103,6 +2239,18 @@ def _answer_from_plan(plan: dict[str, Any] | None, message: str, context: dict[s
                 counts[key] = counts.get(key, 0) + 1
             ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
             return _format_plan_count_answer(source_key, group_field, ranked)
+        # If the source has multiple rows per day/night (e.g. one row per delayed folder per
+        # night), "how many days/nights" must dedupe by date — counting raw rows over-counts any
+        # day with more than one matching row.
+        count_unit_field = _plan_count_unit_field(question, rows)
+        if count_unit_field:
+            distinct_values = {
+                _clean_text(row.get(count_unit_field)) for row in rows if _clean_text(row.get(count_unit_field))
+            }
+            return (
+                f"**{len(distinct_values)}** distinct {_humanize_field(count_unit_field).lower()}(s) "
+                f"from {source_key} (across {len(rows)} matching row(s))."
+            )
         return f"Count from {source_key}: {len(rows)}"
 
     if not metric_fields:
@@ -2114,6 +2262,12 @@ def _answer_from_plan(plan: dict[str, Any] | None, message: str, context: dict[s
             return ""
         grouped = _aggregate_plan_rows(rows, metric_fields, group_field, wants_average)
         if not grouped:
+            return ""
+        # A single group is never a real comparison/breakdown — it's just a totals row with a
+        # confusing category header. Let the full LLM call produce a better explanation instead
+        # (e.g. "what is the percentage split of capacity?" → pie-chart style prose, not a 1-row
+        # "by plant" table).
+        if len(grouped) <= 1:
             return ""
         if wants_ranking and metric_fields:
             metric = metric_fields[0]
@@ -2174,15 +2328,32 @@ def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict
     return []
 
 
-def _apply_plan_filters(rows: list[dict[str, Any]], filters: Any) -> list[dict[str, Any]]:
+def _apply_plan_filters(rows: list[dict[str, Any]], filters: Any) -> list[dict[str, Any]] | None:
+    """Returns None (not []) when a numeric comparator filter names a field the chosen source
+    doesn't actually have — silently dropping that filter would make every row "pass" and report
+    a confidently wrong, over-broad count/list instead of falling through to the next answer path.
+    Equality/contains filters keep the old skip-if-unresolved behavior other questions rely on."""
     if not isinstance(filters, dict) or not filters:
         return rows
     selected = rows
     for field, expected in filters.items():
         if expected in (None, "", [], {}):
             continue
+        is_numeric_filter = isinstance(expected, dict) and "op" in expected and "value" in expected
         field_name = _resolve_row_field(selected, _clean_text(field))
         if not field_name:
+            if is_numeric_filter:
+                return None
+            continue
+        # Numeric comparator filter, e.g. {"op": ">", "value": 50} for "loss time greater than 50
+        # minutes" — the planner schema teaches the model to emit this shape for threshold
+        # questions instead of the plain equality match below, which can't express ">"/"<" at all.
+        if is_numeric_filter:
+            compare_fn = _COMPARATOR_FUNCS.get(_clean_text(expected.get("op")))
+            if compare_fn is None:
+                return None
+            threshold = _number(expected.get("value"))
+            selected = [row for row in selected if compare_fn(_number(row.get(field_name)), threshold)]
             continue
         expected_values = expected if isinstance(expected, list) else [expected]
         expected_texts = [_clean_text(value).casefold() for value in expected_values if _clean_text(value)]
@@ -2193,6 +2364,103 @@ def _apply_plan_filters(rows: list[dict[str, Any]], filters: Any) -> list[dict[s
             if any(expected_text in _row_value_text(row.get(field_name)).casefold() for expected_text in expected_texts)
         ]
     return selected
+
+
+def _plan_wants_components_breakdown(question: str) -> bool:
+    return any(term in question for term in ["component", "components", "breakdown", "break down"])
+
+
+_PLAN_COUNT_UNIT_FIELDS = [
+    (["day", "days", "night", "nights", "date", "dates"], "run_date"),
+    (["folder", "folders"], "folder"),
+    (["tower", "towers"], "tower"),
+    (["edition", "editions"], "editions"),
+    (["plant", "plants"], "plant"),
+    (["reason", "reasons"], "reason"),
+]
+
+
+def _plan_count_unit_field(question: str, rows: list[dict[str, Any]]) -> str:
+    # Source tables here are often one row per (folder, night) or (tower, night) etc. — "how many
+    # X" must dedupe on whatever unit X names, not just dates, or a unit with several matching
+    # rows (e.g. a folder with multiple delayed nights) gets over-counted.
+    # "times" means occasions ("what times have we worked with...") — matched as a whole word so
+    # it doesn't fire on "loss time"/"run time"/etc.
+    if re.search(r"\btimes\b", question):
+        resolved = _resolve_row_field(rows, "run_date")
+        if resolved:
+            return resolved
+    for terms, field in _PLAN_COUNT_UNIT_FIELDS:
+        if any(term in question for term in terms):
+            resolved = _resolve_row_field(rows, field)
+            if resolved:
+                return resolved
+    return ""
+
+
+def _plan_components_breakdown(question: str, rows: list[dict[str, Any]], context: dict[str, Any]) -> str:
+    if not rows:
+        return ""
+
+    top_level_fields = [
+        ("runtime_min", "Run Time"),
+        ("loss_time_min", "Loss Time"),
+        ("downtime_min", "Downtime"),
+        ("waiting_time_min", "Wait Time"),
+        ("spare_time_min", "Spare Time"),
+    ]
+    resolved_fields = [(f, _resolve_row_field(rows, f), label) for f, label in top_level_fields]
+    resolved_fields = [(f, resolved, label) for f, resolved, label in resolved_fields if resolved]
+
+    lines: list[str] = []
+    has_content = False
+
+    # Show a per-row table when there are few enough matched rows for it to be readable —
+    # this is the common case for "which nights..." questions, and shows zero-activity rows
+    # (e.g. a fully unplanned night) instead of silently omitting them from a totals-only summary.
+    date_field = _resolve_row_field(rows, "run_date")
+    if date_field and len(rows) <= 30 and resolved_fields:
+        sorted_rows = sorted(rows, key=lambda r: _clean_text(r.get(date_field)))
+        header = ["Date"] + [label for _, _, label in resolved_fields]
+        lines.append("")
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("| " + " | ".join("---" for _ in header) + " |")
+        for row in sorted_rows:
+            cells = [_clean_text(row.get(date_field))] + [
+                f"{_number(row.get(resolved)):g}" for _, resolved, _ in resolved_fields
+            ]
+            lines.append("| " + " | ".join(cells) + " |")
+        has_content = True
+
+    totals_lines = ["", "Key time components (totals across matched rows):"]
+    for field, resolved, label in resolved_fields:
+        total = sum(_number(row.get(resolved)) for row in rows)
+        if total <= 0:
+            continue
+        totals_lines.append(f"- **{label}**: {total:g} min total")
+    if len(totals_lines) > 2:
+        lines.extend(totals_lines)
+        has_content = True
+
+    if date_field:
+        loss_components_by_date = {
+            _clean_text(r.get("run_date")): r.get("loss_components") or {}
+            for r in (context.get("loss_time") or {}).get("all_days") or []
+        }
+        component_totals: dict[str, float] = {}
+        for row in rows:
+            date = _clean_text(row.get(date_field))
+            for key, minutes in loss_components_by_date.get(date, {}).items():
+                component_totals[key] = component_totals.get(key, 0.0) + _number(minutes)
+        if component_totals:
+            component_labels = dict(LOSS_COMPONENTS)
+            lines.append("")
+            lines.append("Loss Time sub-components:")
+            for key, minutes in sorted(component_totals.items(), key=lambda kv: -kv[1]):
+                lines.append(f"- **{component_labels.get(key, key)}**: {minutes:g} min")
+            has_content = True
+
+    return "\n".join(lines) if has_content else ""
 
 
 def _plan_metric_fields(plan: dict[str, Any], rows: list[dict[str, Any]], message: str) -> list[str]:
@@ -2969,7 +3237,7 @@ def _is_tower_downtime_frequency_question(question: str) -> bool:
 
 def _is_tower_count_question(question: str) -> bool:
     has_tower = "tower" in question or "towers" in question
-    asks_count = any(term in question for term in ["how many", "total", "count", "number of"])
+    asks_count = any(term in question for term in ["total", "count", "number of"]) or _asks_how_many(question)
     excludes_threshold = "%" not in question and "percent" not in question and "utilised" not in question and "utilized" not in question
     return has_tower and asks_count and excludes_threshold
 
@@ -3023,13 +3291,88 @@ def _answer_tower_availability_threshold_question(question: str, context: dict[s
 
 
 def _extract_percentage(question: str) -> float:
-    match = re.search(r"(\d+(?:\.\d+)?)\\s*%", question)
+    match = re.search(r"(\d+(?:\.\d+)?)\s*%", question)
     if match:
         return float(match.group(1))
-    match = re.search(r"(\d+(?:\.\d+)?)\\s*percent", question)
+    match = re.search(r"(\d+(?:\.\d+)?)\s*percent", question)
     if match:
         return float(match.group(1))
     return 0.0
+
+
+def _is_utilization_threshold_question(question: str) -> bool:
+    # No "tower" requirement here — this is the plant/night-level counterpart to
+    # _is_tower_availability_threshold_question above (which requires "tower").
+    has_night_scope = any(term in question for term in ["night", "nights", "day", "days"])
+    has_capacity_term = any(
+        term in question
+        for term in ["capacity", "utilization", "utilisation", "utilized", "utilised"]
+    )
+    has_percent = "%" in question or "percent" in question
+    return (
+        has_night_scope
+        and has_capacity_term
+        and has_percent
+        and "tower" not in question
+        and _extract_numeric_condition(question) is not None
+    )
+
+
+def _answer_utilization_threshold_question(question: str, context: dict[str, Any]) -> str:
+    exact_dashboard = context.get("exact_dashboard") or {}
+    daily_rows = exact_dashboard.get("daily") or []
+    condition = _extract_numeric_condition(question)
+    if not condition or not daily_rows:
+        return ""
+
+    comparator, threshold = condition
+    compare_fn = _COMPARATOR_FUNCS[comparator]
+    matched = sorted(
+        (row for row in daily_rows if compare_fn(_number(row.get("utilization_pct")), threshold)),
+        key=lambda r: _clean_text(r.get("run_date")),
+    )
+
+    summary_line = (
+        f"**{len(matched)}** night(s) had utilization {_COMPARATOR_LABELS[comparator]} {threshold:g}% "
+        f"out of {len(daily_rows)} total nights in the current data."
+    )
+    if not matched:
+        return summary_line
+
+    # loss_components (changeover / late-start / reflong) live on the separate loss_time.all_days
+    # table, keyed by run_date — join in here so "key time components" covers the loss breakdown,
+    # not just the top-level runtime/loss/downtime/wait/spare split already on exact_dashboard.daily.
+    loss_components_by_date = {
+        _clean_text(row.get("run_date")): row.get("loss_components") or {}
+        for row in (context.get("loss_time") or {}).get("all_days") or []
+    }
+
+    component_totals: dict[str, float] = {}
+    table_lines = [
+        "| Date | Utilization % | Run Time | Loss Time | Downtime | Wait Time | Spare Time |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in matched:
+        date = _clean_text(row.get("run_date"))
+        for key, minutes in loss_components_by_date.get(date, {}).items():
+            component_totals[key] = component_totals.get(key, 0.0) + _number(minutes)
+        table_lines.append(
+            f"| {date} | {_number(row.get('utilization_pct')):g}% | "
+            f"{_number(row.get('runtime_min')):g} | {_number(row.get('loss_time_min')):g} | "
+            f"{_number(row.get('downtime_min')):g} | {_number(row.get('waiting_time_min')):g} | "
+            f"{_number(row.get('spare_time_min')):g} |"
+        )
+
+    lines = [summary_line, "", *table_lines]
+
+    if component_totals:
+        component_labels = dict(LOSS_COMPONENTS)
+        lines.append("")
+        lines.append("Loss Time components across these nights:")
+        for key, minutes in sorted(component_totals.items(), key=lambda kv: -kv[1]):
+            lines.append(f"- **{component_labels.get(key, key)}**: {minutes:g} min")
+
+    return "\n".join(lines)
 
 
 def _answer_tower_downtime_frequency_question(question: str, context: dict[str, Any]) -> str:
@@ -5528,7 +5871,16 @@ def _should_use_chat_planner(message: str) -> bool:
     configured = _get_env("CAPACITY_CHAT_USE_PLANNER")
     if configured:
         return configured.strip().casefold() not in {"0", "false", "no", "off"}
-    return _question_needs_reasoning(message)
+    # Always attempt the planner (a cheap, deterministic JSON-mode call) before falling back to a
+    # single free-text LLM call, instead of gating the attempt on a keyword heuristic. Keyword
+    # gating was the actual root cause of wrong counts on phrasing we hadn't anticipated — a typo
+    # ("how may days" instead of "how many"), or an implicit comparator ("did we have downtime"
+    # meaning >0 with no number stated at all) — every such miss skipped the planner entirely and
+    # went straight to the LLM, which is exactly where the miscounted answers came from.
+    # _answer_from_plan returns "" whenever it can't compute a real answer from real fields, so
+    # this can never produce a wrong answer — worst case it's one wasted round trip before the
+    # existing fallback path runs, same as today.
+    return bool(_clean_text(message))
 
 
 def _select_reasoning_effort(messages: list[dict[str, str]], model: str) -> str:
