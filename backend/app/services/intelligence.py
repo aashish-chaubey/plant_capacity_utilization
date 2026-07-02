@@ -87,10 +87,13 @@ def build_chat_response(
         book_details=book_details,
         question=message,
     )
-    chart = _build_chart_payload(message, context)
     deterministic_answer = _try_deterministic_chat_answer(message, context)
     if deterministic_answer:
-        return {"answer": deterministic_answer, "status": "ok", "chart": chart}
+        return {
+            "answer": deterministic_answer,
+            "status": "ok",
+            "chart": _chart_for_answer(deterministic_answer, message, context, history),
+        }
 
     endpoint = _get_env("AZURE_ENDPOINT")
     api_key = (
@@ -103,8 +106,13 @@ def build_chat_response(
     if not endpoint or not api_key:
         fallback_answer = _fallback_answer_from_context(message, context)
         if fallback_answer:
-            return {"answer": fallback_answer, "status": "ok", "plan": None, "chart": chart}
-        return {"answer": "LLM is not configured.", "status": "unconfigured", "plan": None, "chart": chart}
+            return {
+                "answer": fallback_answer,
+                "status": "ok",
+                "plan": None,
+                "chart": _chart_for_answer(fallback_answer, message, context, history),
+            }
+        return {"answer": "LLM is not configured.", "status": "unconfigured", "plan": None, "chart": None}
 
     # Phase 1 — Planner: use only when the question needs deeper reasoning.
     plan: dict[str, Any] | None = None
@@ -117,7 +125,12 @@ def build_chat_response(
 
     planned_answer = _answer_from_plan(plan, message, context)
     if planned_answer:
-        return {"answer": planned_answer, "status": "ok", "plan": plan, "chart": chart}
+        return {
+            "answer": planned_answer,
+            "status": "ok",
+            "plan": plan,
+            "chart": _chart_for_answer(planned_answer, message, context, history, plan),
+        }
 
     plan_section = ""
     if plan:
@@ -380,8 +393,18 @@ def build_chat_response(
         if _is_weak_chat_answer(answer):
             fallback_answer = _fallback_answer_from_context(message, context, plan)
             if fallback_answer:
-                return {"answer": fallback_answer, "status": "ok", "plan": plan, "chart": chart}
-        return {"answer": answer, "status": "ok", "plan": plan, "chart": chart}
+                return {
+                    "answer": fallback_answer,
+                    "status": "ok",
+                    "plan": plan,
+                    "chart": _chart_for_answer(fallback_answer, message, context, history, plan),
+                }
+        return {
+            "answer": answer,
+            "status": "ok",
+            "plan": plan,
+            "chart": _chart_for_answer(answer, message, context, history, plan),
+        }
     except Exception as exc:
         if _chat_debug_enabled():
             print(f"[chat] executor fallback used: {_chat_error_kind(exc)} — {_sanitize_error_message(exc, api_key)}", flush=True)
@@ -391,7 +414,7 @@ def build_chat_response(
                 "answer": fallback_answer,
                 "status": "ok",
                 "plan": plan,
-                "chart": chart,
+                "chart": _chart_for_answer(fallback_answer, message, context, history, plan),
             }
         if _is_timeout_error(exc):
             return {
@@ -401,13 +424,13 @@ def build_chat_response(
                 ),
                 "status": "timeout",
                 "plan": plan,
-                "chart": chart,
+                "chart": None,
             }
         return {
             "answer": "I could not answer that from the current computed dashboard context.",
             "status": "unanswered",
             "plan": plan,
-            "chart": chart,
+            "chart": None,
         }
 
 
@@ -1260,19 +1283,17 @@ def _build_exact_dashboard_context(
 
 
 _CHART_PIE_TERMS = [
-    "pie chart", "percentage split", "% split", "proportion of", "proportion between",
+    "pie chart", "pie graph", "percentage split", "% split", "proportion of", "proportion between",
     "share of", "composition of", "split between", "capacity split", "breakdown of capacity",
     "split of capacity",
 ]
-_CHART_LINE_TERMS = [
-    "trend", "trendline", "line chart", "over time", "day by day", "day-by-day",
-    "daily trend", "month on month", "month-on-month", "monthly trend", "trajectory",
-    "progression", "how has", "track the", "plot the",
-]
-_CHART_BAR_TERMS = [
-    "bar chart", "compare", "comparison", "rank", "ranking", "top folders", "top towers",
-    "across folders", "across towers", "by folder", "by tower", "per folder", "per tower",
-    "each folder", "each tower",
+# "trend" on its own implies a time-series visualisation; the rest require an explicit chart word.
+_CHART_LINE_TERMS = ["trend", "trendline", "line chart", "line graph", "track the"]
+# Bar chart only when the user actually asks for a chart/plot/graph of a comparison.
+_CHART_EXPLICIT_WORDS = ["chart", "plot", "graph", "visualize", "visualise"]
+_CHART_BAR_MODIFIERS = [
+    "bar", "column", "compare", "comparison", "rank", "ranking",
+    "by folder", "by tower", "per folder", "per tower", "each folder", "each tower",
 ]
 
 
@@ -1281,24 +1302,73 @@ def _detect_chart_intent(question: str) -> str | None:
         return "pie"
     if any(term in question for term in _CHART_LINE_TERMS):
         return "line"
-    if any(term in question for term in _CHART_BAR_TERMS):
-        return "bar"
+    # Generic explicit chart request — determine type from modifier words
+    if any(word in question for word in _CHART_EXPLICIT_WORDS):
+        if any(mod in question for mod in _CHART_BAR_MODIFIERS):
+            return "bar"
+        # "line" / "time" / "over time" / "daily" modifiers → line chart
+        if any(t in question for t in ["line", "time", "daily", "over time", "day by day"]):
+            return "line"
+        return "bar"  # default type for bare "show me a chart of X"
     return None
 
 
-def _chart_metric_spec(question: str) -> dict[str, Any]:
-    # Reuses the metric vocabulary already maintained for "average X per day" questions —
-    # same field names (runtime_min, loss_time_min, ...) appear on daily/folder/tower rows alike.
+_WEEKDAY_FILTER_MAP: dict[str, list[str]] = {
+    "monday": ["Monday"],
+    "tuesday": ["Tuesday"],
+    "wednesday": ["Wednesday"],
+    "thursday": ["Thursday"],
+    "friday": ["Friday"],
+    "saturday": ["Saturday"],
+    "sunday": ["Sunday"],
+    "weekend": ["Friday", "Saturday", "Sunday"],
+    "weekends": ["Friday", "Saturday", "Sunday"],
+    "weekday": ["Monday", "Tuesday", "Wednesday", "Thursday"],
+    "weekdays": ["Monday", "Tuesday", "Wednesday", "Thursday"],
+}
+
+
+def _weekday_filter_label(question: str) -> str:
+    # Prefer a named group ("weekends", "weekdays") if present; otherwise list all matched days.
+    for keyword in ("weekends", "weekend", "weekdays", "weekday"):
+        if keyword in question:
+            return keyword
+    matched: list[str] = []
+    seen: set[str] = set()
+    for keyword, days in _WEEKDAY_FILTER_MAP.items():
+        if keyword in question:
+            for day in days:
+                if day not in seen:
+                    matched.append(day)
+                    seen.add(day)
+    return ", ".join(matched) if matched else ""
+
+
+def _apply_weekday_filter(rows: list[dict[str, Any]], question: str) -> list[dict[str, Any]]:
+    target_days: set[str] = set()
+    for keyword, days in _WEEKDAY_FILTER_MAP.items():
+        if keyword in question:
+            target_days.update(days)
+    if not target_days:
+        return rows
+    return [row for row in rows if _clean_text(row.get("weekday")) in target_days]
+
+
+def _chart_metric_spec_from_context(question: str, history: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Resolve the chart metric from the current question first, then walk back through
+    recent user turns in history.  Returns None (no chart) rather than defaulting to a
+    metric that isn't relevant to what the user asked."""
     spec = _daily_average_metric_spec(question)
     if spec:
         return spec
-    return {
-        "label": "Utilisation",
-        "daily_key": "utilization_pct",
-        "summary_key": "average_utilization_pct",
-        "unit": "%",
-        "average_pct": True,
-    }
+    for turn in reversed((history or [])[-8:]):
+        if _clean_text(turn.get("role")) != "user":
+            continue
+        prior = _clean_text(turn.get("content", "")).casefold()
+        spec = _daily_average_metric_spec(prior)
+        if spec:
+            return spec
+    return None
 
 
 def _chart_metric_value(row: dict[str, Any], spec: dict[str, Any]) -> float:
@@ -1306,13 +1376,20 @@ def _chart_metric_value(row: dict[str, Any], spec: dict[str, Any]) -> float:
     return sum(_number(row.get(key)) for key in keys if key)
 
 
-def _build_line_chart(question: str, exact_dashboard: dict[str, Any]) -> dict[str, Any] | None:
+def _build_line_chart(
+    question: str,
+    exact_dashboard: dict[str, Any],
+    spec: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if spec is None:
+        return None
     daily_rows = exact_dashboard.get("daily") or []
     if not daily_rows:
         return None
-    spec = _chart_metric_spec(question)
+    filtered = _apply_weekday_filter(daily_rows, question)
+    rows = filtered if filtered else daily_rows
     points = []
-    for row in sorted(daily_rows, key=lambda r: _clean_text(r.get("run_date"))):
+    for row in sorted(rows, key=lambda r: _clean_text(r.get("run_date"))):
         date = _clean_text(row.get("run_date"))
         if not date:
             continue
@@ -1320,31 +1397,31 @@ def _build_line_chart(question: str, exact_dashboard: dict[str, Any]) -> dict[st
     if not points:
         return None
     unit = spec.get("unit", "")
-    return {
-        "type": "line",
-        "title": f"{spec['label']} trend by day" + (f" ({unit})" if unit else ""),
-        "metric_label": spec["label"],
-        "unit": unit,
-        "data": points[:120],
-    }
+    weekday_label = _weekday_filter_label(question)
+    title = f"{spec['label']} trend" + (f" — {weekday_label}" if weekday_label else " by day")
+    if unit:
+        title += f" ({unit})"
+    return {"type": "line", "title": title, "metric_label": spec["label"], "unit": unit, "data": points[:120]}
 
 
-def _build_pie_chart(question: str, exact_dashboard: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | None:
+def _build_pie_chart(
+    question: str,
+    exact_dashboard: dict[str, Any],
+    context: dict[str, Any],
+    spec: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     by_folder = any(term in question for term in ["by folder", "per folder", "each folder", "across folders"])
     by_tower = any(term in question for term in ["by tower", "per tower", "each tower", "across towers"])
     if by_folder or by_tower:
-        spec = _chart_metric_spec(question)
+        if spec is None:
+            return None
         rows = (exact_dashboard.get("folders") or []) if by_folder else (context.get("towers") or [])
         name_key = "resource" if by_folder else "tower"
-        points = []
-        for row in rows:
-            label = _clean_text(row.get(name_key))
-            if not label:
-                continue
-            value = _chart_metric_value(row, spec)
-            if value <= 0:
-                continue
-            points.append({"label": label, "value": _clean_number(value)})
+        points = [
+            {"label": _clean_text(row.get(name_key)), "value": _clean_number(_chart_metric_value(row, spec))}
+            for row in rows
+            if _clean_text(row.get(name_key)) and _chart_metric_value(row, spec) > 0
+        ]
         if not points:
             return None
         points.sort(key=lambda p: -p["value"])
@@ -1368,26 +1445,25 @@ def _build_pie_chart(question: str, exact_dashboard: dict[str, Any], context: di
     points = [{"label": label, "value": _clean_number(value)} for label, value in slices if _number(value) > 0]
     if not points:
         return None
-    return {
-        "type": "pie",
-        "title": "Capacity split (minutes)",
-        "metric_label": "Capacity split",
-        "unit": "min",
-        "data": points,
-    }
+    return {"type": "pie", "title": "Capacity split (minutes)", "metric_label": "Capacity split", "unit": "min", "data": points}
 
 
-def _build_bar_chart(question: str, exact_dashboard: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | None:
+def _build_bar_chart(
+    question: str,
+    exact_dashboard: dict[str, Any],
+    context: dict[str, Any],
+    spec: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if spec is None:
+        return None
     by_tower = "tower" in question and "folder" not in question
     rows = (context.get("towers") or []) if by_tower else (exact_dashboard.get("folders") or [])
     name_key = "tower" if by_tower else "resource"
-    spec = _chart_metric_spec(question)
-    points = []
-    for row in rows:
-        label = _clean_text(row.get(name_key))
-        if not label:
-            continue
-        points.append({"label": label, "value": _clean_number(_chart_metric_value(row, spec))})
+    points = [
+        {"label": _clean_text(row.get(name_key)), "value": _clean_number(_chart_metric_value(row, spec))}
+        for row in rows
+        if _clean_text(row.get(name_key))
+    ]
     if not points or not any(p["value"] for p in points):
         return None
     points.sort(key=lambda p: -p["value"])
@@ -1401,7 +1477,276 @@ def _build_bar_chart(question: str, exact_dashboard: dict[str, Any], context: di
     }
 
 
-def _build_chart_payload(message: str, context: dict[str, Any]) -> dict[str, Any] | None:
+def _build_chart_from_plan(
+    plan: dict[str, Any] | None,
+    context: dict[str, Any],
+    question: str,
+    history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Build a chart directly from the plan that was used to compute the answer.
+    Because we re-derive the same filtered rows the answer was built from, the chart
+    always matches the answer table — no keyword-guessing needed."""
+    if not plan:
+        return None
+    source_key = _clean_text(plan.get("primary_source"))
+    rows = _rows_for_plan_source(source_key, context)
+    if not rows:
+        return None
+    filtered = _apply_plan_filters(rows, plan.get("filters") or {})
+    if filtered is None:
+        filtered = rows
+    rows = filtered or rows
+
+    # Prefer the metric derived from question+history over the planner's first field —
+    # the planner sees only the current question, so "plot for weekends" with prior "spare
+    # time trend" history would produce runtime, not spare time.
+    history_spec = _chart_metric_spec_from_context(question, history or [])
+    if history_spec:
+        candidate = history_spec.get("daily_key") or ""
+        resolved = _resolve_row_field(rows, candidate) if candidate else None
+        primary_metric = resolved if resolved else None
+    else:
+        primary_metric = None
+
+    if primary_metric is None:
+        metric_fields = _plan_metric_fields(plan, rows, question)
+        if not metric_fields:
+            return None
+        primary_metric = metric_fields[0]
+
+    date_field = _resolve_row_field(rows, "run_date")
+    group_by_hint = _clean_text(plan.get("group_by")).casefold()
+    intent = _clean_text(plan.get("intent")).casefold()
+
+    # Time-series: source has dates and no categorical group_by → line chart
+    if date_field and group_by_hint in ("", "date", "none", "run_date"):
+        date_rows = _apply_weekday_filter(
+            sorted(rows, key=lambda r: _clean_text(r.get(date_field))),
+            question,
+        )
+        if not date_rows:
+            date_rows = sorted(rows, key=lambda r: _clean_text(r.get(date_field)))
+        points = [
+            {"label": _clean_text(r.get(date_field)), "value": _clean_number(_number(r.get(primary_metric)))}
+            for r in date_rows
+            if _clean_text(r.get(date_field))
+        ]
+        if len(points) >= 2:
+            unit = _metric_suffix(primary_metric).strip()
+            weekday_label = _weekday_filter_label(question)
+            title = f"{_humanize_field(primary_metric)} trend" + (f" — {weekday_label}" if weekday_label else " by date")
+            return {"type": "line", "title": title, "metric_label": _humanize_field(primary_metric), "unit": unit, "data": points[:120]}
+
+    # Categorical comparison → bar chart
+    group_field = _plan_group_field(plan, rows, question)
+    if group_field:
+        grouped = _aggregate_plan_rows(rows, [primary_metric], group_field, intent == "average")
+        if grouped:
+            points = [
+                {"label": _plan_group_value(r, group_field), "value": _clean_number(_number(r.get(primary_metric)))}
+                for r in sorted(grouped, key=lambda r: -_number(r.get(primary_metric)))
+            ]
+            if points:
+                unit = _metric_suffix(primary_metric).strip()
+                return {
+                    "type": "bar",
+                    "title": f"{_humanize_field(primary_metric)} by {_humanize_field(group_field)}",
+                    "metric_label": _humanize_field(primary_metric),
+                    "unit": unit,
+                    "data": points[:25],
+                }
+    return None
+
+
+_DATE_HEADER_TERMS = {"date", "run date", "run_date", "month", "week", "day"}
+_CATEGORY_HEADER_TERMS = {"folder", "tower", "resource", "reason", "machine", "plant", "edition", "type", "complexity", "code", "category"}
+_SKIP_Y_TERMS = {"rows", "row", "active nights", "nights", "count", "id", "ids", "rank"}
+
+
+def _normalize_header(h: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", _clean_text(h).casefold()).strip()
+
+
+def _parse_cell_number(cell: str) -> float | None:
+    cleaned = re.sub(r"[^\d.\-]", "", re.sub(r",", "", _clean_text(cell)))
+    try:
+        return float(cleaned) if cleaned else None
+    except ValueError:
+        return None
+
+
+def _parse_markdown_table(text: str) -> list[dict[str, str]]:
+    headers: list[str] | None = None
+    rows: list[dict[str, str]] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            if headers:
+                break  # end of current table
+            continue
+        cells = [re.sub(r"\*+", "", c).strip() for c in stripped[1:-1].split("|")]
+        if headers is None:
+            headers = cells
+        elif all(re.fullmatch(r"[-: ]+", c) for c in cells):
+            continue  # separator row
+        else:
+            rows.append(dict(zip(headers, cells)))
+    return rows
+
+
+def _pick_chart_columns(
+    headers: list[str],
+    rows: list[dict[str, str]],
+    question: str,
+    history: list[dict[str, Any]],
+) -> tuple[str | None, str | None, str]:
+    """Return (x_col, y_col, chart_type) choosing the most semantically relevant columns."""
+    # Identify x-axis (date or category)
+    x_col: str | None = None
+    for h in headers:
+        hn = _normalize_header(h)
+        if any(t in hn for t in _DATE_HEADER_TERMS):
+            x_col = h
+            break
+    chart_type = "line" if x_col else "bar"
+    if x_col is None:
+        for h in headers:
+            hn = _normalize_header(h)
+            if any(t in hn for t in _CATEGORY_HEADER_TERMS):
+                x_col = h
+                break
+
+    # Build candidate y-columns: all headers with predominantly numeric non-zero values
+    candidates: list[str] = []
+    for h in headers:
+        if h == x_col:
+            continue
+        hn = _normalize_header(h)
+        if any(t in hn for t in _SKIP_Y_TERMS):
+            continue
+        nums = [_parse_cell_number(row.get(h, "")) for row in rows]
+        valid = [n for n in nums if n is not None]
+        if valid and any(abs(n) > 0 for n in valid):
+            candidates.append(h)
+
+    if not candidates:
+        return x_col, None, chart_type
+
+    # Prefer the column that best matches the metric spec derived from question + history
+    spec = _chart_metric_spec_from_context(question, history)
+    if spec:
+        spec_label = _normalize_header(spec.get("label", ""))
+        spec_key = _normalize_header(spec.get("daily_key") or "")
+        for h in candidates:
+            hn = _normalize_header(h)
+            if spec_label and spec_label in hn:
+                return x_col, h, chart_type
+            if spec_key and spec_key.replace("min", "").strip() in hn:
+                return x_col, h, chart_type
+        # Spec is known but the column isn't in this table — returning a wrong column would
+        # silently show a different metric than the user asked for. Return None so the
+        # fallback path uses exact_dashboard data for the correct metric instead.
+        return x_col, None, chart_type
+
+    # No spec: fall back to the candidate with the highest average value
+    def avg_val(h: str) -> float:
+        nums = [_parse_cell_number(row.get(h, "")) for row in rows]
+        valid = [n for n in nums if n is not None]
+        return sum(valid) / len(valid) if valid else 0
+
+    y_col = max(candidates, key=avg_val)
+    return x_col, y_col, chart_type
+
+
+def _build_chart_from_answer(
+    answer_text: str,
+    question: str,
+    history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Parse the table in the bot's answer and build a chart directly from those values.
+    This means the chart always matches exactly what is shown in the answer text."""
+    rows = _parse_markdown_table(answer_text)
+    if len(rows) < 2:
+        return None
+
+    headers = list(rows[0].keys())
+    q = _clean_text(question).casefold()
+    x_col, y_col, chart_type = _pick_chart_columns(headers, rows, q, history or [])
+
+    if not x_col or not y_col:
+        return None
+
+    # Apply weekday filter if asked
+    if any(kw in q for kw in _WEEKDAY_FILTER_MAP):
+        x_header_norm = _normalize_header(x_col)
+        is_date_x = any(t in x_header_norm for t in _DATE_HEADER_TERMS)
+        if is_date_x:
+            filtered = _apply_weekday_filter(
+                [{"weekday": row.get("Weekday") or row.get("weekday", ""), **row} for row in rows],
+                q,
+            )
+            rows = filtered if filtered else rows
+
+    points = []
+    for row in rows:
+        x_val = re.sub(r"\*+", "", row.get(x_col, "")).strip()
+        y_num = _parse_cell_number(row.get(y_col, ""))
+        if x_val and y_num is not None:
+            points.append({"label": x_val, "value": _clean_number(y_num)})
+
+    if len(points) < 2:
+        return None
+
+    metric_label = re.sub(r"\*+", "", y_col).strip()
+    spec = _chart_metric_spec_from_context(q, history or [])
+    unit = spec.get("unit", "") if spec else ""
+
+    weekday_label = _weekday_filter_label(q)
+    if chart_type == "line":
+        title = f"{metric_label} trend" + (f" — {weekday_label}" if weekday_label else " over time")
+    else:
+        x_label = re.sub(r"\*+", "", x_col).strip()
+        title = f"{metric_label} by {x_label}"
+
+    return {
+        "type": chart_type,
+        "title": title,
+        "metric_label": metric_label,
+        "unit": unit,
+        "data": points[:60],
+    }
+
+
+def _chart_for_answer(
+    answer_text: str,
+    message: str,
+    context: dict[str, Any],
+    history: list[dict[str, Any]] | None = None,
+    plan: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Unified chart resolver. Only produces a chart when the user explicitly requested one
+    (chart intent detected in the question). Priority: plan-derived → answer-parsed → keyword."""
+    q = _clean_text(message).casefold()
+    if not _detect_chart_intent(q):
+        return None
+    try:
+        if plan:
+            plan_chart = _build_chart_from_plan(plan, context, q, history)
+            if plan_chart:
+                return plan_chart
+        answer_chart = _build_chart_from_answer(answer_text, q, history)
+        if answer_chart:
+            return answer_chart
+        return _build_chart_payload(message, context, history)
+    except Exception:
+        return None
+
+
+def _build_chart_payload(
+    message: str,
+    context: dict[str, Any],
+    history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     question = _clean_text(message).casefold()
     if not question:
         return None
@@ -1409,13 +1754,14 @@ def _build_chart_payload(message: str, context: dict[str, Any]) -> dict[str, Any
     if not intent:
         return None
     exact_dashboard = context.get("exact_dashboard") or {}
+    spec = _chart_metric_spec_from_context(question, history or [])
     try:
         if intent == "line":
-            return _build_line_chart(question, exact_dashboard)
+            return _build_line_chart(question, exact_dashboard, spec)
         if intent == "pie":
-            return _build_pie_chart(question, exact_dashboard, context)
+            return _build_pie_chart(question, exact_dashboard, context, spec)
         if intent == "bar":
-            return _build_bar_chart(question, exact_dashboard, context)
+            return _build_bar_chart(question, exact_dashboard, context, spec)
     except Exception:
         return None
     return None
