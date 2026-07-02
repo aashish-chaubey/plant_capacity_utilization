@@ -1,4 +1,4 @@
-export default function KpiCard({ label, value, tone = "slate" }) {
+export default function KpiCard({ label, value, detail = "", tone = "slate" }) {
   const tones = {
     blue: "border-blue-200 bg-blue-50 text-blue-800",
     green: "border-emerald-200 bg-emerald-50 text-emerald-800",
@@ -11,6 +11,7 @@ export default function KpiCard({ label, value, tone = "slate" }) {
     <article className={`rounded-lg border p-3 shadow-sm ${tones[tone] || tones.slate}`}>
       <p className="text-xs font-semibold uppercase tracking-normal opacity-75">{label}</p>
       <p className="mt-2 text-2xl font-semibold tracking-normal">{value}</p>
+      {detail && <p className="mt-1 truncate text-xs font-semibold opacity-70">{detail}</p>}
     </article>
   );
 }

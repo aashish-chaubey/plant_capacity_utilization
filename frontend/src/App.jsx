@@ -5,6 +5,7 @@ import Dashboard from "./components/Dashboard.jsx";
 
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const FISCAL_YEAR_START_MONTH = 4;
+const CAPACITY_WINDOW_MINUTES = 240;
 const PERIOD_MODES = ["annual", "half", "quarter", "month"];
 const TIMEFRAME_TABS = [
   ["annual", "Fiscal yr"],
@@ -699,12 +700,13 @@ export default function App() {
             jobId={jobId}
             selectedPlant={selectedPlant}
             selectedFolders={selectedFolders}
+            timeframeMode={timeframe.mode}
             timeframeRange={timeframeRange}
           />
         )}
 
         {/* Empty timeframe */}
-        {selectedPlant && filteredResult && filteredResult.daily.length === 0 && errors.length === 0 && (
+        {!loading && selectedPlant && filteredResult && filteredResult.daily.length === 0 && errors.length === 0 && (
           <section className="mt-2 rounded-xl border border-slate-200 bg-white p-8 text-center shadow-soft">
             <p className="text-sm font-semibold text-slate-950">No rows in this timeframe</p>
             <p className="mt-1 text-sm text-slate-500">
@@ -858,12 +860,220 @@ function filterCapacityDataByScope(result, selectedPlant, selectedFolders) {
   const details = selectedFolderSet.size > 0
     ? plantDetails.filter((row) => selectedFolderSet.has(row.folder))
     : plantDetails;
-  const towerDetails = (result.tower_details || [])
-    .filter((row) => row.plant_name === selectedPlant)
-    .filter((row) => selectedFolderSet.size === 0 || selectedFolderSet.has(row.folder));
-  const fixedCapacityFolders = selectedFolderSet.size > 0 ? selectedFolderSet.size : null;
-  const daily = buildDailyRowsFromDetails(details, dateUniverse, fixedCapacityFolders);
+  const plantTowerDetails = (result.tower_details || []).filter((row) => row.plant_name === selectedPlant);
+  const towerDetails = selectedFolderSet.size > 0
+    ? plantTowerDetails.filter((row) => selectedFolderSet.has(row.folder))
+    : plantTowerDetails;
+  const daily = buildDailyRowsFromTowerDetails(towerDetails, dateUniverse);
   return { ...result, summary: calculateSummary(daily), daily, details, tower_details: towerDetails };
+}
+
+function buildDailyRowsFromTowerDetails(towerRows, dateUniverse) {
+  const dates = (dateUniverse?.length ? dateUniverse : Array.from(
+    new Set((towerRows || []).map((row) => row.run_date).filter(Boolean))
+  )).sort();
+  const towerKeys = Array.from(
+    new Set((towerRows || []).map((row) => row.tower).filter(Boolean))
+  ).sort((a, b) => a.localeCompare(b));
+  const capacityTowersCount = towerKeys.length;
+
+  if (!dates.length || capacityTowersCount <= 0) return [];
+
+  const rowsByDateTower = new Map();
+  for (const row of towerRows || []) {
+    if (!row.run_date || !row.tower) continue;
+    const key = `${row.run_date}||${row.tower}`;
+    const rows = rowsByDateTower.get(key) || [];
+    rows.push(row);
+    rowsByDateTower.set(key, rows);
+  }
+
+  return dates.map((runDate) => {
+    const towerDayRows = towerKeys.map((towerKey) => {
+      const rows = rowsByDateTower.get(`${runDate}||${towerKey}`) || [];
+      return rows.length > 0
+        ? buildTowerDayCapacityValues(rows)
+        : buildIdleTowerDayCapacityValues(towerKey);
+    });
+    const availableCapacity = capacityTowersCount * CAPACITY_WINDOW_MINUTES;
+    const rawValues = {
+      waiting_time: sumBy(towerDayRows, "waiting_time"),
+      loss_time: sumBy(towerDayRows, "lost_time"),
+      downtime: sumBy(towerDayRows, "downtime"),
+      runtime: sumBy(towerDayRows, "runtime"),
+      buffer_time: sumBy(towerDayRows, "buffer_time"),
+      idle_time: sumBy(towerDayRows, "idle_time"),
+    };
+    const values = normalizeCapacityBucketValues(rawValues, availableCapacity);
+    const utilizedTime = values.runtime + values.downtime + values.loss_time;
+    const activeTowersCount = towerDayRows.filter((row) => row.active).length;
+
+    return {
+      run_date: runDate,
+      active_towers_count: activeTowersCount,
+      capacity_towers_count: capacityTowersCount,
+      available_capacity: cleanNumber(availableCapacity),
+      waiting_time: cleanNumber(values.waiting_time),
+      runtime: cleanNumber(values.runtime),
+      lost_time: cleanNumber(values.loss_time),
+      downtime: cleanNumber(values.downtime),
+      buffer_time: cleanNumber(values.buffer_time),
+      idle_time: cleanNumber(values.idle_time),
+      runtime_segments: aggregateRuntimeSegmentsForCapacity(towerDayRows, values.runtime),
+      utilization_percentage: cleanNumber(
+        availableCapacity > 0 ? Math.min((utilizedTime / availableCapacity) * 100, 100) : 0
+      )
+    };
+  });
+}
+
+function buildTowerDayCapacityValues(rows) {
+  const rawValues = {
+    waiting_time: sumBy(rows, "waiting_time"),
+    loss_time: rows.reduce((total, row) => total + getLossTime(row), 0),
+    downtime: sumBy(rows, "downtime"),
+    runtime: sumBy(rows, "runtime"),
+    buffer_time: sumBy(rows, "buffer_time"),
+    idle_time: sumBy(rows, "idle_time"),
+  };
+  const values = normalizeCapacityBucketValues(rawValues, CAPACITY_WINDOW_MINUTES);
+
+  return {
+    tower: rows[0]?.tower || "",
+    active: rows.some(isActiveCapacityDetailRow),
+    waiting_time: cleanNumber(values.waiting_time),
+    lost_time: cleanNumber(values.loss_time),
+    downtime: cleanNumber(values.downtime),
+    runtime: cleanNumber(values.runtime),
+    buffer_time: cleanNumber(values.buffer_time),
+    idle_time: cleanNumber(values.idle_time),
+    runtime_segments: aggregateRuntimeSegmentsForCapacity(rows, values.runtime),
+  };
+}
+
+function buildIdleTowerDayCapacityValues(towerKey) {
+  return {
+    tower: towerKey,
+    active: false,
+    waiting_time: 0,
+    lost_time: 0,
+    downtime: 0,
+    runtime: 0,
+    buffer_time: 0,
+    idle_time: CAPACITY_WINDOW_MINUTES,
+    runtime_segments: [],
+  };
+}
+
+function normalizeCapacityBucketValues(values, availableCapacity) {
+  const capacity = Math.max(Number(availableCapacity || 0), 0);
+  const normalized = {
+    waiting_time: cleanNumber(Math.max(Number(values.waiting_time || 0), 0)),
+    loss_time: cleanNumber(Math.max(Number(values.loss_time || 0), 0)),
+    downtime: cleanNumber(Math.max(Number(values.downtime || 0), 0)),
+    runtime: cleanNumber(Math.max(Number(values.runtime || 0), 0)),
+    buffer_time: cleanNumber(Math.max(Number(values.buffer_time || 0), 0)),
+    idle_time: cleanNumber(Math.max(Number(values.idle_time || 0), 0)),
+  };
+
+  if (capacity <= 0) return normalized;
+
+  const componentKeys = ["waiting_time", "loss_time", "downtime", "runtime", "buffer_time", "idle_time"];
+  let total = cleanNumber(componentKeys.reduce((sum, key) => sum + normalized[key], 0));
+
+  if (total < capacity) {
+    normalized.buffer_time = cleanNumber(normalized.buffer_time + capacity - total);
+    return normalized;
+  }
+
+  if (total <= capacity) return normalized;
+
+  let overage = cleanNumber(total - capacity);
+
+  for (const key of ["idle_time", "buffer_time", "runtime", "downtime", "loss_time", "waiting_time"]) {
+    if (overage <= 0) break;
+
+    const reduction = Math.min(normalized[key], overage);
+    normalized[key] = cleanNumber(normalized[key] - reduction);
+    overage = cleanNumber(overage - reduction);
+  }
+
+  return normalized;
+}
+
+function aggregateRuntimeSegmentsForCapacity(rows, targetRuntime) {
+  const runtime = Math.max(Number(targetRuntime || 0), 0);
+  if (runtime <= 0 || !Array.isArray(rows) || rows.length === 0) return [];
+
+  const buckets = new Map();
+
+  for (const row of rows) {
+    for (const segment of row.runtime_segments || []) {
+      const minutes = Math.max(Number(segment.minutes || 0), 0);
+      if (minutes <= 0) continue;
+      const bucketKey = runtimeSegmentBucketKey(segment);
+      const bucket = buckets.get(bucketKey) || {
+        key: bucketKey,
+        label: segment.label || runtimeSegmentLabel(bucketKey),
+        minutes: 0,
+        is_complex: Boolean(segment.is_complex),
+        effective_speed: 0,
+        print_order: 0,
+        complexity_code: segment.complexity_code || "",
+      };
+
+      bucket.minutes = cleanNumber(bucket.minutes + minutes);
+      bucket.is_complex = bucket.is_complex || Boolean(segment.is_complex);
+      bucket.effective_speed = Math.max(bucket.effective_speed || 0, Number(segment.effective_speed || 0));
+      bucket.print_order = cleanNumber((bucket.print_order || 0) + Number(segment.print_order || 0));
+      if (!bucket.complexity_code && segment.complexity_code) bucket.complexity_code = segment.complexity_code;
+      buckets.set(bucketKey, bucket);
+    }
+  }
+
+  const orderedKeys = ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"];
+  const segments = orderedKeys
+    .filter((key) => buckets.has(key))
+    .map((key) => buckets.get(key));
+  const totalMinutes = cleanNumber(segments.reduce((sum, segment) => sum + Number(segment.minutes || 0), 0));
+
+  if (totalMinutes <= 0) return [];
+
+  const scale = runtime / totalMinutes;
+  return segments.map((segment) => ({
+    ...segment,
+    minutes: cleanNumber(segment.minutes * scale)
+  }));
+}
+
+function runtimeSegmentBucketKey(segment) {
+  const text = `${segment.key || ""} ${segment.type || ""} ${segment.label || ""}`.toLowerCase();
+  const isComplex = Boolean(segment.is_complex || segment.isComplex || text.includes("complex"));
+  const runtimeType = text.includes("snp")
+    ? "snp"
+    : text.includes("gnp")
+      ? "gnp"
+      : "unknown";
+
+  if (runtimeType === "unknown") return runtimeType;
+  return isComplex ? `${runtimeType}_complex` : runtimeType;
+}
+
+function runtimeSegmentLabel(key) {
+  if (key.startsWith("snp")) return key.includes("complex") ? "SNP Complex" : "SNP";
+  if (key.startsWith("gnp")) return key.includes("complex") ? "GNP Complex" : "GNP";
+  return "Run Time";
+}
+
+function getLossTime(row) {
+  const provided = Number(row.lost_time);
+  if (Number.isFinite(provided) && provided > 0) return provided;
+
+  return (
+    Number(row.change_over_time || 0)
+    + Number(row.reflong_related_downtime || 0)
+    + Number(row.late_start_time || 0)
+  );
 }
 
 function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolders = null) {
@@ -894,7 +1104,7 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
       rows.filter(isActiveCapacityDetailRow).map((row) => row.folder)
     ).size;
     const activeAvailableCapacity = sumBy(rows, "available_capacity");
-    const availableCapacity = capacityFoldersCount * 240;
+    const availableCapacity = capacityFoldersCount * CAPACITY_WINDOW_MINUTES;
     const runtime = sumBy(rows, "runtime");
     const lostTime = sumBy(rows, "lost_time");
     const downtime = sumBy(rows, "downtime");
@@ -1034,6 +1244,7 @@ function filterCapacityData(result, range) {
 
 function calculateSummary(dailyRows) {
   const totalAvailable = sumBy(dailyRows, "available_capacity");
+  const totalWaitingTime = sumBy(dailyRows, "waiting_time");
   const totalRuntime = sumBy(dailyRows, "runtime");
   const totalLostTime = sumBy(dailyRows, "lost_time");
   const totalDowntime = sumBy(dailyRows, "downtime");
@@ -1043,6 +1254,7 @@ function calculateSummary(dailyRows) {
   const utilizedTime = totalRuntime + totalDowntime + totalLostTime;
   return {
     total_available_capacity: cleanNumber(totalAvailable),
+    total_waiting_time: cleanNumber(totalWaitingTime),
     total_runtime: cleanNumber(totalRuntime),
     total_lost_time: cleanNumber(totalLostTime),
     total_downtime: cleanNumber(totalDowntime),
@@ -1052,7 +1264,9 @@ function calculateSummary(dailyRows) {
     average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.min((utilizedTime / totalAvailable) * 100, 100) : 0),
     spare_capacity_percentage: cleanNumber(plannedAvailableTime > 0 ? Math.min((totalBufferTime / plannedAvailableTime) * 100, 100) : 0),
     idle_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalIdleTime / totalAvailable) * 100, 100) : 0),
-    active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count"))
+    active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count")),
+    active_tower_days: cleanNumber(sumBy(dailyRows, "active_towers_count")),
+    capacity_tower_days: cleanNumber(sumBy(dailyRows, "capacity_towers_count"))
   };
 }
 

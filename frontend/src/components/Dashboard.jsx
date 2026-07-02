@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import { ChevronLeft, ChevronRight, MessageSquare, Send, Trash2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, MessageSquare, Send, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -27,6 +27,7 @@ import KpiCard from "./KpiCard.jsx";
 const CAPACITY_WINDOW_MINUTES = 240;
 const CAPACITY_PAGE_SIZE = 7;
 const PLANT_CAPACITY_PAGE_SIZE = 31;
+const DAILY_CAPACITY_FOLDER_VIEW_ENABLED = false;
 
 const CAPACITY_SPLIT_COLORS = {
   waiting_time: "#B0B0B0",
@@ -107,6 +108,7 @@ export default function Dashboard({
   jobId,
   selectedPlant,
   selectedFolders,
+  timeframeMode,
   timeframeRange,
 }) {
   const [focusedDay, setFocusedDay] = useState("");
@@ -258,8 +260,8 @@ export default function Dashboard({
     () => aggregateResourceCapacitySplit(breakdownDetails, "folder", breakdownProductionDays),
     [breakdownDetails, breakdownProductionDays]
   );
-  const totalActiveFolderCapacity = useMemo(
-    () => calculateTotalActiveFolderCapacity(data.daily),
+  const totalTowerCapacity = useMemo(
+    () => calculateTotalTowerCapacity(data.daily),
     [data.daily]
   );
   const selectedTowerBreakdownStacks = useMemo(
@@ -285,32 +287,41 @@ export default function Dashboard({
     });
   }
 
+  const totalAvailableCapacity = Number(data.summary.total_available_capacity || 0);
+  const totalActiveTowerCapacity = Number(data.summary.active_tower_days || 0);
   const kpis = [
-    ["Available Time", formatMinutes(data.summary.total_available_capacity), "blue"],
-    ["Unplanned Time", formatMinutes(data.summary.total_idle_time), "slate"],
-    ["Runtime", formatMinutes(data.summary.total_runtime), "green"],
-    ["Lost Time", formatMinutes(data.summary.total_lost_time), "amber"],
-    ["Downtime", formatMinutes(data.summary.total_downtime), "red"],
-    ["Spare Time", formatMinutes(data.summary.total_buffer_time), "slate"],
+    ["Available Time", formatPercent(totalAvailableCapacity > 0 ? 100 : 0), "blue", formatMinutes(totalAvailableCapacity)],
+    ["Runtime", formatPercent(calculatePercentage(data.summary.total_runtime, totalAvailableCapacity)), "green", formatMinutes(data.summary.total_runtime)],
+    ["Wait Time", formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), "slate", formatMinutes(data.summary.total_waiting_time)],
+    ["Lost Time", formatPercent(calculatePercentage(data.summary.total_lost_time, totalAvailableCapacity)), "amber", formatMinutes(data.summary.total_lost_time)],
+    ["Downtime", formatPercent(calculatePercentage(data.summary.total_downtime, totalAvailableCapacity)), "red", formatMinutes(data.summary.total_downtime)],
+    ["Spare Time", formatPercent(calculatePercentage(data.summary.total_buffer_time, totalAvailableCapacity)), "slate", formatMinutes(data.summary.total_buffer_time)],
+    ["Unplanned Time", formatPercent(calculatePercentage(data.summary.total_idle_time, totalAvailableCapacity)), "slate", formatMinutes(data.summary.total_idle_time)],
     [
       "Spare Capacity",
       formatPercent(
         data.summary.spare_capacity_percentage
           ?? calculatePercentage(
             data.summary.total_buffer_time,
-            Number(data.summary.total_available_capacity || 0) - Number(data.summary.total_idle_time || 0)
+            totalAvailableCapacity - Number(data.summary.total_idle_time || 0)
           )
       ),
-      "slate"
+      "slate",
+      "of planned tower time"
     ],
-    ["Folder-Nights", `${formatNumber(data.summary.active_folder_days)}/${formatNumber(totalActiveFolderCapacity)}`, "slate"]
+    [
+      "Tower-Nights",
+      formatPercent(calculatePercentage(totalActiveTowerCapacity, totalTowerCapacity)),
+      "slate",
+      `${formatNumber(totalActiveTowerCapacity)}/${formatNumber(totalTowerCapacity)}`
+    ]
   ];
 
   return (
     <div className="mt-5 space-y-5">
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8">
-        {kpis.map(([label, value, tone]) => (
-          <KpiCard key={label} label={label} value={value} tone={tone} />
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-9">
+        {kpis.map(([label, value, tone, detail]) => (
+          <KpiCard key={label} label={label} value={value} detail={detail} tone={tone} />
         ))}
       </section>
 
@@ -318,7 +329,7 @@ export default function Dashboard({
         <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h2 className="text-base font-semibold text-slate-950">Daily capacity split</h2>
-            <p className="mt-1 text-sm text-slate-500">Machine-folder capacity by Run Date</p>
+            <p className="mt-1 text-sm text-slate-500">Tower-based plant capacity by Run Date</p>
           </div>
           {focusedDay && (
             <button
@@ -335,6 +346,9 @@ export default function Dashboard({
         <CapacitySplitChart
           daily={data.daily}
           details={data.details}
+          towerDetails={data.tower_details || []}
+          timeframeMode={timeframeMode}
+          timeframeRange={timeframeRange}
           selectedDay={focusedDay}
           onSelectDay={setFocusedDay}
         />
@@ -685,57 +699,79 @@ function ChatMessageContent({ content, role }) {
   );
 }
 
-function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
+function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timeframeRange, selectedDay, onSelectDay }) {
   const [pageStart, setPageStart] = useState(0);
-  const [viewMode, setViewMode] = useState("folder");
+  const [viewMode, setViewMode] = useState("plant");
+  const [zoomedMonth, setZoomedMonth] = useState("");
   const [summaryPopover, setSummaryPopover] = useState(null);
   const chartFrameRef = useRef(null);
+  const returnPageStartRef = useRef(0);
+  const effectiveViewMode = DAILY_CAPACITY_FOLDER_VIEW_ENABLED ? viewMode : "plant";
 
   const chartModel = useMemo(
-    () => buildCapacitySplitModel(daily, details),
-    [daily, details]
+    () => buildCapacitySplitModel(daily, details, towerDetails),
+    [daily, details, towerDetails]
   );
 
-  const { days, folders, rows, plantRows } = chartModel;
-  const isPlantView = viewMode === "plant";
-  const pageSize = isPlantView ? PLANT_CAPACITY_PAGE_SIZE : CAPACITY_PAGE_SIZE;
-  const maxPageStart = Math.max(days.length - pageSize, 0);
+  const { days, folders, rows, plantRows, totalTowerCount } = chartModel;
+  const isPlantView = effectiveViewMode === "plant";
+  const capacityPeriods = useMemo(
+    () => buildCapacityPeriodRows(plantRows, {
+      timeframeMode,
+      timeframeRange,
+      zoomedMonth,
+    }),
+    [plantRows, timeframeMode, timeframeRange, zoomedMonth]
+  );
+  const chartKeys = isPlantView
+    ? capacityPeriods.rows.map((row) => row.period_key)
+    : days;
+  const pageSize = isPlantView
+    ? (capacityPeriods.grain === "month" ? 36 : PLANT_CAPACITY_PAGE_SIZE)
+    : CAPACITY_PAGE_SIZE;
+  const pageUnitLabel = capacityPeriods.grain === "month" ? "months" : "days";
+  const maxPageStart = Math.max(chartKeys.length - pageSize, 0);
   const safePageStart = Math.min(pageStart, maxPageStart);
-  const visibleDays = days.slice(safePageStart, safePageStart + pageSize);
+  const visibleDays = chartKeys.slice(safePageStart, safePageStart + pageSize);
+  const selectedChartKey = summaryPopover?.day || selectedDay;
+  const returnViewLabel = formatCapacityReturnViewLabel(timeframeMode, timeframeRange);
+  const returnViewTitle = formatCapacityReturnViewTitle(timeframeMode, timeframeRange);
 
   useEffect(() => {
     setPageStart(0);
-  }, [days.length, folders.length, viewMode]);
+  }, [chartKeys.length, folders.length, effectiveViewMode, capacityPeriods.grain, zoomedMonth]);
 
-  const width = 1380;
+  useEffect(() => {
+    if (!zoomedMonth) return;
+    if (plantRows.some((row) => getMonthKey(row.run_date) === zoomedMonth)) return;
+    setZoomedMonth("");
+  }, [plantRows, zoomedMonth]);
+
+  const width = isPlantView ? 1800 : 1380;
   const height = 500;
   const margins = isPlantView
-    ? { top: 18, right: 8, bottom: 76, left: 62 }
+    ? { top: 18, right: 36, bottom: 76, left: 64 }
     : { top: 18, right: 8, bottom: 78, left: 62 };
   const dayLabelYOffset = isPlantView ? 28 : 58;
   const monthLabelGap = 14;
   const yAxisTitleX = 14;
   const plotWidth = width - margins.left - margins.right;
   const plotHeight = height - margins.top - margins.bottom;
-  const maxPlantCapacity = Math.max(
-    CAPACITY_WINDOW_MINUTES,
-    ...plantRows.map((row) => Number(row.total_capacity || 0))
-  );
-  const yMax = isPlantView ? maxPlantCapacity * 1.08 : 270;
-  const yTicks = isPlantView ? buildPlantCapacityTicks(maxPlantCapacity) : [0, 60, 120, 180, 240];
+  const yMax = isPlantView ? 100 : 270;
+  const yTicks = isPlantView ? [0, 25, 50, 75, 100] : [0, 60, 120, 180, 240];
   const dayCount = Math.max(visibleDays.length, 1);
   const groupWidth = plotWidth / dayCount;
   const barsPerDay = isPlantView ? 1 : Math.max(folders.length, 1);
-  const dayGap = isPlantView ? 12 : 28;
+  const dayGap = isPlantView ? 8 : 28;
   const barGap = isPlantView ? 0 : 4;
   const availableGroupWidth = Math.max(groupWidth - dayGap, isPlantView ? 10 : 28);
   const barWidth = Math.min(
-    isPlantView ? 30 : 38,
+    isPlantView ? 44 : 38,
     Math.max(isPlantView ? 8 : 10, (availableGroupWidth - barGap * (barsPerDay - 1)) / barsPerDay)
   );
   const actualGroupWidth = barWidth * barsPerDay + barGap * (barsPerDay - 1);
   const viewRows = isPlantView
-    ? plantRows.filter((row) => visibleDays.includes(row.run_date))
+    ? capacityPeriods.rows.filter((row) => visibleDays.includes(row.period_key))
     : rows.filter((row) => visibleDays.includes(row.run_date));
   const twinMarkers = isPlantView ? [] : buildTwinFolderMarkers(rows, visibleDays);
   const twinMarkerFolderKeys = new Set(
@@ -750,13 +786,15 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
   );
   const selectedHighlightColor = "#475569";
   const selectedDaySummary = useMemo(
-    () => buildCapacityDaySummary(summaryPopover?.day, rows, folders.length),
-    [folders.length, rows, summaryPopover?.day]
+    () => isPlantView
+      ? buildPlantCapacityPeriodSummary(summaryPopover?.day, capacityPeriods.rows)
+      : buildCapacityDaySummary(summaryPopover?.day, rows, folders.length),
+    [capacityPeriods.rows, folders.length, isPlantView, rows, summaryPopover?.day]
   );
 
   useEffect(() => {
     if (!selectedDay) {
-      setSummaryPopover(null);
+      setSummaryPopover((current) => current?.periodType === "day" ? null : current);
       return;
     }
 
@@ -765,6 +803,13 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
       return null;
     });
   }, [selectedDay]);
+
+  useEffect(() => {
+    setZoomedMonth("");
+    setSummaryPopover(null);
+    setPageStart(0);
+    returnPageStartRef.current = 0;
+  }, [timeframeMode, timeframeRange?.start, timeframeRange?.end]);
 
   function xFor(dayIndex, folderIndex = 0) {
     const groupStart = margins.left + dayIndex * groupWidth + (groupWidth - actualGroupWidth) / 2;
@@ -803,12 +848,32 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
     setPageStart((current) => Math.min(current + pageSize, maxPageStart));
   }
 
-  function handleBarClick(event, runDate) {
+  function zoomIntoMonth(monthKey) {
+    if (!monthKey) return;
+    returnPageStartRef.current = safePageStart;
+    setZoomedMonth(monthKey);
+    setPageStart(0);
+    setSummaryPopover(null);
+    onSelectDay("");
+  }
+
+  function zoomOutMonth() {
+    setZoomedMonth("");
+    setPageStart(returnPageStartRef.current || 0);
+    setSummaryPopover(null);
+    onSelectDay("");
+  }
+
+  function handleBarClick(event, row) {
     const bounds = chartFrameRef.current?.getBoundingClientRect();
-    onSelectDay(runDate);
+    if (isPlantView && row.period_type === "month") {
+      onSelectDay("");
+    } else {
+      onSelectDay(row.run_date);
+    }
 
     if (!bounds) {
-      setSummaryPopover({ day: runDate, left: 12, top: 12 });
+      setSummaryPopover({ day: row.period_key || row.run_date, periodType: row.period_type || "day", left: 12, top: 12 });
       return;
     }
 
@@ -824,13 +889,20 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
       Math.max(12, bounds.height - cardHeight - 12)
     );
 
-    setSummaryPopover({ day: runDate, left, top });
+    setSummaryPopover({ day: row.period_key || row.run_date, periodType: row.period_type || "day", left, top });
   }
 
-  if (!days.length || !folders.length) {
+  function handleBarDoubleClick(event, row) {
+    if (!isPlantView || row.period_type !== "month") return;
+    event.preventDefault();
+    event.stopPropagation();
+    zoomIntoMonth(row.month_key);
+  }
+
+  if (!days.length || (isPlantView ? !capacityPeriods.rows.length : !folders.length)) {
     return (
       <div className="flex h-80 items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
-        No machine-folder capacity data found for this selection.
+        No tower capacity data found for this selection.
       </div>
     );
   }
@@ -839,7 +911,9 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
     <div className="space-y-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-700">
-          {CAPACITY_SPLIT_LEGEND.map((item) => (
+          {CAPACITY_SPLIT_LEGEND
+            .filter((item) => DAILY_CAPACITY_FOLDER_VIEW_ENABLED || item.key !== "twin_folder")
+            .map((item) => (
             <div key={item.key} className="inline-flex items-center gap-1.5">
               {item.marker === "triangle" ? (
                 <span className="text-[11px] font-black leading-none text-slate-950">▲</span>
@@ -873,7 +947,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
           {isPlantView ? (
             <div className="inline-flex items-center gap-1.5">
               <span className="h-3 w-3 rounded-sm border border-slate-300 bg-white" />
-              <span>Plant capacity: {formatNumber(folders.length)} folders × 240 min</span>
+              <span>Plant capacity: {formatNumber(totalTowerCount)} towers × 240 min</span>
             </div>
           ) : (
             <div className="inline-flex items-center gap-1.5">
@@ -887,12 +961,24 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
         </div>
 
         <div className="inline-flex flex-wrap items-center justify-end gap-2">
+          {zoomedMonth && (
+            <button
+              type="button"
+              onClick={zoomOutMonth}
+              className="inline-flex min-h-9 max-w-full items-center justify-center gap-2 rounded-lg border border-blue-200 bg-white px-3 text-xs font-semibold text-blue-700 shadow-sm transition hover:bg-blue-50 hover:text-blue-800 sm:max-w-[320px]"
+              title={`Back to ${returnViewTitle}`}
+            >
+              <ZoomOut className="h-4 w-4" aria-hidden="true" />
+              <span className="truncate">Back to {returnViewLabel}</span>
+            </button>
+          )}
+          {DAILY_CAPACITY_FOLDER_VIEW_ENABLED && (
           <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
             {[
               ["folder", "Folder"],
               ["plant", "Plant"]
             ].map(([mode, label]) => {
-              const selected = viewMode === mode;
+              const selected = effectiveViewMode === mode;
 
               return (
                 <button
@@ -910,23 +996,24 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
               );
             })}
           </div>
+          )}
           <button
             type="button"
             onClick={setPreviousPage}
             disabled={safePageStart === 0}
-            aria-label={`Previous ${pageSize} days`}
+            aria-label={`Previous ${pageSize} ${pageUnitLabel}`}
             className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <ChevronLeft className="h-4 w-4" aria-hidden="true" />
           </button>
           <span className="min-w-28 text-center text-xs font-semibold text-slate-500">
-            {safePageStart + 1}-{Math.min(safePageStart + pageSize, days.length)} of {days.length}
+            {safePageStart + 1}-{Math.min(safePageStart + pageSize, chartKeys.length)} of {chartKeys.length}
           </span>
           <button
             type="button"
             onClick={setNextPage}
             disabled={safePageStart >= maxPageStart}
-            aria-label={`Next ${pageSize} days`}
+            aria-label={`Next ${pageSize} ${pageUnitLabel}`}
             className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <ChevronRight className="h-4 w-4" aria-hidden="true" />
@@ -934,7 +1021,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
         </div>
       </div>
 
-      {!isPlantView && (
+      {!isPlantView && DAILY_CAPACITY_FOLDER_VIEW_ENABLED && (
         <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-700">
           {folders.map((folder) => (
             <span
@@ -952,7 +1039,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
         </div>
       )}
 
-      <div ref={chartFrameRef} className="relative rounded-lg border border-slate-100 bg-[#f3f6fa] p-1.5">
+      <div ref={chartFrameRef} className="relative overflow-hidden rounded-lg border border-slate-100 bg-[#f3f6fa] p-0.5">
         <svg
           className="h-[500px] w-full"
           viewBox={`0 0 ${width} ${height}`}
@@ -986,7 +1073,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
                 fontSize="12"
                 fill="#334155"
               >
-                {isPlantView ? formatPlantCapacityTick(tick) : formatHourTick(tick)}
+                  {isPlantView ? formatPercent(tick) : formatHourTick(tick)}
               </text>
             </g>
           ))}
@@ -1018,7 +1105,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
           })}
 
           {visibleDays.map((day, dayIndex) => {
-            if (day !== selectedDay) return null;
+            if (day !== selectedChartKey) return null;
 
             return (
               <rect
@@ -1045,20 +1132,29 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
             fill="#0f172a"
             transform={`rotate(-90 ${yAxisTitleX} ${margins.top + plotHeight / 2})`}
           >
-            Time
+            {isPlantView ? "Share" : "Time"}
           </text>
 
           {viewRows.map((row) => {
-            const dayIndex = visibleDays.indexOf(row.run_date);
+            const rowKey = row.period_key || row.run_date;
+            const dayIndex = visibleDays.indexOf(rowKey);
             const folder = isPlantView ? { alias: "Plant", color: "#334155" } : folders[row.folderIndex];
             const x = xFor(dayIndex, isPlantView ? 0 : row.folderIndex);
             const rowCapacity = Math.max(Number(row.total_capacity || CAPACITY_WINDOW_MINUTES), 1);
             let cursorY = yFor(0);
 
             return (
-              <g key={`${row.run_date}-${row.folderKey}`} onClick={(event) => handleBarClick(event, row.run_date)} className="cursor-pointer">
+              <g
+                key={`${rowKey}-${row.folderKey}`}
+                onClick={(event) => handleBarClick(event, row)}
+                onDoubleClick={(event) => handleBarDoubleClick(event, row)}
+                className="cursor-pointer"
+              >
                 {row.segments.map((segment) => {
-                  const segmentHeight = heightFor(segment.value);
+                  const segmentChartValue = isPlantView
+                    ? calculateRawPercentage(segment.value, rowCapacity)
+                    : segment.value;
+                  const segmentHeight = heightFor(segmentChartValue);
                   const y = cursorY - segmentHeight;
                   cursorY = y;
 
@@ -1087,7 +1183,9 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
                         strokeWidth="0.6"
                       >
                         <title>
-                          {`${folder.alias}: ${segment.runtimeSegment ? segment.label || "Run Time" : segment.label} ${formatMinutes(segment.value)}`}
+                          {isPlantView
+                            ? `${segment.runtimeSegment ? segment.label || "Run Time" : segment.label} ${formatPercent(calculatePercentage(segment.value, rowCapacity))} (${formatMinutes(segment.value)})`
+                            : `${folder.alias}: ${segment.runtimeSegment ? segment.label || "Run Time" : segment.label} ${formatMinutes(segment.value)}`}
                         </title>
                       </rect>
                       {canShowRuntimeLabel && (
@@ -1154,7 +1252,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
             const groupCenter = margins.left + dayIndex * groupWidth + groupWidth / 2;
             const dayLabelY = margins.top + plotHeight + dayLabelYOffset;
             const monthLabelY = dayLabelY + monthLabelGap;
-            const axisLabel = formatDayAxisLabel(day);
+            const axisLabel = formatCapacityAxisLabel(day, capacityPeriods.grain);
             const dayTwinMarkers = twinMarkers.filter((marker) => marker.run_date === day);
             return (
               <g key={day}>
@@ -1246,6 +1344,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
             summary={selectedDaySummary}
             style={{ left: summaryPopover.left, top: summaryPopover.top }}
             onClose={() => setSummaryPopover(null)}
+            onZoomIn={selectedDaySummary.canZoom ? () => zoomIntoMonth(selectedDaySummary.zoomMonthKey) : null}
           />
         )}
       </div>
@@ -1253,7 +1352,7 @@ function CapacitySplitChart({ daily, details, selectedDay, onSelectDay }) {
   );
 }
 
-function CapacityDaySummary({ summary, style, onClose }) {
+function CapacityDaySummary({ summary, style, onClose, onZoomIn }) {
   return (
     <section
       className="absolute z-20 max-h-[440px] w-[400px] max-w-[calc(100%-1rem)] overflow-y-auto rounded-lg border border-slate-200 bg-white p-3 pr-10 text-sm shadow-xl"
@@ -1267,6 +1366,12 @@ function CapacityDaySummary({ summary, style, onClose }) {
       >
         <X className="h-4 w-4" aria-hidden="true" />
       </button>
+
+      {summary.dayLabel && (
+        <div className="mb-2 border-b border-slate-100 pb-2">
+          <p className="text-sm font-semibold text-slate-950">{summary.dayLabel}</p>
+        </div>
+      )}
 
       <div className="space-y-1.5">
         {summary.components.map((component) => (
@@ -1312,8 +1417,10 @@ function CapacityDaySummary({ summary, style, onClose }) {
 
       <div className="mt-2 space-y-1.5 border-t border-slate-100 pt-2">
         <div className="flex items-center justify-between gap-3">
-          <span className="font-medium text-slate-600">Active folders</span>
-          <span className="font-semibold text-slate-950">{summary.activeFolders}/{summary.totalFolders}</span>
+          <span className="font-medium text-slate-600">{summary.capacityUnitLabel || "Active folders"}</span>
+          <span className="font-semibold text-slate-950">
+            {formatNumber(summary.activeUnits ?? summary.activeFolders)}/{formatNumber(summary.totalUnits ?? summary.totalFolders)}
+          </span>
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="font-medium text-slate-600">Utilized time</span>
@@ -1322,6 +1429,17 @@ function CapacityDaySummary({ summary, style, onClose }) {
           </span>
         </div>
       </div>
+
+      {onZoomIn && (
+        <button
+          type="button"
+          onClick={onZoomIn}
+          className="mt-3 inline-flex min-h-9 w-full items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+        >
+          <ZoomIn className="h-4 w-4" aria-hidden="true" />
+          Zoom in
+        </button>
+      )}
     </section>
   );
 }
@@ -1648,7 +1766,7 @@ function TooltipRow({ label, value, color }) {
   );
 }
 
-function buildCapacitySplitModel(dailyRows, detailRows) {
+function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = []) {
   const days = [...(dailyRows || [])]
     .map((day) => day.run_date)
     .filter(Boolean)
@@ -1709,7 +1827,174 @@ function buildCapacitySplitModel(dailyRows, detailRows) {
     });
   }
 
-  return { days, folders, rows, plantRows: buildPlantCapacityRows(days, rows, folders.length) };
+  const folderPlantRows = buildPlantCapacityRows(days, rows, folders.length);
+  const towerPlantRows = buildTowerPlantCapacityRows(days, dailyRows, towerDetailRows);
+
+  return {
+    days,
+    folders,
+    rows,
+    plantRows: towerPlantRows.length > 0 ? towerPlantRows : folderPlantRows,
+    totalTowerCount: calculateCapacityTowerCount(dailyRows, towerDetailRows, folders.length)
+  };
+}
+
+function buildCapacityPeriodRows(plantRows, { timeframeMode, timeframeRange, zoomedMonth } = {}) {
+  const sourceRows = [...(plantRows || [])].sort((a, b) => String(a.run_date || "").localeCompare(String(b.run_date || "")));
+
+  if (sourceRows.length === 0) {
+    return { grain: "day", rows: [] };
+  }
+
+  if (zoomedMonth) {
+    return {
+      grain: "day",
+      rows: sourceRows
+        .filter((row) => getMonthKey(row.run_date) === zoomedMonth)
+        .map(asDailyCapacityPeriodRow)
+    };
+  }
+
+  if (shouldUseDailyCapacityGrain(sourceRows, timeframeMode, timeframeRange)) {
+    return { grain: "day", rows: sourceRows.map(asDailyCapacityPeriodRow) };
+  }
+
+  return { grain: "month", rows: buildMonthlyCapacityPeriodRows(sourceRows) };
+}
+
+function shouldUseDailyCapacityGrain(rows, timeframeMode, timeframeRange) {
+  const mode = String(timeframeMode || "").toLowerCase();
+
+  if (mode === "month") return true;
+  if (mode !== "custom") return false;
+
+  const start = timeframeRange?.start || rows[0]?.run_date || "";
+  const end = timeframeRange?.end || rows[rows.length - 1]?.run_date || "";
+  const daySpan = countDaysInclusive(start, end);
+  return daySpan > 0 && daySpan <= PLANT_CAPACITY_PAGE_SIZE;
+}
+
+function asDailyCapacityPeriodRow(row) {
+  return {
+    ...row,
+    period_key: row.run_date,
+    period_type: "day",
+    month_key: getMonthKey(row.run_date),
+    start_date: row.run_date,
+    end_date: row.run_date,
+    canZoom: false,
+  };
+}
+
+function buildMonthlyCapacityPeriodRows(rows) {
+  const rowsByMonth = new Map();
+
+  for (const row of rows) {
+    const monthKey = getMonthKey(row.run_date);
+    if (!monthKey) continue;
+    const monthRows = rowsByMonth.get(monthKey) || [];
+    monthRows.push(row);
+    rowsByMonth.set(monthKey, monthRows);
+  }
+
+  return Array.from(rowsByMonth.entries())
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([monthKey, monthRows]) => buildMonthlyCapacityPeriodRow(monthKey, monthRows));
+}
+
+function buildMonthlyCapacityPeriodRow(monthKey, monthRows) {
+  const sortedRows = [...monthRows].sort((a, b) => String(a.run_date || "").localeCompare(String(b.run_date || "")));
+  const totalCapacity = sumCapacityRows(sortedRows, "total_capacity");
+  const values = normalizePlantCapacityValues({
+    waiting_time: sumCapacityRows(sortedRows, "waiting_time"),
+    loss_time: sumCapacityRows(sortedRows, "loss_time"),
+    downtime: sumCapacityRows(sortedRows, "downtime"),
+    runtime: sumCapacityRows(sortedRows, "runtime"),
+    spare_time: sumCapacityRows(sortedRows, "spare_time"),
+    idle_time: sumCapacityRows(sortedRows, "idle_time")
+  }, totalCapacity);
+  const runtimeSegments = aggregatePlantRuntimeSegments(sortedRows, values.runtime);
+
+  return {
+    run_date: monthKey,
+    period_key: monthKey,
+    period_type: "month",
+    month_key: monthKey,
+    start_date: sortedRows[0]?.run_date || "",
+    end_date: sortedRows[sortedRows.length - 1]?.run_date || "",
+    folderKey: "Plant",
+    folderIndex: 0,
+    isIdle: false,
+    isPlant: true,
+    twin_folder_mode: false,
+    twin_folder_group: "",
+    activeTowers: sumCapacityRows(sortedRows, "activeTowers"),
+    totalTowers: sumCapacityRows(sortedRows, "totalTowers"),
+    activeFolders: sumCapacityRows(sortedRows, "activeFolders"),
+    totalFolders: sumCapacityRows(sortedRows, "totalFolders"),
+    total_capacity: totalCapacity,
+    ...values,
+    runtime_segments: runtimeSegments,
+    segments: buildCapacitySegments({ ...values, runtime_segments: runtimeSegments }, totalCapacity),
+    canZoom: true,
+  };
+}
+
+function buildTowerPlantCapacityRows(days, dailyRows, towerDetailRows = []) {
+  const dailyByDate = new Map((dailyRows || []).map((row) => [row.run_date, row]));
+  const towerRowsByDate = new Map();
+
+  for (const row of towerDetailRows || []) {
+    if (!row.run_date) continue;
+    const rows = towerRowsByDate.get(row.run_date) || [];
+    rows.push(row);
+    towerRowsByDate.set(row.run_date, rows);
+  }
+
+  return days
+    .map((runDate) => {
+      const daily = dailyByDate.get(runDate);
+      if (!daily) return null;
+
+      const totalCapacity = Math.max(Number(daily.available_capacity || 0), 0);
+      if (totalCapacity <= 0) return null;
+
+      const values = normalizePlantCapacityValues({
+        waiting_time: daily.waiting_time,
+        loss_time: daily.lost_time,
+        downtime: daily.downtime,
+        runtime: daily.runtime,
+        spare_time: daily.buffer_time,
+        idle_time: daily.idle_time
+      }, totalCapacity);
+      const runtimeSegments = Array.isArray(daily.runtime_segments) && daily.runtime_segments.length > 0
+        ? normalizeRuntimeSegments(daily.runtime_segments, values.runtime, totalCapacity)
+        : aggregateRuntimeSegmentsFromSourceRows(towerRowsByDate.get(runDate) || [], values.runtime, totalCapacity);
+      const totalTowers = Math.max(
+        Number(daily.capacity_towers_count || 0),
+        Math.ceil(totalCapacity / CAPACITY_WINDOW_MINUTES),
+        1
+      );
+
+      return {
+        run_date: runDate,
+        folderKey: "Plant",
+        folderIndex: 0,
+        isIdle: false,
+        isPlant: true,
+        twin_folder_mode: false,
+        twin_folder_group: "",
+        activeTowers: Number(daily.active_towers_count || 0),
+        totalTowers,
+        activeFolders: Number(daily.active_folders_count || 0),
+        totalFolders: totalTowers,
+        total_capacity: totalCapacity,
+        ...values,
+        runtime_segments: runtimeSegments,
+        segments: buildCapacitySegments({ ...values, runtime_segments: runtimeSegments }, totalCapacity)
+      };
+    })
+    .filter(Boolean);
 }
 
 function buildPlantCapacityRows(days, rows, folderCount) {
@@ -1824,6 +2109,68 @@ function aggregatePlantRuntimeSegments(dayRows, targetRuntime) {
   }));
 }
 
+function aggregateRuntimeSegmentsFromSourceRows(rows, targetRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES) {
+  const runtime = Math.min(
+    Math.max(Number(targetRuntime || 0), 0),
+    Math.max(Number(capacityLimit || CAPACITY_WINDOW_MINUTES), 0)
+  );
+  if (runtime <= 0 || !Array.isArray(rows) || rows.length === 0) return [];
+
+  const buckets = new Map();
+
+  for (const row of rows) {
+    for (const segment of row.runtime_segments || []) {
+      const minutes = Math.max(Number(segment.minutes || 0), 0);
+      if (minutes <= 0) continue;
+
+      const key = rawRuntimeSegmentBucketKey(segment);
+      const bucket = buckets.get(key) || {
+        key,
+        label: segment.label || RUNTIME_SEGMENT_STYLES[key]?.label || "Run Time",
+        minutes: 0,
+        is_complex: Boolean(segment.is_complex),
+        effective_speed: 0,
+        print_order: 0,
+        complexity_code: segment.complexity_code || "",
+      };
+
+      bucket.minutes = cleanNumber(bucket.minutes + minutes);
+      bucket.is_complex = bucket.is_complex || Boolean(segment.is_complex);
+      bucket.effective_speed = Math.max(Number(bucket.effective_speed || 0), Number(segment.effective_speed || 0));
+      bucket.print_order = cleanNumber(Number(bucket.print_order || 0) + Number(segment.print_order || 0));
+      if (!bucket.complexity_code && segment.complexity_code) bucket.complexity_code = segment.complexity_code;
+      buckets.set(key, bucket);
+    }
+  }
+
+  const orderedKeys = ["snp", "snp_complex", "gnp", "gnp_complex", "unknown"];
+  const segments = orderedKeys
+    .filter((key) => buckets.has(key))
+    .map((key) => buckets.get(key));
+  const totalMinutes = cleanNumber(segments.reduce((sum, segment) => sum + Number(segment.minutes || 0), 0));
+
+  if (totalMinutes <= 0) return [];
+
+  const scale = runtime / totalMinutes;
+  return segments.map((segment) => ({
+    ...segment,
+    minutes: cleanNumber(segment.minutes * scale)
+  }));
+}
+
+function rawRuntimeSegmentBucketKey(segment) {
+  const text = `${segment.key || ""} ${segment.type || ""} ${segment.label || ""}`.toLowerCase();
+  const isComplex = Boolean(segment.is_complex || segment.isComplex || text.includes("complex"));
+  const runtimeType = text.includes("snp")
+    ? "snp"
+    : text.includes("gnp")
+      ? "gnp"
+      : "unknown";
+
+  if (runtimeType === "unknown") return runtimeType;
+  return isComplex ? `${runtimeType}_complex` : runtimeType;
+}
+
 function getRuntimeBucketKey(segment) {
   const text = `${segment.key || ""} ${segment.label || ""}`.toLowerCase();
   const runtimeType = text.includes("snp")
@@ -1901,6 +2248,9 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
   return {
     run_date: selectedDay,
     dayLabel: formatDayLabel(selectedDay),
+    capacityUnitLabel: "Active folders",
+    activeUnits: activeRows.length,
+    totalUnits: folderCount,
     activeFolders: activeRows.length,
     totalFolders: folderCount,
     totalCapacity,
@@ -1945,6 +2295,87 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
       }
     ]
   };
+}
+
+function buildPlantCapacityPeriodSummary(selectedPeriod, periodRows) {
+  if (!selectedPeriod) return null;
+
+  const row = (periodRows || []).find((candidate) => candidate.period_key === selectedPeriod || candidate.run_date === selectedPeriod);
+  if (!row) return null;
+
+  const isMonth = row.period_type === "month";
+  const totalCapacity = Math.max(Number(row.total_capacity || 0), 0);
+  const runtime = Number(row.runtime || 0);
+  const waitingTime = Number(row.waiting_time || 0);
+  const lossTime = Number(row.loss_time || 0);
+  const downtime = Number(row.downtime || 0);
+  const spareTime = Number(row.spare_time || 0);
+  const idleTime = Number(row.idle_time || 0);
+
+  return {
+    run_date: row.run_date,
+    dayLabel: isMonth ? formatMonthYearLabel(row.month_key) : formatDayLabel(row.run_date),
+    capacityUnitLabel: isMonth ? "Active tower-days" : "Active towers",
+    activeUnits: Number(row.activeTowers || 0),
+    totalUnits: Number(row.totalTowers || 0),
+    activeFolders: Number(row.activeTowers || 0),
+    totalFolders: Number(row.totalTowers || 0),
+    totalCapacity,
+    canZoom: Boolean(row.canZoom),
+    zoomMonthKey: row.month_key || "",
+    utilization: cleanNumber(runtime + lossTime + downtime),
+    runtimeDetails: buildPlantRuntimeTooltipDetails(row),
+    components: [
+      {
+        key: "waiting_time",
+        label: "Wait Time",
+        value: waitingTime,
+        color: CAPACITY_SPLIT_COLORS.waiting_time
+      },
+      {
+        key: "loss_time",
+        label: "Loss Time",
+        value: lossTime,
+        color: CAPACITY_SPLIT_COLORS.loss_time
+      },
+      {
+        key: "downtime",
+        label: "Downtime",
+        value: downtime,
+        color: CAPACITY_SPLIT_COLORS.downtime
+      },
+      {
+        key: "runtime",
+        label: "Run Time",
+        value: runtime,
+        color: CAPACITY_SPLIT_COLORS.runtime
+      },
+      {
+        key: "spare_time",
+        label: "Spare time",
+        value: spareTime,
+        color: CAPACITY_SPLIT_COLORS.spare_time
+      },
+      {
+        key: "idle_time",
+        label: "Unplanned time",
+        value: idleTime,
+        color: CAPACITY_SPLIT_COLORS.idle_time
+      }
+    ]
+  };
+}
+
+function buildPlantRuntimeTooltipDetails(row) {
+  return (row.segments || [])
+    .filter((segment) => segment.runtimeSegment && Number(segment.value || 0) > 0)
+    .map((segment) => ({
+      key: `${row.run_date}||Plant||${segment.key}`,
+      folderAlias: segment.label || "Run Time",
+      minutes: segment.value,
+      color: segment.color || CAPACITY_SPLIT_COLORS.runtime,
+      detailText: formatRuntimeSegmentDetail(segment) || formatPercent(calculatePercentage(segment.value, row.total_capacity))
+    }));
 }
 
 function buildRuntimeTooltipDetails(rows) {
@@ -2214,6 +2645,90 @@ function formatDayAxisLabel(dateStr) {
   };
 }
 
+function formatCapacityAxisLabel(value, grain) {
+  if (grain === "month") {
+    const monthParts = parseMonthKey(value);
+    if (!monthParts) return { day: String(value || ""), month: "" };
+
+    return {
+      day: new Date(monthParts.year, monthParts.month - 1, 1).toLocaleDateString("en-US", { month: "short" }),
+      month: String(monthParts.year)
+    };
+  }
+
+  return formatDayAxisLabel(value);
+}
+
+function getMonthKey(dateStr) {
+  const match = /^(\d{4})-(\d{2})/.exec(String(dateStr || ""));
+  return match ? `${match[1]}-${match[2]}` : "";
+}
+
+function parseMonthKey(value) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || ""));
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return null;
+
+  return { year, month };
+}
+
+function parseDateParts(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+
+  return { year, month, day };
+}
+
+function countDaysInclusive(start, end) {
+  const startParts = parseDateParts(start);
+  const endParts = parseDateParts(end);
+  if (!startParts || !endParts) return 0;
+
+  const startDate = Date.UTC(startParts.year, startParts.month - 1, startParts.day);
+  const endDate = Date.UTC(endParts.year, endParts.month - 1, endParts.day);
+  const first = Math.min(startDate, endDate);
+  const last = Math.max(startDate, endDate);
+
+  return Math.floor((last - first) / 86400000) + 1;
+}
+
+function formatMonthYearLabel(monthKey) {
+  const monthParts = parseMonthKey(monthKey);
+  if (!monthParts) return String(monthKey || "");
+
+  return new Date(monthParts.year, monthParts.month - 1, 1).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric"
+  });
+}
+
+function formatCapacityReturnViewLabel(timeframeMode, timeframeRange) {
+  const fullLabel = String(timeframeRange?.label || "").trim();
+  if (fullLabel && fullLabel.length <= 28) return fullLabel;
+
+  const mode = String(timeframeMode || "").toLowerCase();
+  if (mode === "annual") return "annual view";
+  if (mode === "half") return "half-year view";
+  if (mode === "quarter") return "quarter view";
+  if (mode === "custom") return "custom view";
+  if (mode === "month") return "month view";
+  return "selected view";
+}
+
+function formatCapacityReturnViewTitle(timeframeMode, timeframeRange) {
+  const fullLabel = String(timeframeRange?.label || "").trim();
+  if (fullLabel) return fullLabel;
+  return formatCapacityReturnViewLabel(timeframeMode, timeframeRange);
+}
+
 function normalizeResourceBreakdownValues(row) {
   const fallbackLostTime = (
     Number(row.change_over_time || 0)
@@ -2369,6 +2884,43 @@ function calculateTotalActiveFolderCapacity(dailyRows) {
   return cleanNumber(maxActiveFolders * dailyRows.length);
 }
 
+function calculateTotalTowerCapacity(dailyRows) {
+  if (!dailyRows?.length) return 0;
+
+  const totalCapacityTowers = dailyRows.reduce(
+    (total, row) => total + Number(row.capacity_towers_count || 0),
+    0
+  );
+
+  if (totalCapacityTowers > 0) {
+    return cleanNumber(totalCapacityTowers);
+  }
+
+  return cleanNumber(
+    dailyRows.reduce((total, row) => {
+      const availableCapacity = Number(row.available_capacity || 0);
+      return total + Math.ceil(availableCapacity / CAPACITY_WINDOW_MINUTES);
+    }, 0)
+  );
+}
+
+function calculateCapacityTowerCount(dailyRows, towerDetailRows, fallbackCount = 0) {
+  const dailyTowerCount = Math.max(
+    0,
+    ...(dailyRows || []).map((row) => Number(row.capacity_towers_count || 0))
+  );
+
+  if (dailyTowerCount > 0) return cleanNumber(dailyTowerCount);
+
+  const detailTowerCount = new Set(
+    (towerDetailRows || []).map((row) => row.tower).filter(Boolean)
+  ).size;
+
+  if (detailTowerCount > 0) return cleanNumber(detailTowerCount);
+
+  return cleanNumber(fallbackCount);
+}
+
 function calculateRuntimeTypeBuckets(row) {
   const runtime = Math.max(Number(row.runtime || 0), 0);
   const segments = Array.isArray(row.runtime_segments) ? row.runtime_segments : [];
@@ -2521,6 +3073,14 @@ function calculatePercentage(numerator, denominator) {
 
   const percentage = (Number(numerator || 0) / capacity) * 100;
   return cleanNumber(Math.min(Math.max(percentage, 0), 100));
+}
+
+function calculateRawPercentage(numerator, denominator) {
+  const capacity = Number(denominator || 0);
+  if (capacity <= 0) return 0;
+
+  const percentage = (Number(numerator || 0) / capacity) * 100;
+  return Math.min(Math.max(percentage, 0), 100);
 }
 
 function compareResourceNames(first, second) {
