@@ -156,7 +156,7 @@ def build_chat_response(
         "You are a concise analytics assistant for a print plant production dashboard. "
         "Answer ONLY from the JSON context supplied — never invent values. "
         "Use the curated computed JSON tables supplied here "
-        "(exact_dashboard.folders, exact_dashboard.daily, towers, tower_availability, downtime_by_reason, "
+        "(exact_dashboard.folders, exact_dashboard.daily, towers, tower_runtime_segments, tower_runtime_mix, tower_availability, downtime_by_reason, "
         "delayed_pf, max_allowable_loss_time, editions_* tables, book_details) before using summary aggregates. "
         "Do not assume access to anything outside this JSON context. "
         "Prefer exact_dashboard values over derived summaries whenever a numeric answer is available. "
@@ -183,6 +183,11 @@ def build_chat_response(
         "- 'SNP' / 'standard' as a base category: include SNP and SNP Complex, codes C1-C4, unless the user explicitly separates simple vs complex.\n"
         "- 'GNP' / 'glossy' / 'UV' as a base category: include GNP and GNP Complex, codes C5-C15, unless the user explicitly separates simple vs complex.\n"
         "- 'SNP runtime': sum C1-C4 by default. 'GNP runtime': sum C5-C15 by default.\n"
+        "- For runtime percentages across tower types and product types, use tower_runtime_mix. "
+        "Example: percentage of GNP/UV tower runtime used for SNP products = "
+        "SNP runtime_min where tower_type_key='gnp_uv' / All runtime_min where tower_type_key='gnp_uv' * 100.\n"
+        "- When tower_runtime_segments is present, it is the filtered segment-level source for tower/product runtime math. "
+        "Use its minutes field to recompute or validate numerator/denominator rather than saying segment data is absent.\n"
         "- 'complex runtime': sum entries where is_complex=true (C4 + C9–C15).\n"
         "- 'speed' / 'average speed' with no qualifier: overall average_speed_cph. Qualify by type only when asked.\n"
         "- 'loss time' / 'losses': total lost_time (changeover + late-start + reflong). Waiting time is always separate.\n"
@@ -197,7 +202,7 @@ def build_chat_response(
         "Always state the formula used: MALT = 240 - P50(Wait) - P85(MOT) - P30(Spare), where MOT = Run Time + Downtime. "
         "MALT is calibrated per plant per complexity using on-time nights only; compare actual loss_time to MALT for exceedance questions.\n"
         "- 'downtime': mechanical stoppage time, not loss time and not waiting time.\n"
-        "- Tower questions: always check towers, tower_availability, "
+        "- Tower questions: always check towers, tower_runtime_mix, tower_availability, "
         "tower_downtime_reason_attribution, and editions_by_tower before saying data is unavailable. "
         "For reason-specific tower questions such as web break, use tower_downtime_reason_attribution.\n"
         "- When the user uses a shorthand metric name without qualification, default to the aggregate and "
@@ -323,6 +328,11 @@ def build_chat_response(
         "USE THIS for ANY tower-level month-on-month or monthly trend question — do not group tower_days yourself.\n"
         "- tower_availability: total_towers, total_days, active_towers_by_day, and percent-threshold summaries. "
         "Use this for 'how many towers', 'how many days at least X% towers were utilised', or tower availability questions.\n"
+        "- tower_usage_distribution: histogram of active tower counts by day. Fields: towers_used, day_count, dates. "
+        "Use this for charts or tables where X axis is towers used and Y axis is number of days.\n"
+        "- tower_runtime_mix: generic runtime mix by tower type and product type. Fields: tower_type_key, tower_type, "
+        "product_type, runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count, towers. "
+        "Use this for runtime share/percentage questions involving SNP/GNP products on GNP/UV or non-UV towers.\n"
         "- tower_downtime_reason_attribution: folder-level downtime reason events attributed to towers that ran the same plant/machine/folder in the selected period. "
         "Use this for questions like web break frequency by individual tower. State that reason attribution is folder-to-tower attribution when giving reason-specific tower counts.\n"
         "- editions_by_tower: unique edition names printed per tower across the period. "
@@ -472,14 +482,18 @@ towers — per-tower aggregated totals across all dates
   active_nights, utilization_pct, downtime_run_count, loss_time_run_count, waiting_time_run_count,
   uv_tower, folders, editions, complexity_codes
 
-tower_days — per-tower per-date rows (use for specific-date or per-tower-per-night questions; for
-  weekday PATTERN questions use tower_weekday_summary instead — tower_days is row-capped on large
-  datasets and may not cover every tower/weekday)
-  Fields: tower, run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED — use this field directly,
-  never derive weekday from run_date yourself), month (YYYY-MM, ALREADY PRECOMPUTED), plant, machine,
-  tower_name, folder, uv_tower, runtime_min, downtime_min, loss_time_min, waiting_time_min,
-  spare_time_min, change_over_time_min, late_start_time_min, reflong_time_min, utilization_pct,
-  complexity_codes, complexity_categories, editions
+	tower_days — per-tower per-date rows (use for specific-date or per-tower-per-night questions; for
+	  weekday PATTERN questions use tower_weekday_summary instead — tower_days is row-capped on large
+	  datasets and may not cover every tower/weekday)
+	  Fields: tower, run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED — use this field directly,
+	  never derive weekday from run_date yourself), month (YYYY-MM, ALREADY PRECOMPUTED), plant, machine,
+	  tower_name, folder, uv_tower, runtime_min, downtime_min, loss_time_min, waiting_time_min,
+	  spare_time_min, change_over_time_min, late_start_time_min, reflong_time_min, utilization_pct,
+	  complexity_codes, complexity_categories, editions
+
+	tower_runtime_segments — segment-level runtime rows included only when the question needs tower/product runtime math
+	  Fields: run_date, tower, tower_type_key (gnp_uv/non_uv), tower_type, uv_tower, product_type (SNP/GNP/Unknown),
+	  complexity_code, category, minutes. Use this to calculate or validate tower runtime percentages by product type.
 
 tower_weekday_summary — per-tower per-weekday AVERAGES, already aggregated (towers x at most 7 rows,
   always complete regardless of dataset size). Use this for any "weekday wise" / day-of-week tower
@@ -528,6 +542,18 @@ max_allowable_loss_time — MALT thresholds by plant and complexity
 
 tower_downtime_reason_attribution — downtime reasons attributed to towers
   Fields in by_tower_reason: tower, reason, event_count, total_minutes
+
+tower_usage_distribution — histogram of active tower counts by day
+  Fields: towers_used, day_count, dates. Use for "number of towers used" distribution charts.
+
+tower_runtime_mix — generic runtime mix by tower type and product type
+  Fields: tower_type_key, tower_type, product_type, runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count, towers.
+  Use for product-runtime share questions on tower types. Example: SNP share on GNP/UV towers =
+  row(tower_type_key='gnp_uv', product_type='SNP').runtime_min / row(tower_type_key='gnp_uv', product_type='All').runtime_min * 100.
+
+tower_runtime_segments — segment-level runtime rows included only when needed
+  Fields: run_date, tower, tower_type_key, tower_type, uv_tower, product_type, complexity_code, category, minutes.
+  Use these rows for direct calculation when product/tower runtime percentages require raw segment detail.
 
 COMPUTATION NOTES:
 - "average [metric] per folder" → exact_dashboard.folders; divide total_field by active_nights
@@ -808,6 +834,8 @@ def _build_chat_context(
     tower_day_rows = _tower_day_context_rows(tower_details)
     tower_downtime_runs = [row for row in tower_day_rows if _number(row.get("downtime_min")) > 0]
     tower_availability = _build_tower_availability_summary(tower_rows, tower_day_rows, exact_dashboard)
+    tower_usage_distribution = _build_tower_usage_distribution(tower_availability)
+    tower_runtime_mix = _build_tower_runtime_mix(tower_day_rows)
 
     delayed_pf_rows = _build_delayed_pf_rows(details or [])
 
@@ -972,7 +1000,9 @@ def _build_chat_context(
             "night_exceedances": (malt.get("night_exceedances") or [])[:500],
         },
         "towers": tower_rows,
+        "tower_runtime_mix": tower_runtime_mix,
         "tower_availability": tower_availability,
+        "tower_usage_distribution": tower_usage_distribution,
         "tower_days": tower_day_rows[:1500],
         "tower_days_all": tower_day_rows,
         "tower_weekday_summary": _tower_weekday_summary(tower_day_rows),
@@ -1055,12 +1085,22 @@ def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -
     wants_night_class = any(
         term in question_cf for term in ["gnp", "snp", "uv", "night", "glossy", "standard"]
     )
+    wants_tower_runtime_segments = _wants_tower_runtime_segment_context(question_cf)
 
     folder_days_limit = 150 if (wants_folder_detail or wants_day_grain) else 30
     delayed_pf_limit = 120 if wants_delay else 20
     malt_rows_limit = 120 if wants_malt else 15
     night_detail_limit = 120 if wants_night_class else 15
     editions_limit = 200 if wants_edition else 30
+    tower_runtime_segment_rows = (
+        _tower_runtime_segment_context_rows(
+            context.get("tower_days_all") or context.get("tower_days") or [],
+            question_cf,
+            limit=2500,
+        )
+        if wants_tower_runtime_segments
+        else []
+    )
 
     return {
         "scope": context.get("scope") or {},
@@ -1111,12 +1151,15 @@ def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -
         # towers already carries a uv_tower boolean per row — uv_towers/non_uv_towers would just be
         # duplicate copies of the same rows, so they're intentionally omitted from the LLM-facing context.
         "towers": _compact_rows(context.get("towers") or [], limit=200),
+        "tower_runtime_segments": tower_runtime_segment_rows,
+        "tower_runtime_mix": _compact_rows(context.get("tower_runtime_mix") or [], limit=80),
         # Per-tower per-date rows (includes a precomputed weekday field) — needed for any
         # day-of-week, trend, or specific-date tower question. Previously built but never sent
         # to the model, even though the planner's own schema told it this table existed.
         "tower_days": _compact_rows(
             context.get("tower_days_all") or context.get("tower_days") or [], limit=tower_days_limit
         ),
+        "tower_usage_distribution": _compact_rows(context.get("tower_usage_distribution") or [], limit=80),
         # Complete per-tower per-weekday averages (towers x at most 7 rows) — always sent in full since
         # it's small regardless of dataset size. Prefer this over raw tower_days for weekday-pattern
         # questions, since tower_days itself is row-capped above and may not cover every tower/weekday
@@ -1156,11 +1199,16 @@ def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -
     }
 
 
-def _compact_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    return [_compact_row(row) for row in rows[:limit] if isinstance(row, dict)]
+def _compact_rows(
+    rows: list[dict[str, Any]],
+    limit: int,
+    include_keys: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    return [_compact_row(row, include_keys=include_keys) for row in rows[:limit] if isinstance(row, dict)]
 
 
-def _compact_row(row: dict[str, Any]) -> dict[str, Any]:
+def _compact_row(row: dict[str, Any], include_keys: set[str] | None = None) -> dict[str, Any]:
+    include_keys = include_keys or set()
     omitted_keys = {
         "runtime_segments",
         "rows",
@@ -1171,29 +1219,92 @@ def _compact_row(row: dict[str, Any]) -> dict[str, Any]:
     }
     compact: dict[str, Any] = {}
     for key, value in row.items():
-        if key in omitted_keys:
+        if key in omitted_keys and key not in include_keys:
             continue
         if isinstance(value, list):
-            compact[key] = [_compact_list_value(item) for item in value[:30]]
+            compact[key] = [_compact_list_value(item, include_keys=include_keys) for item in value[:30]]
             if len(value) > 30:
                 compact[f"{key}_omitted_count"] = len(value) - 30
         elif isinstance(value, dict):
             compact[key] = {
-                child_key: _compact_list_value(child_value)
+                child_key: _compact_list_value(child_value, include_keys=include_keys)
                 for child_key, child_value in value.items()
-                if child_key not in omitted_keys
+                if child_key not in omitted_keys or child_key in include_keys
             }
         else:
             compact[key] = value
     return compact
 
 
-def _compact_list_value(value: Any) -> Any:
+def _compact_list_value(value: Any, include_keys: set[str] | None = None) -> Any:
     if isinstance(value, dict):
-        return _compact_row(value)
+        return _compact_row(value, include_keys=include_keys)
     if isinstance(value, list):
         return value[:20]
     return value
+
+
+def _wants_tower_runtime_segment_context(question: str) -> bool:
+    has_tower = "tower" in question or "towers" in question
+    has_runtime = "runtime" in question or "run time" in question
+    has_product_or_type = any(
+        term in question
+        for term in ["snp", "gnp", "uv", "glossy", "standard", "product", "complexity", "c1", "c2", "c3", "c4"]
+    )
+    has_calculation = any(
+        term in question
+        for term in ["percentage", "percent", "%", "share", "ratio", "split", "total", "calculate", "utilized", "utilised"]
+    )
+    return has_tower and has_runtime and has_product_or_type and has_calculation
+
+
+def _tower_runtime_segment_context_rows(
+    tower_day_rows: list[dict[str, Any]],
+    question: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    wants_non_uv = any(term in question for term in ["non uv", "non-uv", "non gnp", "non-gnp"])
+    wants_gnp_uv_tower = (
+        not wants_non_uv
+        and ("tower" in question or "towers" in question)
+        and any(term in question for term in ["gnp", "uv", "glossy"])
+    )
+
+    rows: list[dict[str, Any]] = []
+    for row in tower_day_rows or []:
+        uv_tower = bool(row.get("uv_tower"))
+        if wants_non_uv and uv_tower:
+            continue
+        if wants_gnp_uv_tower and not uv_tower:
+            continue
+
+        tower_type_key = "gnp_uv" if uv_tower else "non_uv"
+        tower_type = "GNP/UV tower" if uv_tower else "Non-GNP/non-UV tower"
+        for segment in row.get("runtime_segments") or []:
+            minutes = _number(segment.get("minutes"))
+            if minutes <= 0:
+                continue
+            if _is_snp_segment(segment):
+                product_type = "SNP"
+            elif _is_gnp_segment(segment):
+                product_type = "GNP"
+            else:
+                product_type = "Unknown"
+            rows.append({
+                "run_date": row.get("run_date"),
+                "tower": row.get("tower"),
+                "tower_type_key": tower_type_key,
+                "tower_type": tower_type,
+                "uv_tower": uv_tower,
+                "product_type": product_type,
+                "complexity_code": segment.get("complexity_code"),
+                "category": segment.get("category"),
+                "minutes": _clean_number(minutes),
+            })
+            if len(rows) >= limit:
+                return rows
+
+    return rows
 
 
 def _build_exact_dashboard_context(
@@ -1454,6 +1565,9 @@ def _build_bar_chart(
     context: dict[str, Any],
     spec: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    if _is_tower_usage_distribution_question(question):
+        return _tower_usage_distribution_chart(context)
+
     if spec is None:
         return None
     by_tower = "tower" in question and "folder" not in question
@@ -1730,6 +1844,10 @@ def _chart_for_answer(
     if not _detect_chart_intent(q):
         return None
     try:
+        if _is_tower_usage_distribution_question(q):
+            distribution_chart = _tower_usage_distribution_chart(context)
+            if distribution_chart:
+                return distribution_chart
         if plan:
             plan_chart = _build_chart_from_plan(plan, context, q, history)
             if plan_chart:
@@ -1770,6 +1888,9 @@ def _build_chart_payload(
 def _try_deterministic_chat_answer(message: str, context: dict[str, Any]) -> str:
     question = _clean_text(message).casefold()
     if not question:
+        return ""
+
+    if _is_tower_usage_distribution_question(question):
         return ""
 
     if _is_delayed_pf_count_question(question):
@@ -2483,6 +2604,9 @@ def _fallback_answer_from_context(
     if deterministic:
         return deterministic
 
+    if _is_tower_usage_distribution_question(question):
+        return _answer_tower_usage_distribution_question(context)
+
     if _asks_complexity_downtime(question):
         return _answer_complexity_downtime_question(context)
 
@@ -2646,7 +2770,14 @@ def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict
         "exact_dashboard.daily": exact.get("daily"),
         "folders": context.get("folders"),
         "towers": context.get("towers"),
+        "tower_runtime_mix": context.get("tower_runtime_mix"),
+        "tower_runtime_segments": _tower_runtime_segment_context_rows(
+            context.get("tower_days_all") or context.get("tower_days") or [],
+            "",
+            limit=2500,
+        ),
         "tower_days": context.get("tower_days_all") or context.get("tower_days"),
+        "tower_usage_distribution": context.get("tower_usage_distribution"),
         "tower_weekday_summary": context.get("tower_weekday_summary"),
         "tower_month_summary": context.get("tower_month_summary"),
         "tower_downtime_runs": context.get("tower_downtime_runs_all") or context.get("tower_downtime_runs"),
@@ -2671,6 +2802,8 @@ def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict
     rows = source_map.get(key)
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
+    if isinstance(rows, dict):
+        return [rows]
     return []
 
 
@@ -3579,6 +3712,54 @@ def _is_tower_downtime_frequency_question(question: str) -> bool:
     has_downtime = any(term in question for term in ["downtime", "down time", "web break", "web-break", "break"])
     has_frequency = any(term in question for term in ["most often", "appear", "frequency", "frequent", "count", "instances", "events"])
     return has_tower and has_downtime and has_frequency
+
+
+def _is_tower_usage_distribution_question(question: str) -> bool:
+    has_tower = "tower" in question or "towers" in question
+    has_used = any(term in question for term in ["used", "utilised", "utilized", "active", "running"])
+    has_day_count = any(term in question for term in ["number of days", "days", "day_count", "y axis", "y-axis"])
+    has_distribution = any(term in question for term in ["bar chart", "chart", "histogram", "distribution", "x axis", "x-axis"])
+    has_towers_used_phrase = "number of towers used" in question or "towers used" in question
+    return has_tower and has_used and has_distribution and (has_day_count or has_towers_used_phrase)
+
+
+def _answer_tower_usage_distribution_question(context: dict[str, Any]) -> str:
+    distribution = context.get("tower_usage_distribution") or _build_tower_usage_distribution(
+        context.get("tower_availability") or {}
+    )
+    if not distribution:
+        return "Not available in the current data."
+
+    rows = [
+        "| Towers used | Number of days |",
+        "| --- | --- |",
+    ]
+    for row in distribution:
+        rows.append(f"| {int(_number(row.get('towers_used')))} | {int(_number(row.get('day_count')))} |")
+    return "\n".join(rows)
+
+
+def _tower_usage_distribution_chart(context: dict[str, Any]) -> dict[str, Any] | None:
+    distribution = context.get("tower_usage_distribution") or _build_tower_usage_distribution(
+        context.get("tower_availability") or {}
+    )
+    points = [
+        {
+            "label": str(int(_number(row.get("towers_used")))),
+            "value": int(_number(row.get("day_count"))),
+        }
+        for row in distribution
+        if _number(row.get("day_count")) > 0
+    ]
+    if not points:
+        return None
+    return {
+        "type": "bar",
+        "title": "Number of days by towers used",
+        "metric_label": "Number of days",
+        "unit": "days",
+        "data": points,
+    }
 
 
 def _is_tower_count_question(question: str) -> bool:
@@ -4814,6 +4995,99 @@ def _build_tower_availability_summary(
     }
 
 
+def _build_tower_usage_distribution(availability: dict[str, Any]) -> list[dict[str, Any]]:
+    buckets: dict[int, dict[str, Any]] = {}
+    for row in availability.get("active_towers_by_day") or []:
+        towers_used = int(_number(row.get("active_towers")))
+        bucket = buckets.setdefault(towers_used, {
+            "towers_used": towers_used,
+            "day_count": 0,
+            "dates": [],
+        })
+        bucket["day_count"] += 1
+        run_date = _clean_text(row.get("run_date"))
+        if run_date:
+            bucket["dates"].append(run_date)
+
+    return [
+        {
+            "towers_used": value["towers_used"],
+            "day_count": value["day_count"],
+            "dates": value["dates"],
+        }
+        for value in sorted(buckets.values(), key=lambda item: item["towers_used"])
+    ]
+
+
+def _build_tower_runtime_mix(tower_day_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for row in tower_day_rows or []:
+        tower_type_key = "gnp_uv" if row.get("uv_tower") else "non_uv"
+        tower_type = "GNP/UV tower" if row.get("uv_tower") else "Non-GNP/non-UV tower"
+        tower = _clean_text(row.get("tower"))
+        run_date = _clean_text(row.get("run_date"))
+        tower_day_key = f"{run_date}||{tower}" if run_date and tower else ""
+
+        for segment in row.get("runtime_segments") or []:
+            minutes = _number(segment.get("minutes"))
+            if minutes <= 0:
+                continue
+            if _is_snp_segment(segment):
+                product_type = "SNP"
+            elif _is_gnp_segment(segment):
+                product_type = "GNP"
+            else:
+                product_type = "Unknown"
+
+            for bucket_product_type in (product_type, "All"):
+                bucket = buckets.setdefault(
+                    (tower_type_key, bucket_product_type),
+                    {
+                        "tower_type_key": tower_type_key,
+                        "tower_type": tower_type,
+                        "product_type": bucket_product_type,
+                        "runtime_min": 0.0,
+                        "tower_days": set(),
+                        "towers": set(),
+                    },
+                )
+                bucket["runtime_min"] += minutes
+                if tower_day_key:
+                    bucket["tower_days"].add(tower_day_key)
+                if tower:
+                    bucket["towers"].add(tower)
+
+    totals_by_tower_type = {
+        tower_type_key: bucket["runtime_min"]
+        for (tower_type_key, product_type), bucket in buckets.items()
+        if product_type == "All"
+    }
+
+    rows = []
+    product_sort = {"All": 0, "SNP": 1, "GNP": 2, "Unknown": 3}
+    for bucket in buckets.values():
+        denominator = totals_by_tower_type.get(bucket["tower_type_key"], 0.0)
+        rows.append({
+            "tower_type_key": bucket["tower_type_key"],
+            "tower_type": bucket["tower_type"],
+            "product_type": bucket["product_type"],
+            "runtime_min": _clean_number(bucket["runtime_min"]),
+            "share_of_tower_type_runtime_pct": _percentage(bucket["runtime_min"], denominator),
+            "tower_day_count": len(bucket["tower_days"]),
+            "tower_count": len(bucket["towers"]),
+            "towers": sorted(bucket["towers"]),
+        })
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            0 if row["tower_type_key"] == "gnp_uv" else 1,
+            product_sort.get(row["product_type"], 9),
+        ),
+    )
+
+
 def _largest_delayed_pf_components(row: dict[str, Any]) -> list[dict[str, Any]]:
     components = [
         ("runtime", "Run Time", _number(row.get("runtime"))),
@@ -5846,6 +6120,22 @@ def _is_gnp_segment(segment: dict[str, Any]) -> bool:
         ]
     ).casefold()
     return "gnp" in text
+
+
+def _is_snp_segment(segment: dict[str, Any]) -> bool:
+    code_number = re_fullmatch_complexity(segment.get("complexity_code"))
+    if code_number and 1 <= int(code_number) <= 4:
+        return True
+
+    text = " ".join(
+        [
+            _clean_text(segment.get("type")),
+            _clean_text(segment.get("category")),
+            _clean_text(segment.get("label")),
+            _clean_text(segment.get("key")),
+        ]
+    ).casefold()
+    return "snp" in text and "gnp" not in text
 
 
 def _complexity_code_sort_key(value: Any) -> tuple[int, str]:
