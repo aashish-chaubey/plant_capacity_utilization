@@ -20,3 +20,4 @@ queries.txt
 # Ignore environment variable files
 .env
 .env.local
+.claude

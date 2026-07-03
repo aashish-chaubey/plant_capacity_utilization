@@ -59,6 +59,7 @@ def build_chat_response(
     downtime_reasons: list[dict[str, Any]] | None = None,
     book_details: list[dict[str, Any]] | None = None,
     history: list[dict[str, str]] | None = None,
+    force_full_llm: bool = False,
 ) -> dict[str, Any]:
     intelligence = intelligence or {}
     summary = summary or {}
@@ -87,14 +88,6 @@ def build_chat_response(
         book_details=book_details,
         question=message,
     )
-    deterministic_answer = _try_deterministic_chat_answer(message, context)
-    if deterministic_answer:
-        return {
-            "answer": deterministic_answer,
-            "status": "ok",
-            "chart": _chart_for_answer(deterministic_answer, message, context, history),
-        }
-
     endpoint = _get_env("AZURE_ENDPOINT")
     api_key = (
         _get_env("API_KEY")
@@ -114,29 +107,45 @@ def build_chat_response(
             }
         return {"answer": "LLM is not configured.", "status": "unconfigured", "plan": None, "chart": None}
 
-    # Phase 1 — Planner: use only when the question needs deeper reasoning.
-    plan: dict[str, Any] | None = None
-    if _should_use_chat_planner(message):
+    # Phase 1 — Query Understanding: decompose the question into a rich structured plan,
+    # then execute it deterministically. Only falls through to the full LLM when the executor
+    # can't produce a confident answer (trend/prediction intents, unresolvable fields, etc.).
+    # Skipped entirely when force_full_llm=True (user explicitly requested full LLM).
+    qu_plan: dict[str, Any] | None = None
+    if not force_full_llm and _should_use_chat_planner(message):
         try:
-            plan = _call_planner(message, endpoint, api_key)
-        except Exception as planner_exc:
-            print(f"[chat] planner skipped: {_sanitize_error_message(planner_exc, api_key)}", flush=True)
-            plan = None
+            qu_plan = _call_qu_decomposer(message, endpoint, api_key)
+        except Exception as qu_exc:
+            print(f"[chat] QU decomposer skipped: {_sanitize_error_message(qu_exc, api_key)}", flush=True)
+            qu_plan = None
 
-    planned_answer = _answer_from_plan(plan, message, context)
-    if planned_answer:
-        return {
-            "answer": planned_answer,
-            "status": "ok",
-            "plan": plan,
-            "chart": _chart_for_answer(planned_answer, message, context, history, plan),
-        }
+    if not force_full_llm:
+        qu_answer = _execute_qu_plan(qu_plan, message, context)
+        if qu_answer:
+            confidence, conf_reasons = _compute_qu_confidence(qu_plan, qu_answer, context, message)
+            if _chat_debug_enabled():
+                print(f"[chat] QU confidence={confidence} reasons={conf_reasons}", flush=True)
+            if confidence >= _QU_CONFIDENCE_THRESHOLD:
+                return {
+                    "answer": qu_answer,
+                    "status": "ok",
+                    "plan": qu_plan,
+                    "confidence": confidence,
+                    "refined": False,
+                    "chart": _chart_for_answer(qu_answer, message, context, history, qu_plan),
+                }
+            # Below threshold — fall through to full LLM for a better answer
+            if _chat_debug_enabled():
+                print(f"[chat] QU confidence {confidence} below threshold {_QU_CONFIDENCE_THRESHOLD}, escalating to full LLM", flush=True)
+    else:
+        if _chat_debug_enabled():
+            print("[chat] force_full_llm=True — skipping QU layer, going directly to full LLM", flush=True)
 
     plan_section = ""
-    if plan:
+    if qu_plan:
         plan_section = (
             "AGENT PLAN — execute this exactly before answering:\n"
-            f"{json.dumps(plan, indent=2)}\n\n"
+            f"{json.dumps(qu_plan, indent=2)}\n\n"
             "EXECUTION STEPS:\n"
             "1. Go to the primary_source listed in the plan and locate the relevant rows/fields\n"
             "2. Apply any filters from the plan (folder name, date, complexity, etc.)\n"
@@ -154,18 +163,19 @@ def build_chat_response(
     system_content = (
         f"{plan_section}"
         "You are a concise analytics assistant for a print plant production dashboard. "
-        "Answer ONLY from the JSON context supplied — never invent values. "
+        "For numerical or data-specific questions, answer ONLY from the JSON context supplied — never invent values. "
+        "For conceptual, definitional, or formula questions (e.g. 'what does X mean', 'what is the formula for Y', 'how is Z calculated', 'explain X'), answer from your domain knowledge — do not say the data is absent. "
         "Use the curated computed JSON tables supplied here "
         "(exact_dashboard.folders, exact_dashboard.daily, towers, tower_runtime_segments, tower_runtime_mix, tower_availability, downtime_by_reason, "
         "delayed_pf, max_allowable_loss_time, editions_* tables, book_details) before using summary aggregates. "
-        "Do not assume access to anything outside this JSON context. "
         "Prefer exact_dashboard values over derived summaries whenever a numeric answer is available. "
         "Before responding, internally identify the metric, filters, numerator, denominator, and formula. "
         "Validate the arithmetic against the JSON, then provide only the final concise answer. "
         "Be brief and direct — no preamble, no filler. "
         "Always report duration values in minutes. Do not convert durations into hours or h:mm. "
         "Clock times such as 03:00 or 04:00 may remain clock times. "
-        "If the answer is genuinely absent from the data, say: Not available in the current data.\n\n"
+        "If a specific numerical answer is genuinely absent from the data, say: Not available in the current data. "
+        "Never say that for conceptual, formula, or terminology questions — answer those from your knowledge.\n\n"
 
         "OUTPUT FORMATTING (the response is rendered as Markdown, so use it deliberately):\n"
         "- Any answer with 2+ rows of comparable data (rankings, breakdowns by folder/tower/date/reason, "
@@ -188,6 +198,9 @@ def build_chat_response(
         "SNP runtime_min where tower_type_key='gnp_uv' / All runtime_min where tower_type_key='gnp_uv' * 100.\n"
         "- When tower_runtime_segments is present, it is the filtered segment-level source for tower/product runtime math. "
         "Use its minutes, print_order, committed_speed_cph, actual_speed_cph, and efficiency_pct fields to recompute or validate numerator/denominator rather than saying segment data is absent.\n"
+        "- For any efficiency question involving DATES, DAYS, or THRESHOLDS (e.g. 'days below 90% efficiency', 'average efficiency per night', 'trend of efficiency'), "
+        "use daily_efficiency. It has one row per production night with run_date, efficiency_pct, total_po, total_runtime_min, total_dt_min, actual_speed_cph, committed_speed_cph. "
+        "Filter rows by efficiency_pct threshold, count matching rows, or group by month/weekday from run_date.\n"
         "- 'complex runtime': sum entries where is_complex=true (C4 + C9–C15).\n"
         "- 'speed' / 'average speed' with no qualifier: overall average_speed_cph. Qualify by type only when asked.\n"
         "- 'loss time' / 'losses': total lost_time (changeover + late-start + reflong). Waiting time is always separate.\n"
@@ -239,6 +252,16 @@ def build_chat_response(
         "- Utilized Time / Utilisation: Runtime (SNP + GNP) + Loss Time + Downtime. "
         "Do not include Wait Time, Spare Time, or Unplanned Time.\n"
         "- Spare Capacity: (Spare Time / (Total Available Time - Unplanned Time)) * 100.\n"
+        "- Speed Efficiency / Efficiency %: measures how fast the machine actually ran relative to its committed speed. "
+        "Calculated in four steps:\n"
+        "  1. Speed per Minute = Committed Speed (CPH) ÷ 60\n"
+        "  2. Apportioned PO (per slot) = Speed per Minute × clipped runtime minutes in that slot. "
+        "Slot rules: post-midnight slot counts only minutes after 00:00; editions crossing print finish time are clipped at that time.\n"
+        "  3. Actual Speed = Total PO ÷ (Total Runtime + Total Downtime) — converting runtime+DT to hours to match CPH units.\n"
+        "  4. Efficiency % = Actual Speed ÷ Committed Speed × 100.\n"
+        "In the data, efficiency_pct in tower_runtime_segments is pre-computed using these formulas. "
+        "Use it directly for segment-level efficiency questions; for period/folder/plant-level efficiency, "
+        "sum the segment PO and runtime+DT values then reapply step 3–4.\n"
         "- Print Finish Time vs Delayed Print Finish — these are NOT the same thing: "
         "Print Finish Time is the actual clock time printing ended for an edition/folder/night, "
         "regardless of whether that was on time or late — EVERY active night has one. "
@@ -401,30 +424,33 @@ def build_chat_response(
         if _chat_debug_enabled():
             print(f"[chat-debug] raw_answer={answer!r}", flush=True)
         if _is_weak_chat_answer(answer):
-            fallback_answer = _fallback_answer_from_context(message, context, plan)
+            fallback_answer = _fallback_answer_from_context(message, context, qu_plan)
             if fallback_answer:
                 return {
                     "answer": fallback_answer,
                     "status": "ok",
-                    "plan": plan,
-                    "chart": _chart_for_answer(fallback_answer, message, context, history, plan),
+                    "plan": qu_plan,
+                    "refined": True,
+                    "chart": _chart_for_answer(fallback_answer, message, context, history, qu_plan),
                 }
         return {
             "answer": answer,
             "status": "ok",
-            "plan": plan,
-            "chart": _chart_for_answer(answer, message, context, history, plan),
+            "plan": qu_plan,
+            "refined": True,
+            "chart": _chart_for_answer(answer, message, context, history, qu_plan),
         }
     except Exception as exc:
         if _chat_debug_enabled():
             print(f"[chat] executor fallback used: {_chat_error_kind(exc)} — {_sanitize_error_message(exc, api_key)}", flush=True)
-        fallback_answer = _fallback_answer_from_context(message, context, plan)
+        fallback_answer = _fallback_answer_from_context(message, context, qu_plan)
         if fallback_answer:
             return {
                 "answer": fallback_answer,
                 "status": "ok",
-                "plan": plan,
-                "chart": _chart_for_answer(fallback_answer, message, context, history, plan),
+                "plan": qu_plan,
+                "refined": True,
+                "chart": _chart_for_answer(fallback_answer, message, context, history, qu_plan),
             }
         if _is_timeout_error(exc):
             return {
@@ -433,13 +459,13 @@ def build_chat_response(
                     "Please narrow it by plant, date range, folder, tower, or metric."
                 ),
                 "status": "timeout",
-                "plan": plan,
+                "plan": qu_plan,
                 "chart": None,
             }
         return {
             "answer": "I could not answer that from the current computed dashboard context.",
             "status": "unanswered",
-            "plan": plan,
+            "plan": qu_plan,
             "chart": None,
         }
 
@@ -631,6 +657,630 @@ def _call_planner(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
     return json.loads(raw)
+
+
+# ── Query Understanding (QU) Layer ───────────────────────────────────────────
+# Replaces the shallow _call_planner + _answer_from_plan pipeline with a richer
+# decomposer that understands multi-condition AND/OR, time scope, entity filters,
+# and compound sub-questions — all executed deterministically before any full LLM call.
+
+_QU_DECOMPOSER_SOURCES = """\
+exact_dashboard.daily       — per-date plant totals; fields: run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, night_type
+exact_dashboard.folders     — per-folder period totals; fields: resource (folder name), runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, active_nights, utilization_pct, spare_capacity_pct
+exact_dashboard.folder_days — per-folder per-date; fields: folder, run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, delayed_print_finish, overrun_minutes, print_finish_time
+loss_time.all_days          — per-date loss breakdown; fields: run_date, weekday, month, runtime_min, lost_time_min, waiting_time_min, loss_pct, loss_components (dict), dominant_driver
+delayed_pf                  — late-night folder rows only; fields: run_date, folder, overrun_minutes, loss_time_min, downtime_min, waiting_time_min, runtime_min, night_type, editions
+towers                      — per-tower period totals; fields: tower, machine, runtime_min, downtime_min, loss_time_min, waiting_time_min, spare_time_min, active_nights, utilization_pct, uv_tower
+tower_days                  — per-tower per-date; fields: tower, run_date, weekday, month, runtime_min, downtime_min, loss_time_min, waiting_time_min, utilization_pct, uv_tower
+tower_runtime_mix           — runtime split by tower TYPE × product TYPE (use this for any question about SNP/GNP products running on UV/GNP or non-UV towers); fields: tower_type_key ("gnp_uv" or "non_uv"), tower_type (human label), product_type ("SNP", "GNP", or "Unknown"), runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count
+tower_runtime_segments      — segment-level runtime rows (most granular; use when tower_runtime_mix is not precise enough); fields: run_date, tower, tower_type_key, tower_type, uv_tower, product_type, complexity_code, category, minutes, print_order, committed_speed_cph, actual_speed_cph, efficiency_pct
+daily_efficiency            — per-date plant-wide efficiency summary (one row per production night); fields: run_date, total_po, total_runtime_min, total_dt_min, actual_speed_cph, committed_speed_cph, efficiency_pct. USE THIS for any question about efficiency by date, days above/below an efficiency threshold, or efficiency trends over time.
+downtime_by_reason          — top reasons ranked by event count; fields: reason, count, total_minutes
+complexity_by_code          — runtime by C1-C15 code; fields: code, runtime_min, print_order
+book_details                — per print job; fields: IssueID, Edition, Machine, Folder, towers_list, downtime_total_min"""
+
+_QU_DECOMPOSER_SYSTEM = (
+    "You are a query-understanding agent for a newspaper print-plant analytics dashboard.\n"
+    "Given a user question, output ONLY a JSON object — no prose, no markdown fences.\n\n"
+    "OUTPUT SCHEMA:\n"
+    "{\n"
+    '  "intent": "count|aggregate|average|breakdown|trend|comparison|lookup|list|ranking|prediction",\n'
+    '  "primary_source": "<source key from the list below>",\n'
+    '  "entities": [{"type": "folder|tower|plant|edition|date", "value": "<specific name or ALL>"}],\n'
+    '  "metrics": [{"field": "<exact field name from source>", "label": "<human label>", "aggregation": "sum|avg|max|min|count"}],\n'
+    '  "conditions": [\n'
+    '    {"field": "<exact field name>", "op": ">|<|>=|<=|=|contains", "value": <number or string>, "label": "<human readable>"}\n'
+    '  ],\n'
+    '  "condition_logic": "AND|OR",\n'
+    '  "time_scope": {\n'
+    '    "type": "none|weekday|month|date_range|specific_date",\n'
+    '    "weekdays": ["Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday"],\n'
+    '    "months": ["YYYY-MM"],\n'
+    '    "date_from": "YYYY-MM-DD or null",\n'
+    '    "date_to": "YYYY-MM-DD or null",\n'
+    '    "specific_date": "YYYY-MM-DD or null"\n'
+    '  },\n'
+    '  "group_by": "folder|tower|date|weekday|month|plant|reason|night_type|none",\n'
+    '  "sort_by": {"field": "<field name>", "order": "asc|desc"},\n'
+    '  "limit": null,\n'
+    '  "sub_questions": [\n'
+    '    {"id": "q1", "intent": "count|aggregate|breakdown|list", "description": "<what this sub-question computes>"}\n'
+    '  ],\n'
+    '  "output_format": "table|single_value|list|ranked_list|comparison"\n'
+    "}\n\n"
+    f"DATA SOURCES:\n{{_QU_DECOMPOSER_SOURCES}}\n\n"
+    "RULES:\n"
+    "R1 MULTI-CONDITION: Put every filter in conditions[]. Use AND (default) or OR between them. "
+    "Each condition field MUST exist on primary_source — pick a different source if needed. "
+    "Never put a comparator word ('greater than', 'more than') into a plain string equality filter.\n"
+    "R2 TIME SCOPE: 'on Fridays'→weekdays:['Friday']. 'weekends'→['Friday','Saturday','Sunday'] "
+    "(Indian newspaper plants: Friday/Saturday/Sunday nights are weekend editions). "
+    "'in September'→months:['2025-09']. Date range→date_from/date_to. No time constraint→type:'none'.\n"
+    "R3 ENTITY: 'for folder F1'→entities:[{type:folder,value:F1}]. Unspecified scope→entities:[].\n"
+    "R4 COMPOUND QUESTION: Two separate things asked (e.g. 'how many nights AND what are the key components') "
+    "→ sub_questions with one entry per distinct ask. Simple single question→sub_questions:[].\n"
+    "R5 IMPLICIT CONDITIONS: 'had downtime'→{field:downtime_min,op:>,value:0}. "
+    "'was delayed'→{field:overrun_minutes,op:>,value:0}. 'had loss time'→{field:loss_time_min,op:>,value:0}.\n"
+    "R6 TABLE CHOICE: loss_time.all_days has NO downtime_min or spare_time_min — never filter those there. "
+    "For downtime filter use exact_dashboard.daily or exact_dashboard.folder_days or towers. "
+    "For delayed-finish overrun filters use delayed_pf.\n"
+    "R6b SNP/GNP ON TOWER TYPE: Any question about runtime of SNP or GNP *products* on UV/GNP *towers* "
+    "(e.g. 'SNP products on GNP tower', 'GNP runtime on non-UV towers') MUST use tower_runtime_mix. "
+    "Filter on tower_type_key ('gnp_uv' for UV/GNP towers, 'non_uv' for standard towers) "
+    "and product_type ('SNP' or 'GNP'). NEVER use the towers table for this — it has no product_type field. "
+    "For even more granular segment-level data use tower_runtime_segments with the same fields.\n"
+    "R7 COUNT DEDUP: When intent='count' on a source with multiple rows per night (delayed_pf, folder_days), "
+    "count distinct run_date values — note this in the first sub_question description.\n"
+    "R8 METRIC FIELDS: Use exact field names from the source listed above (e.g. 'loss_time_min', not 'loss time'). "
+    "Aggregation defaults to 'sum' for totals, 'avg' for per-night averages.\n"
+    "R9 SORT: Include sort_by only when user asks for ranking or top/bottom N. Otherwise omit or set to null.\n"
+    "R10 TREND/PREDICTION: If intent is 'trend' or 'prediction', still output a plan but note it in intent — "
+    "the executor will defer time-series computation to the full LLM.\n"
+    "R11 GROUP BY — MANDATORY: Any question containing 'per folder', 'by folder', 'for each folder', "
+    "'each folder', 'folder-wise', 'folder wise' MUST set group_by:'folder'. "
+    "'per tower'/'by tower'/'for each tower' → group_by:'tower'. "
+    "'per date'/'day by day'/'daily'/'each day'/'each night' → group_by:'date'. "
+    "'per week'/'day of week'/'weekday wise' → group_by:'weekday'. "
+    "'by month'/'month on month'/'monthly' → group_by:'month'. "
+    "'by reason' → group_by:'reason'. "
+    "NEVER leave group_by as 'none' when the question explicitly names a grouping dimension with "
+    "'per', 'by', 'each', 'wise', or 'breakdown'. "
+    "For per-folder breakdowns prefer exact_dashboard.folders (one row per folder, already aggregated) "
+    "with intent:'aggregate'. For per-folder per-night detail use exact_dashboard.folder_days.\n"
+)
+
+# Inject the source list at runtime to avoid f-string issues with the braces in the schema above
+_QU_DECOMPOSER_SYSTEM = _QU_DECOMPOSER_SYSTEM.replace(
+    "{_QU_DECOMPOSER_SOURCES}", _QU_DECOMPOSER_SOURCES
+)
+
+_QU_WEEKDAY_DISPLAY = {
+    "monday": "Monday", "tuesday": "Tuesday", "wednesday": "Wednesday",
+    "thursday": "Thursday", "friday": "Friday", "saturday": "Saturday", "sunday": "Sunday",
+}
+
+
+def _call_qu_decomposer(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
+    """LLM call (JSON mode) that deeply parses a user question into a structured QU plan."""
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _QU_DECOMPOSER_SYSTEM},
+        {"role": "user", "content": _clean_text(message)},
+    ]
+    raw = _call_chat_completion(endpoint, api_key, messages)
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+    return json.loads(raw)
+
+
+def _apply_qu_conditions(
+    rows: list[dict[str, Any]],
+    conditions: list[dict[str, Any]],
+    logic: str = "AND",
+) -> list[dict[str, Any]] | None:
+    """Multi-condition filter with AND/OR logic.
+
+    Returns None when a numeric comparator references a field that doesn't exist on the source
+    (same abort-signal contract as _apply_plan_filters) so the caller can fall through cleanly
+    rather than returning an over-broad unfiltered count that looks like a real answer.
+    """
+    if not conditions or not rows:
+        return rows
+
+    logic = (logic or "AND").strip().upper()
+
+    # Pre-validate: any numeric condition on an unknown field aborts the whole plan.
+    for cond in conditions:
+        op = _clean_text(cond.get("op", "")).strip()
+        if op in (">", "<", ">=", "<="):
+            field_raw = _clean_text(cond.get("field", ""))
+            if field_raw and not _resolve_row_field(rows, field_raw):
+                return None
+
+    def _passes(row: dict[str, Any]) -> bool:
+        results: list[bool] = []
+        for cond in conditions:
+            field_raw = _clean_text(cond.get("field", ""))
+            op = _clean_text(cond.get("op", "=")).strip()
+            value = cond.get("value")
+            field_name = _resolve_row_field([row], field_raw) or _resolve_row_field(rows, field_raw)
+            if not field_name:
+                if op in (">", "<", ">=", "<="):
+                    results.append(False)
+                else:
+                    results.append(True)
+                continue
+            row_val = row.get(field_name)
+            if op in (">", "<", ">=", "<="):
+                compare_fn = _COMPARATOR_FUNCS.get(op)
+                results.append(bool(compare_fn and compare_fn(_number(row_val), _number(value))))
+            elif op == "=":
+                results.append(
+                    _clean_text(row_val).casefold() == _clean_text(str(value) if value is not None else "").casefold()
+                )
+            elif op == "contains":
+                results.append(_clean_text(str(value) if value is not None else "").casefold() in _row_value_text(row_val).casefold())
+            else:
+                results.append(True)
+        if not results:
+            return True
+        return any(results) if logic == "OR" else all(results)
+
+    return [row for row in rows if _passes(row)]
+
+
+def _apply_qu_time_scope(rows: list[dict[str, Any]], time_scope: dict[str, Any]) -> list[dict[str, Any]]:
+    """Filter rows by time_scope: weekday, month, specific_date, or date_range."""
+    if not time_scope or not rows:
+        return rows
+    scope_type = _clean_text(time_scope.get("type", "none")).casefold()
+    if scope_type == "none":
+        return rows
+
+    date_field = _resolve_row_field(rows, "run_date") or _resolve_row_field(rows, "date")
+    weekday_field = _resolve_row_field(rows, "weekday")
+    month_field = _resolve_row_field(rows, "month")
+    result = list(rows)
+
+    if scope_type == "weekday" and weekday_field:
+        target = {
+            _QU_WEEKDAY_DISPLAY.get(_clean_text(w).casefold(), _clean_text(w))
+            for w in (time_scope.get("weekdays") or [])
+        }
+        if target:
+            result = [r for r in result if _clean_text(r.get(weekday_field)) in target]
+
+    elif scope_type == "month" and month_field:
+        target_months = {_clean_text(m) for m in (time_scope.get("months") or [])}
+        if target_months:
+            result = [r for r in result if _clean_text(r.get(month_field)) in target_months]
+
+    elif scope_type == "specific_date" and date_field:
+        specific = _clean_text(time_scope.get("specific_date") or "")
+        if specific:
+            result = [r for r in result if _clean_text(r.get(date_field)) == specific]
+
+    elif scope_type == "date_range" and date_field:
+        date_from = _clean_text(time_scope.get("date_from") or "")
+        date_to = _clean_text(time_scope.get("date_to") or "")
+        if date_from:
+            result = [r for r in result if _clean_text(r.get(date_field)) >= date_from]
+        if date_to:
+            result = [r for r in result if _clean_text(r.get(date_field)) <= date_to]
+
+    return result
+
+
+def _apply_qu_entity_filters(
+    rows: list[dict[str, Any]], entities: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Filter rows by typed entity (folder, tower, plant, edition, date)."""
+    if not entities or not rows:
+        return rows
+    result = list(rows)
+    _ENTITY_FIELD_CANDIDATES: dict[str, list[str]] = {
+        "folder": ["folder", "resource"],
+        "tower": ["tower", "tower_name"],
+        "plant": ["plant", "plant_name"],
+        "edition": ["edition", "edition_name"],
+        "date": ["run_date", "date"],
+    }
+    for entity in entities:
+        entity_type = _clean_text(entity.get("type", "")).casefold()
+        entity_value = _clean_text(entity.get("value", ""))
+        if not entity_value or entity_value.casefold() in ("all", "any", ""):
+            continue
+        candidates = _ENTITY_FIELD_CANDIDATES.get(entity_type, [entity_type])
+        field_name = next(
+            (_resolve_row_field(result, c) for c in candidates if _resolve_row_field(result, c)),
+            None,
+        )
+        if not field_name:
+            continue
+        val_lower = entity_value.casefold()
+        result = [r for r in result if val_lower in _row_value_text(r.get(field_name)).casefold()]
+    return result
+
+
+def _qu_metric_fields(qu_plan: dict[str, Any], rows: list[dict[str, Any]]) -> list[str]:
+    """Resolve metric field names from the QU plan's metrics array."""
+    fields: list[str] = []
+    for metric in qu_plan.get("metrics") or []:
+        field_raw = _clean_text(
+            metric.get("field", "") if isinstance(metric, dict) else str(metric)
+        )
+        resolved = _resolve_row_field(rows, field_raw)
+        if resolved and resolved not in fields and _field_has_numeric_values(rows, resolved):
+            fields.append(resolved)
+    return fields
+
+
+_QU_IMPLICIT_GROUP_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:per|by|each|for each|wise)\s+folder\b|folder[\s-]wise\b"), "folder"),
+    (re.compile(r"\b(?:per|by|each|for each|wise)\s+tower\b|tower[\s-]wise\b"), "tower"),
+    (re.compile(r"\b(?:per|by|each|for each|wise)\s+plant\b|plant[\s-]wise\b"), "plant"),
+    (re.compile(r"\b(?:per|by|each|for each|wise)\s+(?:reason|cause)\b"), "reason"),
+    (re.compile(r"\b(?:per|by|each|for each|wise)\s+(?:date|night|day)\b|day[\s-]by[\s-]day\b|nightly\b"), "date"),
+    (re.compile(r"\b(?:per|by|each|for each|wise)\s+(?:week(?:day)?|day of week)\b|weekday[\s-]wise\b"), "weekday"),
+    (re.compile(r"\b(?:per|by|each|for each|wise)\s+month\b|month[\s-]on[\s-]month\b|month[\s-]wise\b|monthly\b"), "month"),
+    (re.compile(r"\b(?:per|by|each|for each|wise)\s+(?:edition|book)\b"), "edition"),
+]
+
+
+def _qu_group_field(qu_plan: dict[str, Any], rows: list[dict[str, Any]], question: str = "") -> str:
+    """Resolve group_by from the QU plan, with fallback pattern-matching on the question.
+
+    The decomposer sometimes leaves group_by as 'none' for phrasing like 'per folder'
+    or 'for each tower' — the pattern fallback catches those cases so the executor
+    always groups when the question explicitly names a grouping dimension.
+    """
+    group_by = _clean_text(qu_plan.get("group_by") or "").casefold()
+    if group_by not in ("none", ""):
+        resolved = _resolve_row_field(rows, group_by)
+        if resolved and not _is_list_valued_field(rows, resolved):
+            return resolved
+
+    # Fallback: scan the question for explicit grouping phrases
+    q = question.casefold()
+    for pattern, dimension in _QU_IMPLICIT_GROUP_PATTERNS:
+        if pattern.search(q):
+            resolved = _resolve_row_field(rows, dimension)
+            if resolved and not _is_list_valued_field(rows, resolved):
+                return resolved
+
+    return ""
+
+
+def _qu_conditions_label(conditions: list[dict[str, Any]], logic: str = "AND") -> str:
+    """Human-readable summary of applied conditions for display in answers."""
+    if not conditions:
+        return ""
+    labels = [_clean_text(c.get("label", "")) for c in conditions if _clean_text(c.get("label", ""))]
+    if not labels:
+        return ""
+    joiner = f" {(logic or 'AND').strip().upper()} "
+    return joiner.join(labels)
+
+
+def _qu_time_scope_label(time_scope: dict[str, Any]) -> str:
+    """Human-readable summary of the time scope."""
+    scope_type = _clean_text(time_scope.get("type", "none")).casefold()
+    if scope_type == "weekday":
+        days = time_scope.get("weekdays") or []
+        return ", ".join(days) if days else ""
+    if scope_type == "month":
+        months = time_scope.get("months") or []
+        return ", ".join(months) if months else ""
+    if scope_type == "specific_date":
+        return _clean_text(time_scope.get("specific_date") or "")
+    if scope_type == "date_range":
+        date_from = _clean_text(time_scope.get("date_from") or "")
+        date_to = _clean_text(time_scope.get("date_to") or "")
+        if date_from and date_to:
+            return f"{date_from} to {date_to}"
+        return date_from or date_to
+    return ""
+
+
+def _execute_qu_subquestion(
+    sub_q: dict[str, Any],
+    rows: list[dict[str, Any]],
+    source_key: str,
+    context: dict[str, Any],
+    question: str,
+) -> str:
+    """Execute one sub-question against the already-filtered row set."""
+    intent = _clean_text(sub_q.get("intent", "")).casefold()
+
+    if intent == "count":
+        count_unit_field = _plan_count_unit_field(question, rows)
+        if count_unit_field:
+            distinct = {
+                _clean_text(r.get(count_unit_field))
+                for r in rows if _clean_text(r.get(count_unit_field))
+            }
+            unit_label = _humanize_field(count_unit_field).lower()
+            return f"**{len(distinct)}** distinct {unit_label}(s)"
+        return f"**{len(rows)}** matching row(s)"
+
+    if intent == "breakdown":
+        return _plan_components_breakdown(question, rows, context)
+
+    if intent == "list":
+        date_field = _resolve_row_field(rows, "run_date") or _resolve_row_field(rows, "date")
+        if date_field:
+            dates = _sorted_unique(r.get(date_field) for r in rows)
+            return "\n".join(f"- {d}" for d in dates)
+        return ""
+
+    if intent in ("aggregate", "average"):
+        metric_plan = {"metrics": [m.get("field") for m in (sub_q.get("metrics") or [])]}
+        metric_fields = _qu_metric_fields(metric_plan, rows)
+        if not metric_fields:
+            return ""
+        is_avg = intent == "average"
+        totals = {
+            m: _clean_number(
+                _average([_number(r.get(m)) for r in rows]) if is_avg
+                else sum(_number(r.get(m)) for r in rows)
+            )
+            for m in metric_fields
+        }
+        label = "Average" if is_avg else "Total"
+        parts = [
+            f"{_humanize_field(m)}: {_format_plan_metric_value(m, v)}"
+            for m, v in totals.items()
+        ]
+        return f"{label}: " + " | ".join(parts)
+
+    return ""
+
+
+def _execute_qu_plan(
+    qu_plan: dict[str, Any] | None,
+    message: str,
+    context: dict[str, Any],
+) -> str:
+    """Execute a QU decomposer plan deterministically. Returns '' to signal LLM fallthrough."""
+    if not isinstance(qu_plan, dict) or not qu_plan:
+        return ""
+
+    intent = _clean_text(qu_plan.get("intent", "")).casefold()
+    if intent in ("trend", "prediction"):
+        return ""
+
+    source_key = _clean_text(qu_plan.get("primary_source", ""))
+    rows = _rows_for_plan_source(source_key, context)
+    if not rows:
+        return ""
+
+    # 1. Multi-condition filter (AND/OR)
+    conditions = qu_plan.get("conditions") or []
+    condition_logic = _clean_text(qu_plan.get("condition_logic") or "AND").upper()
+    rows = _apply_qu_conditions(rows, conditions, condition_logic)
+    if rows is None:
+        return ""
+
+    # 2. Time scope filter
+    time_scope = qu_plan.get("time_scope") or {}
+    rows = _apply_qu_time_scope(rows, time_scope)
+
+    # 3. Entity filters (folder X, tower Y, plant Z)
+    entities = qu_plan.get("entities") or []
+    rows = _apply_qu_entity_filters(rows, entities)
+
+    if not rows:
+        cond_label = _qu_conditions_label(conditions, condition_logic)
+        scope_label = _qu_time_scope_label(time_scope)
+        note_parts = [f"where {cond_label}" if cond_label else "", scope_label]
+        note = " ".join(p for p in note_parts if p)
+        return f"No rows match the specified filters{(' (' + note + ')') if note else ''}."
+
+    question = _clean_text(message).casefold()
+
+    # 4. Compound question: run each sub-question and combine
+    sub_questions = qu_plan.get("sub_questions") or []
+    if sub_questions:
+        parts: list[str] = []
+        for sub_q in sub_questions:
+            result = _execute_qu_subquestion(sub_q, rows, source_key, context, question)
+            if result:
+                parts.append(result)
+        if parts:
+            cond_label = _qu_conditions_label(conditions, condition_logic)
+            scope_label = _qu_time_scope_label(time_scope)
+            header_parts = []
+            if cond_label:
+                header_parts.append(f"where {cond_label}")
+            if scope_label:
+                header_parts.append(f"({scope_label})")
+            header = (" ".join(header_parts)).strip()
+            combined = "\n\n".join(parts)
+            return (header + ":\n\n" + combined) if header else combined
+
+    # 5. Single intent execution
+    metric_fields = _qu_metric_fields(qu_plan, rows)
+    group_field = _qu_group_field(qu_plan, rows, question)
+
+    # Breakdown intent
+    if intent == "breakdown" or _plan_wants_components_breakdown(question):
+        count_unit_field = _plan_count_unit_field(question, rows)
+        if count_unit_field:
+            distinct = sorted({
+                _clean_text(r.get(count_unit_field))
+                for r in rows if _clean_text(r.get(count_unit_field))
+            })
+            headline = f"**{len(distinct)}** distinct {_humanize_field(count_unit_field).lower()}(s)"
+        else:
+            headline = f"**{len(rows)}** matching row(s)"
+        breakdown = _plan_components_breakdown(question, rows, context)
+        return headline + breakdown if breakdown else headline
+
+    # Count intent
+    if intent == "count" or (not metric_fields and _asks_how_many(question)):
+        if group_field:
+            counts_map: dict[str, int] = {}
+            for row in rows:
+                key = _plan_group_value(row, group_field)
+                counts_map[key] = counts_map.get(key, 0) + 1
+            ranked = sorted(counts_map.items(), key=lambda item: (-item[1], item[0]))
+            return _format_plan_count_answer(source_key, group_field, ranked)
+        count_unit_field = _plan_count_unit_field(question, rows)
+        if count_unit_field:
+            distinct = {
+                _clean_text(r.get(count_unit_field))
+                for r in rows if _clean_text(r.get(count_unit_field))
+            }
+            return (
+                f"**{len(distinct)}** distinct {_humanize_field(count_unit_field).lower()}(s) "
+                f"(across {len(rows)} matching row(s))."
+            )
+        return f"**{len(rows)}** matching row(s) from {source_key}."
+
+    if not metric_fields:
+        return ""
+
+    wants_average = (
+        intent == "average"
+        or "average" in question
+        or bool(re.search(r"\bavg\b", question))
+        or any(
+            isinstance(m, dict) and _clean_text(m.get("aggregation", "")).casefold() == "avg"
+            for m in (qu_plan.get("metrics") or [])
+        )
+    )
+    wants_ranking = intent == "ranking" or _clean_text(qu_plan.get("output_format") or "").casefold() == "ranked_list"
+
+    # Grouped / comparison / ranking
+    if group_field or intent in ("comparison", "ranking"):
+        group_field = group_field or _default_group_field(rows)
+        if not group_field:
+            return ""
+        grouped = _aggregate_plan_rows(rows, metric_fields, group_field, wants_average)
+        if not grouped:
+            return ""
+        # Only collapse single-group results to a scalar when the group_by came from the
+        # decomposer's default, not from an explicit "per X" / "by X" in the question.
+        explicit_group = any(pat.search(question) for pat, _ in _QU_IMPLICIT_GROUP_PATTERNS)
+        if len(grouped) <= 1 and not explicit_group:
+            return ""
+        sort_by = qu_plan.get("sort_by") or {}
+        sort_field_raw = _clean_text(sort_by.get("field", ""))
+        sort_order = _clean_text(sort_by.get("order", "desc")).casefold()
+        sort_field = _resolve_row_field(rows, sort_field_raw) if sort_field_raw else ""
+        if sort_field or wants_ranking:
+            sf = sort_field or (metric_fields[0] if metric_fields else "")
+            grouped = sorted(grouped, key=lambda r: _number(r.get(sf, 0)), reverse=(sort_order != "asc"))
+        limit = qu_plan.get("limit")
+        if isinstance(limit, int) and limit > 0:
+            grouped = grouped[:limit]
+        return _format_plan_grouped_answer(source_key, metric_fields, group_field, grouped, wants_average)
+
+    # Scalar total / average (ungrouped)
+    totals = {
+        m: _clean_number(
+            _average([_number(r.get(m)) for r in rows]) if wants_average
+            else sum(_number(r.get(m)) for r in rows)
+        )
+        for m in metric_fields
+    }
+    label = "Average" if wants_average else "Total"
+    parts_txt = [
+        f"{_humanize_field(m)}: {_format_plan_metric_value(m, v)}"
+        for m, v in totals.items()
+    ]
+    cond_label = _qu_conditions_label(conditions, condition_logic)
+    suffix = f" (where {cond_label})" if cond_label else ""
+    return f"{label}{suffix}: " + " | ".join(parts_txt)
+
+
+# ── QU Confidence Scoring ─────────────────────────────────────────────────────
+
+_QU_CONFIDENCE_THRESHOLD = float(os.getenv("CAPACITY_CHAT_QU_CONFIDENCE_THRESHOLD", "0.65") or "0.65")
+
+
+def _compute_qu_confidence(
+    qu_plan: dict[str, Any],
+    answer: str,
+    context: dict[str, Any],
+    question: str,
+) -> tuple[float, list[str]]:
+    """Score 0.0–1.0 for how reliable the QU executor's answer is.
+
+    Penalises: wrong/empty source, ineffective filters, thin answer for the intent,
+    missing numeric output for aggregate intents.
+    Returns (score, [human-readable reasons]) so the caller can log or surface them.
+    """
+    score = 1.0
+    reasons: list[str] = []
+
+    if not qu_plan or not answer:
+        return 0.0, ["no plan or answer produced"]
+
+    intent = _clean_text(qu_plan.get("intent", "")).casefold()
+    source_key = _clean_text(qu_plan.get("primary_source", ""))
+    conditions = qu_plan.get("conditions") or []
+    time_scope = qu_plan.get("time_scope") or {}
+    entities = qu_plan.get("entities") or []
+
+    # Trend/prediction answers from the executor are inherently low-confidence
+    if intent in ("trend", "prediction"):
+        score -= 0.5
+        reasons.append("time-series/prediction questions need full LLM analysis")
+
+    # Re-fetch and re-filter rows (pure in-memory dict lookup, no I/O)
+    all_rows = _rows_for_plan_source(source_key, context)
+
+    if not all_rows:
+        score -= 0.5
+        reasons.append(f"data source '{source_key}' returned no rows")
+    else:
+        condition_logic = _clean_text(qu_plan.get("condition_logic") or "AND").upper()
+        matched = _apply_qu_conditions(all_rows, conditions, condition_logic)
+
+        if matched is None:
+            score -= 0.4
+            reasons.append("a filter condition referenced a field not found in the source")
+        else:
+            matched = _apply_qu_time_scope(matched, time_scope)
+            matched = _apply_qu_entity_filters(matched, entities)
+
+            if not matched:
+                score -= 0.35
+                reasons.append("no rows survived the filters")
+            elif len(all_rows) < 3:
+                score -= 0.25
+                reasons.append(f"only {len(all_rows)} row(s) in source — possible wrong table")
+            elif conditions and len(matched) == len(all_rows):
+                # Every row passed despite conditions being present → field likely didn't resolve
+                score -= 0.15
+                reasons.append("conditions had zero selectivity — filter may not have matched real fields")
+
+    # Answer-quality signals
+    answer_lower = answer.casefold()
+
+    if "no rows match" in answer_lower:
+        score -= 0.35
+        reasons.append("executor found no matching data")
+
+    # Aggregate/average/ranking intents must produce numbers
+    if intent in ("aggregate", "average", "ranking", "comparison") and not re.search(r"\d", answer):
+        score -= 0.30
+        reasons.append("numeric result expected but answer contains no numbers")
+
+    # Thin answer for a complex question
+    if len(question.split()) > 8 and len(answer.strip()) < 50:
+        score -= 0.20
+        reasons.append("answer too brief for the complexity of the question")
+
+    # No filters at all for a non-trivial intent → may be an unfiltered aggregate
+    time_type = time_scope.get("type", "none")
+    if not conditions and not entities and time_type == "none":
+        if intent not in ("list", "lookup", "breakdown", "count"):
+            score -= 0.10
+            reasons.append("no filters applied — answer may be an unfiltered aggregate")
+
+    return round(max(0.0, min(1.0, score)), 2), reasons
 
 
 def _build_chat_context(
@@ -1009,6 +1659,7 @@ def _build_chat_context(
         "tower_days_all": tower_day_rows,
         "tower_weekday_summary": _tower_weekday_summary(tower_day_rows),
         "tower_month_summary": _tower_month_summary(tower_day_rows),
+        "daily_efficiency": _daily_efficiency_summary(tower_day_rows),
         "tower_downtime_runs": tower_downtime_runs[:1000],
         "tower_downtime_runs_all": tower_downtime_runs,
         "tower_downtime_reason_attribution": tower_reason_attribution,
@@ -1175,6 +1826,7 @@ def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -
         "tower_month_summary": _compact_rows(
             context.get("tower_month_summary") or [], limit=tower_month_summary_limit
         ),
+        "daily_efficiency": context.get("daily_efficiency") or [],
         "tower_availability": context.get("tower_availability") or {},
         "tower_downtime_reason_attribution": {
             "attribution_note": tower_attribution.get("attribution_note"),
@@ -2598,13 +3250,9 @@ def _fallback_answer_from_context(
     if not question:
         return ""
 
-    planned = _answer_from_plan(plan, message, context)
+    planned = _execute_qu_plan(plan, message, context) or _answer_from_plan(plan, message, context)
     if planned:
         return planned
-
-    deterministic = _try_deterministic_chat_answer(message, context)
-    if deterministic:
-        return deterministic
 
     if _is_tower_usage_distribution_question(question):
         return _answer_tower_usage_distribution_question(context)
@@ -2795,6 +3443,7 @@ def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict
         "tower_usage_distribution": context.get("tower_usage_distribution"),
         "tower_weekday_summary": context.get("tower_weekday_summary"),
         "tower_month_summary": context.get("tower_month_summary"),
+        "daily_efficiency": context.get("daily_efficiency"),
         "tower_downtime_runs": context.get("tower_downtime_runs_all") or context.get("tower_downtime_runs"),
         "downtime_by_folder": context.get("downtime_by_folder"),
         "delayed_pf": context.get("delayed_pf"),
@@ -4607,6 +5256,66 @@ def _tower_month_summary(tower_day_rows: list[dict[str, Any]]) -> list[dict[str,
 
     summary.sort(key=lambda r: (r["tower"], r["month"]))
     return summary
+
+
+def _daily_efficiency_summary(tower_day_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per-date plant-wide efficiency, derived from segment-level PO and runtime.
+
+    Aggregates tower_runtime_segments data by run_date so the LLM and QU layer can answer
+    questions like 'how many days was efficiency below 90%' without having to group the raw
+    segment table themselves.  Fields:
+      run_date, total_po, total_runtime_min, total_dt_min, actual_speed_cph,
+      committed_speed_cph (weighted avg), efficiency_pct.
+    """
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in tower_day_rows:
+        run_date = _clean_text(row.get("run_date"))
+        if not run_date:
+            continue
+        dt_min = _number(row.get("downtime") or row.get("downtime_min"))
+        bucket = buckets.setdefault(run_date, {
+            "run_date": run_date,
+            "total_po": 0.0,
+            "total_runtime_min": 0.0,
+            "total_dt_min": 0.0,
+            "committed_speed_weighted": 0.0,
+            "committed_speed_weight": 0.0,
+        })
+        bucket["total_dt_min"] += dt_min
+        # tower_day_rows have already-processed segments (committed_speed_cph, not committed_speed)
+        for seg in (row.get("runtime_segments") or []):
+            minutes = _number(seg.get("minutes"))
+            po = _number(seg.get("print_order"))
+            committed = _number(seg.get("committed_speed_cph"))
+            bucket["total_po"] += po
+            bucket["total_runtime_min"] += minutes
+            if committed > 0:
+                bucket["committed_speed_weighted"] += committed * minutes
+                bucket["committed_speed_weight"] += minutes
+
+    result = []
+    for bucket in buckets.values():
+        total_po = bucket["total_po"]
+        runtime_h = bucket["total_runtime_min"] / 60
+        dt_h = bucket["total_dt_min"] / 60
+        committed = (
+            bucket["committed_speed_weighted"] / bucket["committed_speed_weight"]
+            if bucket["committed_speed_weight"] > 0 else 0.0
+        )
+        actual = total_po / (runtime_h + dt_h) if (runtime_h + dt_h) > 0 else 0.0
+        efficiency = _clean_number((actual / committed) * 100) if committed > 0 else None
+        result.append({
+            "run_date": bucket["run_date"],
+            "total_po": _clean_number(total_po),
+            "total_runtime_min": _clean_number(bucket["total_runtime_min"]),
+            "total_dt_min": _clean_number(bucket["total_dt_min"]),
+            "actual_speed_cph": _clean_number(actual),
+            "committed_speed_cph": _clean_number(committed),
+            "efficiency_pct": efficiency,
+        })
+
+    result.sort(key=lambda r: r["run_date"])
+    return result
 
 
 def _is_active_folder_row(row: dict[str, Any]) -> bool:

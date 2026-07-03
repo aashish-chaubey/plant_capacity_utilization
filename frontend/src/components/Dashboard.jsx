@@ -117,6 +117,7 @@ export default function Dashboard({
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [forceLLM, setForceLLM] = useState(false);
   const [chatSize, setChatSize] = useState({ width: 360, height: 480 });
   const chatEndRef = useRef(null);
   const prevIntelligenceRef = useRef(null);
@@ -198,6 +199,7 @@ export default function Dashboard({
           selected_folders: selectedFolders || [],
           timeframe: timeframeRange ? { start: timeframeRange.start, end: timeframeRange.end } : null,
           history: chatMessages.map(({ role, content }) => ({ role, content })),
+          force_full_llm: forceLLM,
         }),
       });
       const payload = await response.json();
@@ -206,6 +208,8 @@ export default function Dashboard({
         content: payload.answer || "No response.",
         plan: payload.plan || null,
         chart: payload.chart || null,
+        confidence: payload.confidence ?? null,
+        refined: payload.refined ?? false,
       }]);
     } catch {
       setChatMessages([...nextMessages, {
@@ -486,6 +490,19 @@ export default function Dashboard({
                     {msg.role === "assistant" && msg.chart && (
                       <ChatChart chart={msg.chart} />
                     )}
+                    {msg.role === "assistant" && msg.refined && (
+                      <div className="ml-1 mt-1 flex items-center gap-1.5 text-xs text-violet-600">
+                        <svg className="h-3 w-3 shrink-0" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M6 1l1.2 2.4L10 4.2l-2 1.95.47 2.75L6 7.6l-2.47 1.3L4 6.15 2 4.2l2.8-.8z"/>
+                        </svg>
+                        Enhanced with full AI analysis
+                      </div>
+                    )}
+                    {msg.role === "assistant" && !msg.refined && msg.confidence !== null && msg.confidence !== undefined && (
+                      <div className="ml-1 mt-1 text-xs text-slate-400">
+                        Confidence: {Math.round(msg.confidence * 100)}%
+                      </div>
+                    )}
                     {msg.role === "assistant" && msg.plan && (
                       <details className="ml-1">
                         <summary className="cursor-pointer select-none text-xs text-slate-400 hover:text-slate-600 list-none flex items-center gap-1">
@@ -499,11 +516,23 @@ export default function Dashboard({
                           {msg.plan.primary_source && (
                             <div><span className="font-medium text-slate-500">Source:</span> {msg.plan.primary_source}{msg.plan.secondary_sources?.length > 0 ? `, ${msg.plan.secondary_sources.join(", ")}` : ""}</div>
                           )}
-                          {msg.plan.metrics?.length > 0 && <div><span className="font-medium text-slate-500">Metrics:</span> {msg.plan.metrics.join(", ")}</div>}
-                          {msg.plan.computation && <div><span className="font-medium text-slate-500">Computation:</span> {msg.plan.computation}</div>}
+                          {msg.plan.metrics?.length > 0 && (
+                            <div><span className="font-medium text-slate-500">Metrics:</span> {msg.plan.metrics.map(m => typeof m === "object" ? (m.label || m.field) : m).join(", ")}</div>
+                          )}
+                          {msg.plan.conditions?.length > 0 && (
+                            <div><span className="font-medium text-slate-500">Conditions ({msg.plan.condition_logic || "AND"}):</span> {msg.plan.conditions.map(c => c.label || `${c.field} ${c.op} ${c.value}`).join(` ${msg.plan.condition_logic || "AND"} `)}</div>
+                          )}
                           {msg.plan.filters && Object.keys(msg.plan.filters).length > 0 && (
                             <div><span className="font-medium text-slate-500">Filters:</span> {Object.entries(msg.plan.filters).map(([k, v]) => `${k}${formatPlanFilterValue(v)}`).join(", ")}</div>
                           )}
+                          {msg.plan.time_scope?.type && msg.plan.time_scope.type !== "none" && (
+                            <div><span className="font-medium text-slate-500">Time scope:</span> {msg.plan.time_scope.weekdays?.join(", ") || msg.plan.time_scope.months?.join(", ") || msg.plan.time_scope.specific_date || `${msg.plan.time_scope.date_from || ""} → ${msg.plan.time_scope.date_to || ""}`}</div>
+                          )}
+                          {msg.plan.entities?.length > 0 && (
+                            <div><span className="font-medium text-slate-500">Entities:</span> {msg.plan.entities.map(e => `${e.type}: ${e.value}`).join(", ")}</div>
+                          )}
+                          {msg.plan.group_by && msg.plan.group_by !== "none" && <div><span className="font-medium text-slate-500">Group by:</span> {msg.plan.group_by}</div>}
+                          {msg.plan.computation && <div><span className="font-medium text-slate-500">Computation:</span> {msg.plan.computation}</div>}
                           {msg.plan.output_format && <div><span className="font-medium text-slate-500">Output:</span> {msg.plan.output_format}</div>}
                         </div>
                       </details>
@@ -527,16 +556,32 @@ export default function Dashboard({
 
             {/* Input */}
             <div className="shrink-0 border-t border-slate-100 p-3">
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
+              <div className="flex items-end gap-2">
+                <textarea
+                  rows={2}
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChatSend(); } }}
-                  placeholder={intelligenceLoading ? "Loading new data…" : "Ask a question…"}
+                  placeholder={intelligenceLoading ? "Loading new data…" : "Ask a question… (Shift+Enter for new line)"}
                   disabled={chatLoading || intelligenceLoading}
-                  className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none transition focus:border-blue-400 focus:bg-white focus:ring-1 focus:ring-blue-100 disabled:opacity-60"
+                  className="min-w-0 flex-1 resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none transition focus:border-blue-400 focus:bg-white focus:ring-1 focus:ring-blue-100 disabled:opacity-60"
+                  style={{ minHeight: "2.5rem", maxHeight: "12rem" }}
                 />
+                <button
+                  type="button"
+                  onClick={() => setForceLLM((v) => !v)}
+                  title={forceLLM ? "Full AI mode on — click to use fast mode" : "Fast mode — click to use full AI"}
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition ${
+                    forceLLM
+                      ? "bg-violet-600 text-white hover:bg-violet-700"
+                      : "bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+                  }`}
+                >
+                  <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 1.5l1.5 3L13 5.5l-2.5 2.4.6 3.4L8 9.8l-3.1 1.5.6-3.4L3 5.5l3.5-1z"/>
+                    <path d="M4 12l-2 2M12 12l2 2"/>
+                  </svg>
+                </button>
                 <button
                   type="button"
                   onClick={handleChatSend}
@@ -546,6 +591,9 @@ export default function Dashboard({
                   <Send className="h-4 w-4" aria-hidden="true" />
                 </button>
               </div>
+              {forceLLM && (
+                <p className="mt-1.5 text-center text-xs text-violet-500">Full AI mode — bypassing fast path</p>
+              )}
             </div>
           </div>
         )}

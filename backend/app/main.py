@@ -63,6 +63,7 @@ class ChatRequest(BaseModel):
     selected_folders: list[str] = []
     timeframe: ChatTimeframe | None = None
     history: list[dict[str, Any]] = []
+    force_full_llm: bool = False
 
 
 def _json_default(obj: Any) -> Any:
@@ -327,6 +328,7 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
             downtime_reasons=scoped["downtime_reasons"],
             book_details=scoped["book_details"],
             history=request.history,
+            force_full_llm=request.force_full_llm,
         )
         return JSONResponse({
             "valid": True,
@@ -334,6 +336,8 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
             "status": result.get("status", "ok"),
             "detail": result.get("detail", ""),
             "plan": result.get("plan") or None,
+            "confidence": result.get("confidence"),
+            "refined": result.get("refined", False),
             "chart": _safe_json(result.get("chart")) if result.get("chart") else None,
         })
     except Exception as exc:
