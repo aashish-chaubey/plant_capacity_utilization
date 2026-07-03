@@ -1907,7 +1907,7 @@ function buildMonthlyCapacityPeriodRow(monthKey, monthRows) {
     spare_time: sumCapacityRows(sortedRows, "spare_time"),
     idle_time: sumCapacityRows(sortedRows, "idle_time")
   }, totalCapacity);
-  const runtimeSegments = aggregatePlantRuntimeSegments(sortedRows, values.runtime);
+  const runtimeSegments = aggregatePlantRuntimeSegments(sortedRows, values.runtime, values.downtime);
 
   return {
     run_date: monthKey,
@@ -1962,8 +1962,8 @@ function buildTowerPlantCapacityRows(days, dailyRows, towerDetailRows = []) {
         idle_time: daily.idle_time
       }, totalCapacity);
       const runtimeSegments = Array.isArray(daily.runtime_segments) && daily.runtime_segments.length > 0
-        ? normalizeRuntimeSegments(daily.runtime_segments, values.runtime, totalCapacity)
-        : aggregateRuntimeSegmentsFromSourceRows(towerRowsByDate.get(runDate) || [], values.runtime, totalCapacity);
+        ? normalizeRuntimeSegments(daily.runtime_segments, values.runtime, totalCapacity, values.downtime)
+        : aggregateRuntimeSegmentsFromSourceRows(towerRowsByDate.get(runDate) || [], values.runtime, totalCapacity, values.downtime);
       const totalTowers = Math.max(
         Number(daily.capacity_towers_count || 0),
         Math.ceil(totalCapacity / CAPACITY_WINDOW_MINUTES),
@@ -2012,7 +2012,7 @@ function buildPlantCapacityRows(days, rows, folderCount) {
       spare_time: sumCapacityRows(dayRows, "spare_time"),
       idle_time: sumCapacityRows(dayRows, "idle_time")
     }, totalCapacity);
-    const runtimeSegments = aggregatePlantRuntimeSegments(dayRows, values.runtime);
+    const runtimeSegments = aggregatePlantRuntimeSegments(dayRows, values.runtime, values.downtime);
 
     return {
       run_date: runDate,
@@ -2067,7 +2067,7 @@ function normalizePlantCapacityValues(values, totalCapacity) {
   return normalized;
 }
 
-function aggregatePlantRuntimeSegments(dayRows, targetRuntime) {
+function aggregatePlantRuntimeSegments(dayRows, targetRuntime, downtime = 0) {
   const buckets = new Map();
 
   for (const row of dayRows) {
@@ -2079,11 +2079,24 @@ function aggregatePlantRuntimeSegments(dayRows, targetRuntime) {
         key,
         label: RUNTIME_SEGMENT_STYLES[key]?.label || "Run Time",
         minutes: 0,
-        is_complex: Boolean(segment.isComplex)
+        is_complex: Boolean(segment.isComplex),
+        print_order: 0,
+        source_print_order: 0,
+        committed_speed_weighted_total: 0,
+        committed_speed_weight_minutes: 0,
+        complexity_code: segment.complexity_code || ""
       };
 
-      bucket.minutes = cleanNumber(bucket.minutes + Number(segment.value || 0));
+      const minutes = Number(segment.value || 0);
+      bucket.minutes = cleanNumber(bucket.minutes + minutes);
       bucket.is_complex = bucket.is_complex || Boolean(segment.isComplex);
+      bucket.print_order = cleanNumber(Number(bucket.print_order || 0) + Number(segment.print_order || 0));
+      bucket.source_print_order = cleanNumber(Number(bucket.source_print_order || 0) + Number(segment.source_print_order || 0));
+      if (Number(segment.committed_speed || 0) > 0 && minutes > 0) {
+        bucket.committed_speed_weighted_total += Number(segment.committed_speed || 0) * minutes;
+        bucket.committed_speed_weight_minutes += minutes;
+      }
+      if (!bucket.complexity_code && segment.complexity_code) bucket.complexity_code = segment.complexity_code;
       buckets.set(key, bucket);
     }
   }
@@ -2097,13 +2110,16 @@ function aggregatePlantRuntimeSegments(dayRows, targetRuntime) {
   if (totalMinutes <= 0 || Number(targetRuntime || 0) <= 0) return [];
 
   const scale = Number(targetRuntime || 0) / totalMinutes;
-  return segments.map((segment) => ({
+  return finalizeRuntimeSegmentMetrics(segments.map((segment) => ({
     ...segment,
-    minutes: cleanNumber(segment.minutes * scale)
-  }));
+    minutes: cleanNumber(segment.minutes * scale),
+    print_order: cleanNumber(Number(segment.print_order || 0) * scale),
+    source_print_order: cleanNumber(Number(segment.source_print_order || 0) * scale),
+    committed_speed: calculateWeightedSpeed(segment.committed_speed_weighted_total, segment.committed_speed_weight_minutes)
+  })), downtime);
 }
 
-function aggregateRuntimeSegmentsFromSourceRows(rows, targetRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES) {
+function aggregateRuntimeSegmentsFromSourceRows(rows, targetRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES, downtime = 0) {
   const runtime = Math.min(
     Math.max(Number(targetRuntime || 0), 0),
     Math.max(Number(capacityLimit || CAPACITY_WINDOW_MINUTES), 0)
@@ -2124,14 +2140,24 @@ function aggregateRuntimeSegmentsFromSourceRows(rows, targetRuntime, capacityLim
         minutes: 0,
         is_complex: Boolean(segment.is_complex),
         effective_speed: 0,
+        actual_speed: 0,
+        committed_speed: 0,
+        speed_efficiency: 0,
         print_order: 0,
+        source_print_order: 0,
+        committed_speed_weighted_total: 0,
+        committed_speed_weight_minutes: 0,
         complexity_code: segment.complexity_code || "",
       };
 
       bucket.minutes = cleanNumber(bucket.minutes + minutes);
       bucket.is_complex = bucket.is_complex || Boolean(segment.is_complex);
-      bucket.effective_speed = Math.max(Number(bucket.effective_speed || 0), Number(segment.effective_speed || 0));
       bucket.print_order = cleanNumber(Number(bucket.print_order || 0) + Number(segment.print_order || 0));
+      bucket.source_print_order = cleanNumber(Number(bucket.source_print_order || 0) + Number(segment.source_print_order || 0));
+      if (Number(segment.committed_speed || 0) > 0) {
+        bucket.committed_speed_weighted_total += Number(segment.committed_speed || 0) * minutes;
+        bucket.committed_speed_weight_minutes += minutes;
+      }
       if (!bucket.complexity_code && segment.complexity_code) bucket.complexity_code = segment.complexity_code;
       buckets.set(key, bucket);
     }
@@ -2146,10 +2172,13 @@ function aggregateRuntimeSegmentsFromSourceRows(rows, targetRuntime, capacityLim
   if (totalMinutes <= 0) return [];
 
   const scale = runtime / totalMinutes;
-  return segments.map((segment) => ({
+  return finalizeRuntimeSegmentMetrics(segments.map((segment) => ({
     ...segment,
-    minutes: cleanNumber(segment.minutes * scale)
-  }));
+    minutes: cleanNumber(segment.minutes * scale),
+    print_order: cleanNumber(Number(segment.print_order || 0) * scale),
+    source_print_order: cleanNumber(Number(segment.source_print_order || 0) * scale),
+    committed_speed: calculateWeightedSpeed(segment.committed_speed_weighted_total, segment.committed_speed_weight_minutes)
+  })), downtime);
 }
 
 function rawRuntimeSegmentBucketKey(segment) {
@@ -2447,7 +2476,7 @@ function buildCapacitySegments(values, capacityLimit = CAPACITY_WINDOW_MINUTES) 
       value: values.downtime,
       color: CAPACITY_SPLIT_COLORS.downtime
     },
-    ...buildRuntimeCapacitySegments(values.runtime_segments, values.runtime, capacityLimit),
+    ...buildRuntimeCapacitySegments(values.runtime_segments, values.runtime, capacityLimit, values.downtime),
     {
       key: "spare_time",
       label: "Spare Time",
@@ -2463,8 +2492,8 @@ function buildCapacitySegments(values, capacityLimit = CAPACITY_WINDOW_MINUTES) 
   ];
 }
 
-function buildRuntimeCapacitySegments(runtimeSegments, fallbackRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES) {
-  const normalizedSegments = normalizeRuntimeSegments(runtimeSegments, fallbackRuntime, capacityLimit);
+function buildRuntimeCapacitySegments(runtimeSegments, fallbackRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES, downtime = 0) {
+  const normalizedSegments = normalizeRuntimeSegments(runtimeSegments, fallbackRuntime, capacityLimit, downtime);
 
   if (normalizedSegments.length === 0) {
     return [
@@ -2475,7 +2504,10 @@ function buildRuntimeCapacitySegments(runtimeSegments, fallbackRuntime, capacity
         color: CAPACITY_SPLIT_COLORS.runtime,
         runtimeSegment: true,
         textColor: "#14532d",
-        effective_speed: 0
+        effective_speed: 0,
+        actual_speed: 0,
+        committed_speed: 0,
+        speed_efficiency: 0
       }
     ];
   }
@@ -2493,13 +2525,17 @@ function buildRuntimeCapacitySegments(runtimeSegments, fallbackRuntime, capacity
       isComplex: Boolean(style.isComplex || segment.is_complex),
       textColor: style.textColor,
       effective_speed: segment.effective_speed,
+      actual_speed: segment.actual_speed,
+      committed_speed: segment.committed_speed,
+      speed_efficiency: segment.speed_efficiency,
       print_order: segment.print_order,
+      source_print_order: segment.source_print_order,
       complexity_code: segment.complexity_code
     };
   });
 }
 
-function normalizeRuntimeSegments(runtimeSegments, targetRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES) {
+function normalizeRuntimeSegments(runtimeSegments, targetRuntime, capacityLimit = CAPACITY_WINDOW_MINUTES, downtime = 0) {
   const runtime = cleanNumber(Math.min(
     Math.max(Number(targetRuntime || 0), 0),
     Math.max(Number(capacityLimit || CAPACITY_WINDOW_MINUTES), 0)
@@ -2521,18 +2557,24 @@ function normalizeRuntimeSegments(runtimeSegments, targetRuntime, capacityLimit 
   const scale = runtime / totalMinutes;
   let remaining = runtime;
 
-  return positiveSegments.map((segment, index) => {
+  const normalized = positiveSegments.map((segment, index) => {
     const nextSegment = { ...segment };
 
     if (index === positiveSegments.length - 1) {
       nextSegment.minutes = cleanNumber(Math.max(remaining, 0));
+      nextSegment.print_order = cleanNumber(Number(segment.print_order || 0) * scale);
+      nextSegment.source_print_order = cleanNumber(Number(segment.source_print_order || 0) * scale);
       return nextSegment;
     }
 
     nextSegment.minutes = cleanNumber(Math.min(segment.minutes * scale, remaining));
+    nextSegment.print_order = cleanNumber(Number(segment.print_order || 0) * scale);
+    nextSegment.source_print_order = cleanNumber(Number(segment.source_print_order || 0) * scale);
     remaining = cleanNumber(remaining - nextSegment.minutes);
     return nextSegment;
   }).filter((segment) => segment.minutes > 0);
+
+  return finalizeRuntimeSegmentMetrics(normalized, downtime);
 }
 
 function normalizeCapacityValues(detail) {
@@ -2557,7 +2599,7 @@ function normalizeCapacityValues(detail) {
     ...nonSpareValues,
     spare_time: spareTime,
     idle_time: idleTime,
-    runtime_segments: normalizeRuntimeSegments(detail.runtime_segments, runtime)
+    runtime_segments: normalizeRuntimeSegments(detail.runtime_segments, runtime, CAPACITY_WINDOW_MINUTES, downtime)
   };
   const total = cleanNumber(nonSpareTotal + spareTime + idleTime);
 
@@ -2576,7 +2618,7 @@ function normalizeCapacityValues(detail) {
     overage = cleanNumber(overage - reduction);
   }
 
-  normalized.runtime_segments = normalizeRuntimeSegments(normalized.runtime_segments, normalized.runtime);
+  normalized.runtime_segments = normalizeRuntimeSegments(normalized.runtime_segments, normalized.runtime, CAPACITY_WINDOW_MINUTES, normalized.downtime);
 
   return normalized;
 }
@@ -3075,6 +3117,43 @@ function calculateRawPercentage(numerator, denominator) {
 
   const percentage = (Number(numerator || 0) / capacity) * 100;
   return Math.min(Math.max(percentage, 0), 100);
+}
+
+function calculateWeightedSpeed(weightedTotal, weightMinutes) {
+  const minutes = Number(weightMinutes || 0);
+  if (minutes <= 0) return 0;
+  return cleanNumber(Number(weightedTotal || 0) / minutes);
+}
+
+function calculateActualSpeedFromPo(printOrder, runtimeMinutes, downtimeMinutes = 0) {
+  const elapsedHours = (Number(runtimeMinutes || 0) + Number(downtimeMinutes || 0)) / 60;
+  if (elapsedHours <= 0) return 0;
+  return cleanNumber(Number(printOrder || 0) / elapsedHours);
+}
+
+function calculateSpeedEfficiency(actualSpeed, committedSpeed) {
+  const committed = Number(committedSpeed || 0);
+  if (committed <= 0) return 0;
+  return cleanNumber((Number(actualSpeed || 0) / committed) * 100);
+}
+
+function finalizeRuntimeSegmentMetrics(segments, downtime = 0) {
+  const totalRuntime = segments.reduce((total, segment) => total + Number(segment.minutes || 0), 0);
+  const totalDowntime = Math.max(Number(downtime || 0), 0);
+
+  return segments.map((segment) => {
+    const minutes = Number(segment.minutes || 0);
+    const downtimeShare = totalRuntime > 0 ? totalDowntime * (minutes / totalRuntime) : 0;
+    const actualSpeed = calculateActualSpeedFromPo(segment.print_order, minutes, downtimeShare);
+    const committedSpeed = Number(segment.committed_speed || 0);
+
+    return {
+      ...segment,
+      actual_speed: actualSpeed,
+      effective_speed: actualSpeed,
+      speed_efficiency: calculateSpeedEfficiency(actualSpeed, committedSpeed)
+    };
+  });
 }
 
 function compareResourceNames(first, second) {

@@ -187,7 +187,7 @@ def build_chat_response(
         "Example: percentage of GNP/UV tower runtime used for SNP products = "
         "SNP runtime_min where tower_type_key='gnp_uv' / All runtime_min where tower_type_key='gnp_uv' * 100.\n"
         "- When tower_runtime_segments is present, it is the filtered segment-level source for tower/product runtime math. "
-        "Use its minutes field to recompute or validate numerator/denominator rather than saying segment data is absent.\n"
+        "Use its minutes, print_order, committed_speed_cph, actual_speed_cph, and efficiency_pct fields to recompute or validate numerator/denominator rather than saying segment data is absent.\n"
         "- 'complex runtime': sum entries where is_complex=true (C4 + C9–C15).\n"
         "- 'speed' / 'average speed' with no qualifier: overall average_speed_cph. Qualify by type only when asked.\n"
         "- 'loss time' / 'losses': total lost_time (changeover + late-start + reflong). Waiting time is always separate.\n"
@@ -493,7 +493,8 @@ towers — per-tower aggregated totals across all dates
 
 	tower_runtime_segments — segment-level runtime rows included only when the question needs tower/product runtime math
 	  Fields: run_date, tower, tower_type_key (gnp_uv/non_uv), tower_type, uv_tower, product_type (SNP/GNP/Unknown),
-	  complexity_code, category, minutes. Use this to calculate or validate tower runtime percentages by product type.
+	  complexity_code, category, minutes, print_order, source_print_order, committed_speed_cph, actual_speed_cph,
+	  efficiency_pct. Use this to calculate or validate tower runtime percentages by product type and speed efficiency.
 
 tower_weekday_summary — per-tower per-weekday AVERAGES, already aggregated (towers x at most 7 rows,
   always complete regardless of dataset size). Use this for any "weekday wise" / day-of-week tower
@@ -552,8 +553,9 @@ tower_runtime_mix — generic runtime mix by tower type and product type
   row(tower_type_key='gnp_uv', product_type='SNP').runtime_min / row(tower_type_key='gnp_uv', product_type='All').runtime_min * 100.
 
 tower_runtime_segments — segment-level runtime rows included only when needed
-  Fields: run_date, tower, tower_type_key, tower_type, uv_tower, product_type, complexity_code, category, minutes.
-  Use these rows for direct calculation when product/tower runtime percentages require raw segment detail.
+  Fields: run_date, tower, tower_type_key, tower_type, uv_tower, product_type, complexity_code, category, minutes,
+  print_order, source_print_order, committed_speed_cph, actual_speed_cph, efficiency_pct.
+  Use these rows for direct calculation when product/tower runtime percentages or speed efficiency require raw segment detail.
 
 COMPUTATION NOTES:
 - "average [metric] per folder" → exact_dashboard.folders; divide total_field by active_nights
@@ -4652,7 +4654,11 @@ def _runtime_segment_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
             "is_complex": _is_complex_segment(segment),
             "minutes": _clean_number(minutes),
             "print_order": _clean_number(segment.get("print_order")),
-            "speed_cph": _clean_number(segment.get("effective_speed")),
+            "source_print_order": _clean_number(segment.get("source_print_order")),
+            "committed_speed_cph": _clean_number(segment.get("committed_speed")),
+            "actual_speed_cph": _clean_number(segment.get("actual_speed") or segment.get("effective_speed")),
+            "speed_cph": _clean_number(segment.get("actual_speed") or segment.get("effective_speed")),
+            "efficiency_pct": _clean_number(segment.get("speed_efficiency")),
         })
     return sorted(segments, key=lambda item: _complexity_code_sort_key(item.get("complexity_code")))
 
@@ -4671,17 +4677,25 @@ def _runtime_segments_for_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
                     "is_complex": segment.get("is_complex"),
                     "minutes": 0.0,
                     "print_order": 0.0,
+                    "source_print_order": 0.0,
                     "speed_weighted_total": 0.0,
                     "speed_weight_minutes": 0.0,
+                    "committed_speed_weighted_total": 0.0,
+                    "committed_speed_weight_minutes": 0.0,
                 },
             )
             minutes = _number(segment.get("minutes"))
             speed = _number(segment.get("speed_cph"))
+            committed_speed = _number(segment.get("committed_speed_cph"))
             bucket["minutes"] += minutes
             bucket["print_order"] += _number(segment.get("print_order"))
+            bucket["source_print_order"] += _number(segment.get("source_print_order"))
             if speed > 0:
                 bucket["speed_weighted_total"] += speed * minutes
                 bucket["speed_weight_minutes"] += minutes
+            if committed_speed > 0:
+                bucket["committed_speed_weighted_total"] += committed_speed * minutes
+                bucket["committed_speed_weight_minutes"] += minutes
 
     result = []
     for bucket in buckets.values():
@@ -4690,6 +4704,11 @@ def _runtime_segments_for_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
             if bucket["speed_weight_minutes"] > 0
             else _speed_from_print_order(bucket["print_order"], bucket["minutes"])
         )
+        committed_speed = (
+            bucket["committed_speed_weighted_total"] / bucket["committed_speed_weight_minutes"]
+            if bucket["committed_speed_weight_minutes"] > 0
+            else 0
+        )
         result.append({
             "complexity_code": bucket.get("complexity_code"),
             "category": bucket.get("category"),
@@ -4697,7 +4716,11 @@ def _runtime_segments_for_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
             "is_complex": bucket.get("is_complex"),
             "minutes": _clean_number(bucket["minutes"]),
             "print_order": _clean_number(bucket["print_order"]),
+            "source_print_order": _clean_number(bucket["source_print_order"]),
+            "committed_speed_cph": _clean_number(committed_speed),
+            "actual_speed_cph": _clean_number(speed),
             "speed_cph": _clean_number(speed),
+            "efficiency_pct": _clean_number((speed / committed_speed) * 100) if committed_speed > 0 else 0,
         })
     return sorted(result, key=lambda item: _complexity_code_sort_key(item.get("complexity_code")))
 

@@ -40,6 +40,14 @@ TOWER_MASTER_CONFIG_FILENAME = "tower_master.json"
 FOLDER_LIST_CONFIG_FILENAME = "folder_list.json"
 EFFECTIVE_RUNTIME_COLUMN = "Effective Runtime Minutes"
 EFFECTIVE_PRINT_ORDER_COLUMN = "Effective Print Order"
+COMMITTED_SPEED_COLUMN = "Committed Speed"
+COMMITTED_SPEED_SOURCE_COLUMNS = (
+    "Committed Speed",
+    "Committed Speed (CPH)",
+    "Committed Speed CPH",
+    "Avg Speed",
+    "Avg.Speed",
+)
 
 _BOOK_DETAIL_LEAN_COLS = [
     "IssueID",
@@ -53,6 +61,7 @@ _BOOK_DETAIL_LEAN_COLS = [
     "Plant Name",
     "Total Run Time (mnts)",
     "Total Downtime",
+    COMMITTED_SPEED_COLUMN,
     "towers_list",
     "towers_str",
     "downtime_total_min",
@@ -124,6 +133,15 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
         "Print Order",
         pd.Series(0, index=df.index),
     ).apply(_parse_count_value)
+    committed_speed_source = next(
+        (column for column in COMMITTED_SPEED_SOURCE_COLUMNS if column in df.columns),
+        None,
+    )
+    df[COMMITTED_SPEED_COLUMN] = (
+        df[committed_speed_source].apply(_parse_count_value)
+        if committed_speed_source
+        else pd.Series(0.0, index=df.index)
+    )
     df["Total Run Time (mnts)"] = df["Total Run Time (mnts)"].apply(_parse_minutes_value)
     df["Total Downtime"] = df["Total Downtime"].apply(_parse_minutes_value)
     df["Change Over Time (mins)"] = df.get(
@@ -1137,7 +1155,7 @@ def calculate_folder_day_metrics(
         over_compliance_minutes = (over_compliance_minutes - reduction).clip(lower=0)
 
     metrics["runtime_segments"] = metrics.apply(
-        lambda row: _scale_runtime_segments(row.get("runtime_segments"), row["runtime"]),
+        lambda row: _scale_runtime_segments(row.get("runtime_segments"), row["runtime"], row["downtime"]),
         axis=1,
     )
 
@@ -1344,6 +1362,7 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
         "Effective End DateTime",
         EFFECTIVE_RUNTIME_COLUMN,
         EFFECTIVE_PRINT_ORDER_COLUMN,
+        COMMITTED_SPEED_COLUMN,
     ]
 
     df = source_df[
@@ -1441,6 +1460,8 @@ def _filter_interval_editions(book_df: pd.DataFrame) -> pd.DataFrame:
     df[EFFECTIVE_PRINT_ORDER_COLUMN] = (
         source_print_order * source_runtime_ratio
     ).apply(_clean_number).values
+    if COMMITTED_SPEED_COLUMN not in df.columns:
+        df[COMMITTED_SPEED_COLUMN] = 0.0
 
     return df
 
@@ -1783,6 +1804,7 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
         "Effective End DateTime",
         "Print Order",
         "Total Run Time (mnts)",
+        COMMITTED_SPEED_COLUMN,
         EFFECTIVE_RUNTIME_COLUMN,
         EFFECTIVE_PRINT_ORDER_COLUMN,
         "Reflong"
@@ -1798,7 +1820,9 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
         for _, row in group.iterrows():
             classification = _categorize_complexity(row.get("Complexities"))
             runtime_minutes = _effective_runtime_minutes(row)
-            print_order = _effective_print_order(row)
+            source_print_order = _effective_print_order(row)
+            committed_speed = _committed_speed(row)
+            apportioned_print_order = _apportioned_print_order(row, runtime_minutes)
 
             if runtime_minutes <= 0:
                 continue
@@ -1814,15 +1838,22 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                     "is_complex": classification["is_complex"],
                     "runtime_minutes": 0.0,
                     "print_order": 0.0,
+                    "source_print_order": 0.0,
                     "speed_runtime_minutes": 0.0,
                     "speed_print_order": 0.0,
+                    "committed_speed_weighted_total": 0.0,
+                    "committed_speed_runtime_minutes": 0.0,
                 },
             )
             current["runtime_minutes"] += runtime_minutes
-            current["print_order"] += print_order
+            current["print_order"] += apportioned_print_order
+            current["source_print_order"] += source_print_order
 
             current["speed_runtime_minutes"] += runtime_minutes
-            current["speed_print_order"] += print_order
+            current["speed_print_order"] += apportioned_print_order
+            if committed_speed > 0:
+                current["committed_speed_weighted_total"] += committed_speed * runtime_minutes
+                current["committed_speed_runtime_minutes"] += runtime_minutes
 
         segments = []
         for segment in category_totals.values():
@@ -1830,6 +1861,11 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
             print_order = float(segment["print_order"])
             speed_runtime_minutes = float(segment["speed_runtime_minutes"])
             speed_print_order = float(segment["speed_print_order"])
+            committed_speed = _weighted_committed_speed(
+                segment["committed_speed_weighted_total"],
+                segment["committed_speed_runtime_minutes"],
+            )
+            actual_speed = _calculate_actual_speed(speed_print_order, speed_runtime_minutes, 0.0)
             segments.append(
                 {
                     "key": segment["key"],
@@ -1840,9 +1876,11 @@ def _calculate_runtime_segments_by_folder_day(book_df: pd.DataFrame) -> pd.DataF
                     "minutes": _clean_number(runtime_minutes),
                     "source_runtime_minutes": _clean_number(runtime_minutes),
                     "print_order": _clean_number(print_order),
-                    "effective_speed": _clean_number(
-                        _calculate_effective_speed(speed_print_order, speed_runtime_minutes)
-                    ),
+                    "source_print_order": _clean_number(segment["source_print_order"]),
+                    "committed_speed": _clean_number(committed_speed),
+                    "actual_speed": _clean_number(actual_speed),
+                    "effective_speed": _clean_number(actual_speed),
+                    "speed_efficiency": _clean_number(_calculate_speed_efficiency(actual_speed, committed_speed)),
                 }
             )
 
@@ -2007,7 +2045,66 @@ def _effective_print_order(row: pd.Series) -> float:
     return source_print_order
 
 
-def _scale_runtime_segments(value: Any, runtime_minutes: float) -> list[dict[str, Any]]:
+def _committed_speed(row: pd.Series) -> float:
+    for column in COMMITTED_SPEED_SOURCE_COLUMNS:
+        if column in row:
+            speed = _parse_count_value(row.get(column))
+            if speed > 0:
+                return speed
+    return 0.0
+
+
+def _apportioned_print_order(row: pd.Series, runtime_minutes: float) -> float:
+    committed_speed = _committed_speed(row)
+    if committed_speed > 0 and runtime_minutes > 0:
+        return (committed_speed / 60.0) * runtime_minutes
+    return _effective_print_order(row)
+
+
+def _weighted_committed_speed(weighted_speed_total: float, runtime_minutes: float) -> float:
+    if runtime_minutes <= 0:
+        return 0.0
+    return float(weighted_speed_total or 0.0) / float(runtime_minutes)
+
+
+def _calculate_actual_speed(print_order: float, runtime_minutes: float, downtime_minutes: float = 0.0) -> float:
+    elapsed_minutes = float(runtime_minutes or 0.0) + float(downtime_minutes or 0.0)
+    return _calculate_effective_speed(print_order, elapsed_minutes)
+
+
+def _calculate_speed_efficiency(actual_speed: float, committed_speed: float) -> float:
+    if committed_speed <= 0:
+        return 0.0
+    return (actual_speed / committed_speed) * 100.0
+
+
+def _add_speed_efficiency_to_segments(segments: list[dict[str, Any]], downtime_minutes: float = 0.0) -> list[dict[str, Any]]:
+    total_runtime = sum(float(segment.get("minutes") or 0.0) for segment in segments)
+    downtime = max(float(downtime_minutes or 0.0), 0.0)
+    output: list[dict[str, Any]] = []
+
+    for segment in segments:
+        runtime_minutes = float(segment.get("minutes") or 0.0)
+        if runtime_minutes <= 0:
+            continue
+
+        downtime_share = downtime * (runtime_minutes / total_runtime) if total_runtime > 0 else 0.0
+        committed_speed = _parse_count_value(segment.get("committed_speed"))
+        actual_speed = _calculate_actual_speed(
+            _parse_count_value(segment.get("print_order")),
+            runtime_minutes,
+            downtime_share,
+        )
+        enriched = dict(segment)
+        enriched["actual_speed"] = _clean_number(actual_speed)
+        enriched["effective_speed"] = _clean_number(actual_speed)
+        enriched["speed_efficiency"] = _clean_number(_calculate_speed_efficiency(actual_speed, committed_speed))
+        output.append(enriched)
+
+    return output
+
+
+def _scale_runtime_segments(value: Any, runtime_minutes: float, downtime_minutes: float = 0.0) -> list[dict[str, Any]]:
     if not isinstance(value, list) or runtime_minutes <= 0:
         return []
 
@@ -2025,12 +2122,16 @@ def _scale_runtime_segments(value: Any, runtime_minutes: float) -> list[dict[str
 
         scaled = dict(segment)
         scaled["minutes"] = _clean_number(source_minutes * scale)
+        for metric_key in ("print_order", "source_print_order"):
+            if metric_key in scaled:
+                scaled[metric_key] = _clean_number(float(scaled.get(metric_key) or 0) * scale)
         scaled_segments.append(scaled)
 
-    return _normalize_segment_minutes(scaled_segments, runtime_minutes)
+    normalized = _normalize_segment_minutes(scaled_segments, runtime_minutes)
+    return _add_speed_efficiency_to_segments(normalized, downtime_minutes)
 
 
-def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: float) -> list[dict[str, Any]]:
+def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: float, downtime_minutes: float = 0.0) -> list[dict[str, Any]]:
     if rows.empty or runtime_minutes <= 0:
         return []
 
@@ -2042,6 +2143,7 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
         "Effective End DateTime",
         "Print Order",
         "Total Run Time (mnts)",
+        COMMITTED_SPEED_COLUMN,
         EFFECTIVE_RUNTIME_COLUMN,
         EFFECTIVE_PRINT_ORDER_COLUMN,
         "Reflong",
@@ -2054,7 +2156,9 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
     for _, row in df.iterrows():
         classification = _categorize_complexity(row.get("Complexities"))
         source_runtime_minutes = _effective_runtime_minutes(row)
-        print_order = _effective_print_order(row)
+        source_print_order = _effective_print_order(row)
+        committed_speed = _committed_speed(row)
+        apportioned_print_order = _apportioned_print_order(row, source_runtime_minutes)
 
         if source_runtime_minutes <= 0:
             continue
@@ -2070,21 +2174,37 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
                 "is_complex": classification["is_complex"],
                 "runtime_minutes": 0.0,
                 "print_order": 0.0,
+                "source_print_order": 0.0,
                 "speed_runtime_minutes": 0.0,
                 "speed_print_order": 0.0,
+                "committed_speed_weighted_total": 0.0,
+                "committed_speed_runtime_minutes": 0.0,
             },
         )
         current["runtime_minutes"] += source_runtime_minutes
-        current["print_order"] += print_order
+        current["print_order"] += apportioned_print_order
+        current["source_print_order"] += source_print_order
 
         current["speed_runtime_minutes"] += source_runtime_minutes
-        current["speed_print_order"] += print_order
+        current["speed_print_order"] += apportioned_print_order
+        if committed_speed > 0:
+            current["committed_speed_weighted_total"] += committed_speed * source_runtime_minutes
+            current["committed_speed_runtime_minutes"] += source_runtime_minutes
 
     segments = []
     for segment in category_totals.values():
         source_runtime_minutes = float(segment["runtime_minutes"])
         if source_runtime_minutes <= 0:
             continue
+        committed_speed = _weighted_committed_speed(
+            segment["committed_speed_weighted_total"],
+            segment["committed_speed_runtime_minutes"],
+        )
+        actual_speed = _calculate_actual_speed(
+            float(segment["speed_print_order"]),
+            float(segment["speed_runtime_minutes"]),
+            0.0,
+        )
 
         segments.append(
             {
@@ -2096,12 +2216,11 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
                 "minutes": _clean_number(source_runtime_minutes),
                 "source_runtime_minutes": _clean_number(source_runtime_minutes),
                 "print_order": _clean_number(segment["print_order"]),
-                "effective_speed": _clean_number(
-                    _calculate_effective_speed(
-                        float(segment["speed_print_order"]),
-                        float(segment["speed_runtime_minutes"]),
-                    )
-                ),
+                "source_print_order": _clean_number(segment["source_print_order"]),
+                "committed_speed": _clean_number(committed_speed),
+                "actual_speed": _clean_number(actual_speed),
+                "effective_speed": _clean_number(actual_speed),
+                "speed_efficiency": _clean_number(_calculate_speed_efficiency(actual_speed, committed_speed)),
             }
         )
 
@@ -2109,7 +2228,7 @@ def _calculate_runtime_segments_for_rows(rows: pd.DataFrame, runtime_minutes: fl
         segments,
         key=_runtime_segment_sort_key,
     )
-    return _scale_runtime_segments(segments, runtime_minutes)
+    return _scale_runtime_segments(segments, runtime_minutes, downtime_minutes)
 
 
 def _normalize_segment_minutes(segments: list[dict[str, Any]], target_minutes: float) -> list[dict[str, Any]]:
@@ -2395,6 +2514,7 @@ def calculate_tower_day_metrics(
             "Complexities",
             "Print Order",
             "Total Run Time (mnts)",
+            COMMITTED_SPEED_COLUMN,
             EFFECTIVE_RUNTIME_COLUMN,
             EFFECTIVE_PRINT_ORDER_COLUMN,
         ]
@@ -2492,11 +2612,12 @@ def calculate_tower_day_metrics(
         )
         downtime = float(downtime_parts["downtime"])
         reflong_related_downtime = float(downtime_parts["reflong_related_downtime"])
+        downtime_minutes = min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         runtime_minutes = min(
             max(runtime - downtime - reflong_related_downtime, 0.0),
             CAPACITY_MINUTES_PER_FOLDER_DAY,
         )
-        runtime_segments = _calculate_runtime_segments_for_rows(group, runtime_minutes)
+        runtime_segments = _calculate_runtime_segments_for_rows(group, runtime_minutes, downtime_minutes)
 
         tower_editions: list[str] = []
         if not group.empty:
@@ -2510,7 +2631,6 @@ def calculate_tower_day_metrics(
                     tower_editions.append(edition)
                     seen_editions.add(edition_key)
 
-        downtime_minutes = min(max(downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         changeover_minutes = min(max(change_over_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         waiting_minutes = min(max(waiting_time, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
         reflong_minutes = min(max(reflong_related_downtime, 0.0), CAPACITY_MINUTES_PER_FOLDER_DAY)
