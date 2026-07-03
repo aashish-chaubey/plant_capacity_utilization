@@ -1033,7 +1033,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
         </div>
       )}
 
-      <div ref={chartFrameRef} className="relative overflow-hidden rounded-lg border border-slate-100 bg-[#f3f6fa] p-0.5">
+      <div ref={chartFrameRef} className="relative overflow-visible rounded-lg border border-slate-100 bg-[#f3f6fa] p-0.5">
         <svg
           className="h-[500px] w-full"
           viewBox={`0 0 ${width} ${height}`}
@@ -1349,7 +1349,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
 function CapacityDaySummary({ summary, style, onClose, onZoomIn }) {
   return (
     <section
-      className="absolute z-20 max-h-[440px] w-[400px] max-w-[calc(100%-1rem)] overflow-y-auto rounded-lg border border-slate-200 bg-white p-3 pr-10 text-sm shadow-xl"
+      className="absolute z-50 max-h-[min(440px,calc(100vh-2rem))] w-[400px] max-w-[calc(100%-1rem)] overflow-y-auto rounded-lg border border-slate-200 bg-white p-3 pr-10 text-sm shadow-xl"
       style={style}
     >
       <button
