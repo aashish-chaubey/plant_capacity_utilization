@@ -1,0 +1,137 @@
+{
+  "Airoli": [
+    {
+      "machine": "Colorman-A",
+      "towers": ["PU-1", "PU-2", "PU-3", "PU-4", "PU-5", "PU-6"]
+    },
+    {
+      "machine": "Colorman-B",
+      "towers": ["PU-11", "PU-12", "PU-13", "PU-14", "PU-15", "PU-16"]
+    },
+    {
+      "machine": "Cromoman-C",
+      "towers": ["PU-22", "PU-23", "PU-24", "PU-25", "PU-26"]
+    }
+  ],
+  "Baroda": [
+    {
+      "machine": "Hiline",
+      "towers": ["T-1", "T-2", "T-3", "T-4", "T-5", "T-6"]
+    }
+  ],
+  "Bhosari": [
+    {
+      "machine": "Regioman",
+      "towers": ["PU-31", "PU-32", "PU-33", "PU-34", "PU-35", "PU-36", "PU-37"]
+    }
+  ],
+  "Bommasandra": [
+    {
+      "machine": "Regioman-A",
+      "towers": ["PU-01", "PU-02", "PU-03", "PU-04", "PU-05", "PU-06", "PU-07", "PU-08"]
+    },
+    {
+      "machine": "Regioman-B",
+      "towers": ["PU-11", "PU-12", "PU-13", "PU-14", "PU-15", "PU-16", "PU-17"]
+    }
+  ],
+  "Butibori": [
+    {
+      "machine": "Hiline",
+      "towers": ["T-1", "T-2", "T-3", "T-4", "T-5", "T-6"]
+    }
+  ],
+  "Chemmencherry": [
+    {
+      "machine": "Regioman",
+      "towers": ["PU-01", "PU-02", "PU-03", "PU-04", "PU-05", "PU-06", "PU-07", "PU-08"]
+    }
+  ],
+  "Chinhat": [
+    {
+      "machine": "Hiline-1",
+      "towers": ["T1", "T2", "T3", "T4", "T5", "T6"]
+    },
+    {
+      "machine": "Hiline-2",
+      "towers": ["T1", "T2", "T3", "T4", "T5", "T6"]
+    }
+  ],
+  "Kandivali": [
+    {
+      "machine": "Colorman-B",
+      "towers": ["PU-1", "PU-2", "PU-3", "PU-4", "PU-5", "PU-6", "PU-7", "PU-8"]
+    },
+    {
+      "machine": "Colorman-D",
+      "towers": ["PU-1", "PU-2", "PU-3", "PU-4", "PU-5", "PU-6", "PU-7", "PU-8"]
+    },
+    {
+      "machine": "Geoman-A",
+      "towers": ["PU-1", "PU-2", "PU-3", "PU-4"]
+    },
+    {
+      "machine": "Hiline-2",
+      "towers": ["T-21", "T-22", "T-23", "T-24", "T-25", "T-26"]
+    }
+  ],
+  "Manesar": [
+    {
+      "machine": "TKS1",
+      "towers": ["T-1", "T-2", "T-3", "T-4", "T-5"]
+    }
+  ],
+  "Nacharam": [
+    {
+      "machine": "Hiline-1",
+      "towers": [
+        "T-01", "T-02", "T-03", "T-04", "T-05", "T-06", "T-07",
+        "T1", "T2", "T3", "T4", "T5", "T6", "T7"
+      ]
+    },
+    {
+      "machine": "Hiline-2",
+      "towers": ["T-01", "T-02", "T-03", "T-04", "T-05", "T-06", "T-07"]
+    }
+  ],
+  "Sahibabad": [
+    {
+      "machine": "Colorman-C",
+      "towers": ["PU-1", "PU-2", "PU-3", "PU-4", "PU-5", "PU-6", "PU-7", "PU-8"]
+    },
+    {
+      "machine": "Colorman-D",
+      "towers": ["PU-1", "PU-2", "PU-3", "PU-4", "PU-5", "PU-6", "PU-7", "PU-8"]
+    },
+    {
+      "machine": "Geoman-B",
+      "towers": ["PU-1", "PU-2", "PU-3", "PU-4", "PU-5"]
+    }
+  ],
+  "Saltlake": [
+    {
+      "machine": "Cromoman",
+      "towers": ["PU-31", "PU-32", "PU-33", "PU-34", "PU-35", "PU-36"]
+    },
+    {
+      "machine": "Regioman",
+      "towers": ["PU-1", "PU-2", "PU-3", "PU-4"]
+    }
+  ],
+  "Trivandrum": [
+    {
+      "machine": "Citiline",
+      "towers": ["T1", "T2", "T3", "T4", "T5", "T6"]
+    }
+  ],
+  "Vejalpur": [
+    {
+      "machine": "Cityline-1",
+      "towers": ["T1", "T2", "T3", "T4", "T5", "T6"]
+    },
+    {
+      "machine": "Hiline",
+      "towers": ["Tower-1", "Tower-2", "Tower-3", "Tower-4", "Tower-5", "Tower-6"]
+    }
+  ]
+}

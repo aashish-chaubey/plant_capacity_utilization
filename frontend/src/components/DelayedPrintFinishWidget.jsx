@@ -176,12 +176,13 @@ function DelayedFinishTable({ rows }) {
         <h4 className="text-sm font-semibold text-slate-950">Delayed PF breaches</h4>
       </div>
       <div className="max-h-[300px] overflow-auto rounded-lg border border-slate-100">
-        <table className="w-full min-w-[780px] text-sm">
+        <table className="w-full min-w-[900px] text-sm">
           <thead className="sticky top-0 bg-slate-50">
             <tr className="border-b border-slate-100 text-left text-xs font-semibold uppercase tracking-normal text-slate-500">
               <th className="px-3 py-2">Date</th>
               <th className="px-3 py-2">Folder</th>
               <th className="px-3 py-2">Print finish</th>
+              <th className="px-3 py-2">Considered editions</th>
               <th className="px-3 py-2">Root cause</th>
             </tr>
           </thead>
@@ -196,6 +197,11 @@ function DelayedFinishTable({ rows }) {
                 </td>
                 <td className="px-3 py-2 font-mono text-slate-700">
                   {formatFinishTime(row.overrun_minutes, row.plant_name)}
+                </td>
+                <td className="max-w-[220px] px-3 py-2 text-slate-600">
+                  <span className="line-clamp-2" title={formatEditions(row.considered_editions)}>
+                    {formatEditions(row.considered_editions)}
+                  </span>
                 </td>
                 <td className="px-3 py-2">
                   <div className="flex flex-wrap gap-1">
@@ -293,11 +299,12 @@ function compareTwinDuplicateRows(first, second) {
   const folderDiff = String(first.folder || "").localeCompare(String(second.folder || ""));
   if (folderDiff !== 0) return folderDiff;
 
-  return formatEditions(first.editions).localeCompare(formatEditions(second.editions));
+  return formatEditions(first.cutoff_started_editions).localeCompare(formatEditions(second.cutoff_started_editions));
 }
 
 function buildFolderBreach(row, baseline) {
   const causeScores = calculateCauseScores(row, baseline || {});
+  const consideredEditions = Array.isArray(row.cutoff_started_editions) ? row.cutoff_started_editions : [];
 
   return {
     ...row,
@@ -306,6 +313,7 @@ function buildFolderBreach(row, baseline) {
     plant_name: row.plant_name || "Plant",
     display_name: formatFolderName(row.folder),
     overrun_minutes: cleanNumber(row.overrun_minutes),
+    considered_editions: consideredEditions,
     cause_scores: causeScores,
     root_causes: getRootCauses(causeScores),
   };

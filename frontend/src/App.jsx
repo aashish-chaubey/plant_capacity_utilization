@@ -1,4 +1,19 @@
-import { AlertCircle, BarChart2, Check, ChevronDown, FileSpreadsheet, Info, Loader2, RotateCcw, UploadCloud, X } from "lucide-react";
+import {
+  Activity,
+  AlertCircle,
+  BarChart2,
+  Check,
+  ChevronDown,
+  FileSpreadsheet,
+  Gauge,
+  Info,
+  Layers,
+  Loader2,
+  RotateCcw,
+  ShieldCheck,
+  UploadCloud,
+  X
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import Dashboard from "./components/Dashboard.jsx";
@@ -359,10 +374,12 @@ export default function App() {
 
   const showControlStrip = Boolean(result && selectedPlant);
   const folderSelectionLabel = formatFolderSelectionLabel(selectedFolders);
+  const showLandingPage = !result && !loading && errors.length === 0;
 
   return (
     <div className="min-h-screen bg-[#f6f8fb] text-slate-900">
       {/* ── Header ──────────────────────────────────────────────── */}
+      {!showLandingPage && (
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white shadow-[0_1px_4px_rgba(0,0,0,0.06)]">
         <div className="mx-auto flex h-14 w-full max-w-[1800px] items-center gap-4 px-4 sm:px-5 xl:px-6">
           {/* Brand */}
@@ -411,6 +428,7 @@ export default function App() {
           </div>
         </div>
       </header>
+      )}
 
       {/* ── Control strip (sticky below header) ─────────────────── */}
       {showControlStrip && (
@@ -607,10 +625,10 @@ export default function App() {
       )}
 
       {/* ── Main ────────────────────────────────────────────────── */}
-      <main className="mx-auto w-full max-w-[1800px] px-4 py-6 sm:px-5 xl:px-6">
+      <main className={showLandingPage ? "w-full" : "mx-auto w-full max-w-[1800px] px-4 py-6 sm:px-5 xl:px-6"}>
 
         {/* Empty state */}
-        {!result && !loading && errors.length === 0 && (
+        {showLandingPage && (
           <EmptyDropZone onUpload={handleUpload} />
         )}
 
@@ -765,18 +783,7 @@ function EmptyDropZone({ onUpload }) {
   }
 
   return (
-    <div
-      onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
-      onDragLeave={() => setDragging(false)}
-      onDrop={(event) => { event.preventDefault(); setDragging(false); submitFile(event.dataTransfer.files?.[0]); }}
-      onClick={() => inputRef.current?.click()}
-      className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed transition ${
-        dragging
-          ? "border-blue-400 bg-blue-50"
-          : "border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50/60"
-      }`}
-      style={{ minHeight: "calc(100vh - 120px)" }}
-    >
+    <section className="relative min-h-screen overflow-hidden bg-[#eef6ff] text-slate-950">
       <input
         ref={inputRef}
         type="file"
@@ -784,21 +791,213 @@ function EmptyDropZone({ onUpload }) {
         className="hidden"
         onChange={(event) => submitFile(event.target.files?.[0])}
       />
-      <div className="flex flex-col items-center gap-5 text-center px-6">
-        <div className={`rounded-2xl p-5 transition ${dragging ? "bg-blue-100" : "bg-slate-100"}`}>
-          <UploadCloud className={`h-10 w-10 transition ${dragging ? "text-blue-500" : "text-slate-400"}`} aria-hidden="true" />
+
+      <div className="absolute inset-x-0 bottom-0 h-52 opacity-70" aria-hidden="true">
+        <div className="h-full w-full bg-[linear-gradient(165deg,transparent_0_38%,rgba(37,99,235,0.10)_38.4%,transparent_39%,transparent_45%,rgba(37,99,235,0.08)_45.4%,transparent_46%,transparent_52%,rgba(14,165,233,0.08)_52.4%,transparent_53%)]" />
+      </div>
+
+      <div className="relative mx-auto flex min-h-screen w-full max-w-[1200px] flex-col px-5 py-5 sm:px-8">
+        <nav className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-[0_12px_28px_rgba(37,99,235,0.25)]">
+              <BarChart2 className="h-6 w-6" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-base font-extrabold text-slate-950">Plant Capacity Utilization</p>
+              <p className="truncate text-xs font-semibold text-blue-600">Tower-level capacity intelligence</p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl bg-slate-950 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
+          >
+            <UploadCloud className="h-4 w-4" aria-hidden="true" />
+            Upload
+          </button>
+        </nav>
+
+        <div className="grid flex-1 items-center gap-10 py-10 lg:grid-cols-[0.92fr_1.08fr] lg:py-8">
+          <div className="max-w-xl">
+            <h1 className="text-[44px] font-black leading-[1.04] text-slate-950 sm:text-[58px] lg:text-[64px]">
+              Understand Your Capacity. <span className="text-blue-600">Instantly.</span>
+            </h1>
+            <p className="mt-6 max-w-lg text-base font-medium leading-8 text-slate-700 sm:text-lg">
+              Upload an Excel production report to map plant capacity by tower, folder, product mix, and the 00:00-04:00 operating window.
+            </p>
+
+            <div id="features" className="mt-8 grid grid-cols-2 gap-x-5 gap-y-5 sm:grid-cols-4">
+              {[
+                { icon: Layers, title: "Tower Mapping", detail: "Plant capacity by tower" },
+                { icon: Gauge, title: "Live KPIs", detail: "Runtime, loss, spare" },
+                { icon: Activity, title: "AI Insights", detail: "Ask the data" },
+                { icon: ShieldCheck, title: "Scoped Views", detail: "Plant and period filters" },
+              ].map(({ icon: Icon, title, detail }) => (
+                <div key={title} className="min-w-0">
+                  <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-xl border border-blue-100 bg-white text-blue-600 shadow-sm">
+                    <Icon className="h-5 w-5" aria-hidden="true" />
+                  </div>
+                  <p className="text-sm font-extrabold text-slate-950">{title}</p>
+                  <p className="mt-1 text-xs font-medium leading-4 text-slate-500">{detail}</p>
+                </div>
+              ))}
+            </div>
+
+            <div
+              onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDragging(false);
+                submitFile(event.dataTransfer.files?.[0]);
+              }}
+              className={`mt-10 max-w-[360px] rounded-xl border-2 border-dashed bg-white/84 p-6 text-center shadow-[0_16px_40px_rgba(37,99,235,0.10)] transition ${
+                dragging ? "border-blue-500 ring-4 ring-blue-100" : "border-blue-200"
+              }`}
+            >
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+                <UploadCloud className="h-8 w-8" aria-hidden="true" />
+              </div>
+              <p className="mt-4 text-base font-extrabold text-slate-950">
+                {dragging ? "Release to upload" : "Upload Excel Files"}
+              </p>
+              <p className="mt-1 text-sm leading-5 text-slate-500">
+                Drag and drop production reports here or choose a workbook.
+              </p>
+              <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                className="mt-4 inline-flex h-10 items-center justify-center rounded-lg bg-blue-600 px-7 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
+              >
+                Choose Files
+              </button>
+              <p className="mt-2 text-xs font-medium text-slate-400">.xlsx and .xls supported</p>
+            </div>
+          </div>
+
+          <LandingDashboardPreview />
         </div>
-        <div className="space-y-1.5">
-          <p className="text-base font-semibold text-slate-700">
-            {dragging ? "Release to upload" : "Drop your production report here"}
-          </p>
-          <p className="max-w-xs text-sm text-slate-400">
-            Or use the{" "}
-            <span className="font-semibold text-blue-600">Upload report</span>{" "}
-            button in the top-right corner
-          </p>
+      </div>
+    </section>
+  );
+}
+
+function LandingDashboardPreview() {
+  const capacityBars = [
+    { label: "01", snp: 54, gnp: 18, idle: 28 },
+    { label: "05", snp: 46, gnp: 32, idle: 22 },
+    { label: "09", snp: 58, gnp: 14, idle: 28 },
+    { label: "13", snp: 42, gnp: 36, idle: 22 },
+    { label: "17", snp: 62, gnp: 20, idle: 18 },
+    { label: "21", snp: 51, gnp: 27, idle: 22 },
+  ];
+  const topTowers = [
+    ["Tower 04", 92],
+    ["Tower 07", 87],
+    ["Tower 12", 81],
+    ["Tower 02", 75],
+  ];
+
+  return (
+    <div className="relative mx-auto w-full max-w-[590px]">
+      <div className="absolute left-0 top-6 hidden h-[520px] w-16 rounded-2xl bg-slate-950 shadow-[0_22px_60px_rgba(15,23,42,0.30)] lg:block">
+        <div className="flex h-full flex-col items-center gap-6 py-8 text-slate-500">
+          {[BarChart2, Gauge, Layers, Activity, ShieldCheck].map((Icon, index) => (
+            <div
+              key={index}
+              className={`flex h-8 w-8 items-center justify-center rounded-lg ${index === 0 ? "bg-blue-600 text-white" : "text-slate-400"}`}
+            >
+              <Icon className="h-4 w-4" aria-hidden="true" />
+            </div>
+          ))}
         </div>
-        <p className="text-xs text-slate-300">Accepts .xlsx and .xls files</p>
+      </div>
+
+      <div className="relative rounded-2xl border border-white/80 bg-white p-4 shadow-[0_28px_70px_rgba(30,64,175,0.18)] lg:ml-11">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-extrabold text-slate-950">Overview</p>
+            <p className="text-xs font-medium text-slate-400">Selected plant capacity snapshot</p>
+          </div>
+          <div className="flex h-8 items-center gap-1 rounded-full border border-slate-100 bg-slate-50 px-2">
+            <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+            <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
+            <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
+          </div>
+        </div>
+
+        <div id="kpis" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[
+            ["Total Towers", "17", "text-blue-600"],
+            ["Runtime", "49%", "text-indigo-600"],
+            ["Spare Capacity", "18%", "text-amber-500"],
+            ["Utilization", "82%", "text-emerald-600"],
+          ].map(([label, value, color]) => (
+            <div key={label} className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+              <p className="text-[11px] font-bold text-slate-400">{label}</p>
+              <p className={`mt-2 text-2xl font-black ${color}`}>{value}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3 grid gap-3 lg:grid-cols-[1.08fr_0.92fr]">
+          <div className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-extrabold text-slate-700">Capacity by Tower</p>
+              <span className="text-[11px] font-bold text-blue-600">100% split</span>
+            </div>
+            <div className="mt-4 flex h-32 items-end gap-3">
+              {capacityBars.map((bar) => (
+                <div key={bar.label} className="flex h-full flex-1 flex-col justify-end gap-1">
+                  <div className="flex h-[104px] flex-col justify-end overflow-hidden rounded-t-md bg-slate-100">
+                    <div className="bg-blue-600" style={{ height: `${bar.snp}%` }} />
+                    <div className="bg-sky-300" style={{ height: `${bar.gnp}%` }} />
+                    <div className="bg-slate-200" style={{ height: `${bar.idle}%` }} />
+                  </div>
+                  <span className="text-center text-[10px] font-bold text-slate-400">{bar.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+            <p className="text-xs font-extrabold text-slate-700">Capacity by Folder</p>
+            <div className="mt-4 flex items-center gap-4">
+              <div className="grid h-28 w-28 shrink-0 place-items-center rounded-full bg-[conic-gradient(#2563eb_0_45%,#38bdf8_45%_72%,#8b5cf6_72%_100%)]">
+                <div className="grid h-16 w-16 place-items-center rounded-full bg-white text-xl font-black text-slate-950">128</div>
+              </div>
+              <div className="space-y-2 text-xs font-bold text-slate-500">
+                <p><span className="mr-2 inline-block h-2 w-2 rounded-full bg-blue-600" />High</p>
+                <p><span className="mr-2 inline-block h-2 w-2 rounded-full bg-sky-400" />Medium</p>
+                <p><span className="mr-2 inline-block h-2 w-2 rounded-full bg-violet-500" />Low</p>
+              </div>
+            </div>
+          </div>
+
+          <div id="workflow" className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+            <p className="text-xs font-extrabold text-slate-700">Utilization Trend</p>
+            <svg className="mt-3 h-28 w-full" viewBox="0 0 220 110" role="img" aria-label="Utilization trend preview">
+              <path d="M5 90 L34 72 L62 78 L90 54 L118 66 L146 34 L174 48 L210 18" fill="none" stroke="#2563eb" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M5 90 L34 72 L62 78 L90 54 L118 66 L146 34 L174 48 L210 18 L210 108 L5 108 Z" fill="#dbeafe" opacity="0.9" />
+            </svg>
+          </div>
+
+          <div id="security" className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+            <p className="text-xs font-extrabold text-slate-700">Top Towers by Utilization</p>
+            <div className="mt-4 space-y-3">
+              {topTowers.map(([name, value]) => (
+                <div key={name} className="grid grid-cols-[68px_1fr_34px] items-center gap-2">
+                  <span className="text-[11px] font-bold text-slate-500">{name}</span>
+                  <span className="h-2 overflow-hidden rounded-full bg-slate-100">
+                    <span className="block h-full rounded-full bg-blue-600" style={{ width: `${value}%` }} />
+                  </span>
+                  <span className="text-right text-[11px] font-black text-slate-700">{value}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1214,7 +1413,10 @@ function resolveTimeframeRange(timeframe, periodOptions, dailyRows) {
     const secondDate = timeframe.customEnd || bounds.end;
     const start = firstDate <= secondDate ? firstDate : secondDate;
     const end = firstDate <= secondDate ? secondDate : firstDate;
-    return { key: "custom", start, end, label: formatDateRangeLabel(start, end) };
+    const actualBounds = getDateBoundsInRange(dailyRows, { start, end });
+    const displayStart = actualBounds?.start || start;
+    const displayEnd = actualBounds?.end || end;
+    return { key: "custom", start: displayStart, end: displayEnd, label: formatDateRangeLabel(displayStart, displayEnd) };
   }
 
   const options = periodOptions[timeframe.mode] || [];
@@ -1223,9 +1425,14 @@ function resolveTimeframeRange(timeframe, periodOptions, dailyRows) {
     || buildPeriodOptionFromKey(timeframe.mode, selectedKey)
     || options[0];
   if (!selectedOption) return null;
+  const actualBounds = getDateBoundsInRange(dailyRows, selectedOption);
+  const displayStart = actualBounds?.start || selectedOption.start;
+  const displayEnd = actualBounds?.end || selectedOption.end;
   return {
     ...selectedOption,
-    label: formatDateRangeLabel(selectedOption.start, selectedOption.end)
+    start: displayStart,
+    end: displayEnd,
+    label: formatDateRangeLabel(displayStart, displayEnd)
   };
 }
 
@@ -1273,6 +1480,15 @@ function calculateSummary(dailyRows) {
 function getDateBounds(dailyRows) {
   const dates = dailyRows.map((row) => row.run_date).filter(Boolean).sort();
   return { start: dates[0] || "", end: dates[dates.length - 1] || "" };
+}
+
+function getDateBoundsInRange(dailyRows, range) {
+  const dates = dailyRows
+    .map((row) => row.run_date)
+    .filter((date) => isDateInRange(date, range))
+    .sort();
+  if (dates.length === 0) return null;
+  return { start: dates[0], end: dates[dates.length - 1] };
 }
 
 function isDateInRange(value, range) {

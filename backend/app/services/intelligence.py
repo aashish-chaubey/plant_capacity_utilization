@@ -2653,6 +2653,19 @@ def _answer_from_plan(plan: dict[str, Any] | None, message: str, context: dict[s
             return f"**0** matching rows from {source_key} for the given filter — no time-component breakdown to show."
         return "No rows match the requested filters in the current dashboard context."
 
+    average_filter = _average_comparison_filter(question, plan, rows, message)
+    if average_filter:
+        rows = _apply_average_comparison_filter(rows, average_filter)
+        if not rows:
+            return "No rows match the requested average comparison in the current dashboard context."
+        if _question_asks_for_date_list(question, rows):
+            date_field = _resolve_row_field(rows, "run_date") or _resolve_row_field(rows, "date")
+            dates = _sorted_unique(row.get(date_field) for row in rows) if date_field else []
+            if not dates:
+                return "No matching dates found in the current dashboard context."
+            title = _average_comparison_title(average_filter)
+            return title + "\n\n" + "\n".join(f"- {date}" for date in dates)
+
     # A nested "count/list X where <condition> ... and what are the key components" question needs
     # both a row count AND a breakdown handed back together — the generic count/average/grouped
     # branches below each return one or the other, so this combo gets its own early path instead of
@@ -2843,6 +2856,125 @@ def _apply_plan_filters(rows: list[dict[str, Any]], filters: Any) -> list[dict[s
             if any(expected_text in _row_value_text(row.get(field_name)).casefold() for expected_text in expected_texts)
         ]
     return selected
+
+
+def _average_comparison_filter(
+    question: str,
+    plan: dict[str, Any],
+    rows: list[dict[str, Any]],
+    message: str,
+) -> dict[str, Any] | None:
+    if not rows or not _mentions_average_comparison(question):
+        return None
+
+    comparator = _average_comparison_operator(question)
+    if not comparator:
+        return None
+
+    metric_fields = _mentioned_metric_fields(plan, rows, message)
+    if not metric_fields:
+        return None
+
+    thresholds: dict[str, float] = {}
+    for field in metric_fields:
+        values = [_number(row.get(field)) for row in rows if row.get(field) is not None]
+        if values:
+            thresholds[field] = _average(values)
+
+    if not thresholds:
+        return None
+
+    joiner = "any" if re.search(r"\b(?:any|or|either)\b", question) else "all"
+    return {"operator": comparator, "thresholds": thresholds, "joiner": joiner}
+
+
+def _mentions_average_comparison(question: str) -> bool:
+    return bool(
+        re.search(r"\b(?:below|under|less than|lower than|above|over|more than|greater than|higher than)\b", question)
+        and re.search(r"\b(?:average|avg|mean)\b", question)
+    )
+
+
+def _average_comparison_operator(question: str) -> str:
+    if re.search(r"\b(?:below|under|less than|lower than)\b", question):
+        return "<"
+    if re.search(r"\b(?:above|over|more than|greater than|higher than)\b", question):
+        return ">"
+    return ""
+
+
+def _mentioned_metric_fields(
+    plan: dict[str, Any],
+    rows: list[dict[str, Any]],
+    message: str,
+) -> list[str]:
+    fields: list[str] = []
+    for field in _plan_metric_fields(plan, rows, message):
+        if field not in fields:
+            fields.append(field)
+
+    question = _clean_text(message).casefold()
+    metric_aliases = [
+        ("runtime_min", ["runtime", "run time", "run"]),
+        ("runtime_minutes", ["runtime", "run time", "run"]),
+        ("downtime_min", ["downtime", "down time"]),
+        ("allocated_downtime_min", ["downtime", "down time"]),
+        ("loss_time_min", ["loss time", "lost time", "loss"]),
+        ("lost_time_min", ["loss time", "lost time", "loss"]),
+        ("waiting_time_min", ["wait time", "waiting time", "wait"]),
+        ("spare_time_min", ["spare time", "spare"]),
+        ("unplanned_time_min", ["unplanned time", "unplanned"]),
+        ("utilization_pct", ["utilization", "utilisation"]),
+    ]
+    for wanted_field, aliases in metric_aliases:
+        if not any(alias in question for alias in aliases):
+            continue
+        resolved = _resolve_row_field(rows, wanted_field)
+        if resolved and _field_has_any_numeric_values(rows, resolved) and resolved not in fields:
+            fields.append(resolved)
+
+    return fields
+
+
+def _field_has_any_numeric_values(rows: list[dict[str, Any]], field: str) -> bool:
+    return any(row.get(field) is not None and isfinite(_number(row.get(field))) for row in rows)
+
+
+def _apply_average_comparison_filter(rows: list[dict[str, Any]], average_filter: dict[str, Any]) -> list[dict[str, Any]]:
+    compare_fn = _COMPARATOR_FUNCS.get(_clean_text(average_filter.get("operator")))
+    thresholds = average_filter.get("thresholds") or {}
+    if not compare_fn or not thresholds:
+        return rows
+
+    require_all = average_filter.get("joiner") != "any"
+    selected = []
+    for row in rows:
+        comparisons = [
+            compare_fn(_number(row.get(field)), threshold)
+            for field, threshold in thresholds.items()
+        ]
+        if comparisons and (all(comparisons) if require_all else any(comparisons)):
+            selected.append(row)
+    return selected
+
+
+def _question_asks_for_date_list(question: str, rows: list[dict[str, Any]]) -> bool:
+    if not (_resolve_row_field(rows, "run_date") or _resolve_row_field(rows, "date")):
+        return False
+    return bool(
+        re.search(r"\b(?:identify|list|show|which|what)\b", question)
+        and re.search(r"\b(?:date|dates|day|days|night|nights)\b", question)
+    )
+
+
+def _average_comparison_title(average_filter: dict[str, Any]) -> str:
+    comparator = _COMPARATOR_LABELS.get(_clean_text(average_filter.get("operator")), "compared with")
+    metric_labels = [_humanize_field(field) for field in (average_filter.get("thresholds") or {}).keys()]
+    if len(metric_labels) == 1:
+        metric_text = metric_labels[0]
+    else:
+        metric_text = ", ".join(metric_labels[:-1]) + f" and {metric_labels[-1]}"
+    return f"Dates where {metric_text} were {comparator} their average:"
 
 
 def _plan_wants_components_breakdown(question: str) -> bool:
@@ -3125,7 +3257,8 @@ def _format_plan_grouped_answer(
     label = "Average" if average else "Total"
     metric_labels = ", ".join(_humanize_field(metric) for metric in metric_fields)
     headers = [_humanize_field(group_field), *[_humanize_field(metric) for metric in metric_fields]]
-    if average:
+    include_row_count = average and any(_number(row.get("row_count")) != 1 for row in rows)
+    if include_row_count:
         headers.append("Rows")
     lines = [
         f"{label} {metric_labels} by {_humanize_field(group_field)}:",
@@ -3136,7 +3269,7 @@ def _format_plan_grouped_answer(
     for row in rows[:20]:
         values = [str(row.get("group"))]
         values.extend(_format_plan_metric_value(metric, row.get(metric)) for metric in metric_fields)
-        if average:
+        if include_row_count:
             values.append(str(row.get("row_count")))
         lines.append("| " + " | ".join(values) + " |")
     if len(rows) > 20:

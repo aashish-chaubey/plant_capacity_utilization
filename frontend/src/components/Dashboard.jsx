@@ -292,11 +292,11 @@ export default function Dashboard({
   const kpis = [
     ["Available Time", formatPercent(totalAvailableCapacity > 0 ? 100 : 0), "blue", formatMinutes(totalAvailableCapacity)],
     ["Runtime", formatPercent(calculatePercentage(data.summary.total_runtime, totalAvailableCapacity)), "green", formatMinutes(data.summary.total_runtime)],
-    ["Wait Time", formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), "slate", formatMinutes(data.summary.total_waiting_time)],
+    ["Wait Time", formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), "wait", formatMinutes(data.summary.total_waiting_time)],
     ["Lost Time", formatPercent(calculatePercentage(data.summary.total_lost_time, totalAvailableCapacity)), "amber", formatMinutes(data.summary.total_lost_time)],
     ["Downtime", formatPercent(calculatePercentage(data.summary.total_downtime, totalAvailableCapacity)), "red", formatMinutes(data.summary.total_downtime)],
-    ["Spare Time", formatPercent(calculatePercentage(data.summary.total_buffer_time, totalAvailableCapacity)), "slate", formatMinutes(data.summary.total_buffer_time)],
-    ["Unplanned Time", formatPercent(calculatePercentage(data.summary.total_idle_time, totalAvailableCapacity)), "slate", formatMinutes(data.summary.total_idle_time)],
+    ["Spare Time", formatPercent(calculatePercentage(data.summary.total_buffer_time, totalAvailableCapacity)), "spare", formatMinutes(data.summary.total_buffer_time)],
+    ["Unplanned Time", formatPercent(calculatePercentage(data.summary.total_idle_time, totalAvailableCapacity)), "unplanned", formatMinutes(data.summary.total_idle_time)],
     [
       "Spare Capacity",
       formatPercent(
@@ -308,18 +308,12 @@ export default function Dashboard({
       ),
       "slate",
       "of planned tower time"
-    ],
-    [
-      "Tower-Nights",
-      formatPercent(calculatePercentage(totalActiveTowerCapacity, totalTowerCapacity)),
-      "slate",
-      `${formatNumber(totalActiveTowerCapacity)}/${formatNumber(totalTowerCapacity)}`
     ]
   ];
 
   return (
     <div className="mt-5 space-y-5">
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-9">
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8">
         {kpis.map(([label, value, tone, detail]) => (
           <KpiCard key={label} label={label} value={value} detail={detail} tone={tone} />
         ))}

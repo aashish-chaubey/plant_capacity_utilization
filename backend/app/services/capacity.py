@@ -36,6 +36,7 @@ TWIN_FOLDER_CONFIG_FILENAMES = ("twin_folders.json", "twin_folder.json")
 TWIN_FOLDER_MODE_COLUMN = "Twin Folder Mode"
 TWIN_FOLDER_GROUP_COLUMN = "Twin Folder Group"
 UV_TOWER_CONFIG_FILENAME = "uv_towers.json"
+TOWER_MASTER_CONFIG_FILENAME = "tower_master.json"
 FOLDER_LIST_CONFIG_FILENAME = "folder_list.json"
 EFFECTIVE_RUNTIME_COLUMN = "Effective Runtime Minutes"
 EFFECTIVE_PRINT_ORDER_COLUMN = "Effective Print Order"
@@ -175,6 +176,7 @@ def _join_book_general_downtime(
     book_df: pd.DataFrame,
     general_df: pd.DataFrame,
     down_time_df: pd.DataFrame,
+    tower_master_lookup: dict[str, dict[str, set[str]]] | None = None,
 ) -> pd.DataFrame:
     """Join Book Wise Details + General (towers) + Down Time (aggregated) into the master view.
 
@@ -223,6 +225,17 @@ def _join_book_general_downtime(
     master["towers_list"] = master["towers_list"].apply(
         lambda v: v if isinstance(v, list) else []
     )
+    if tower_master_lookup:
+        master["towers_list"] = master.apply(
+            lambda row: _filter_configured_towers(
+                row.get("towers_list"),
+                row.get("Plant Name"),
+                row.get("Machine"),
+                tower_master_lookup,
+            ),
+            axis=1,
+        )
+        master["towers_str"] = master["towers_list"].apply(", ".join)
     master["downtime_events"] = master["downtime_events"].apply(
         lambda v: v if isinstance(v, list) else []
     )
@@ -293,7 +306,11 @@ class MasterView:
     book_details: list[dict[str, Any]] = field(default_factory=list)
 
 
-def build_master_view(workbook: pd.ExcelFile, folder_lookup: dict[str, Any]) -> MasterView:
+def build_master_view(
+    workbook: pd.ExcelFile,
+    folder_lookup: dict[str, Any],
+    tower_master_lookup: dict[str, dict[str, set[str]]] | None = None,
+) -> MasterView:
     """Parse and join the General, Book Wise Details, and Down Time sheets exactly once.
 
     This is the single preprocessing entry point: every downstream consumer (the
@@ -314,7 +331,12 @@ def build_master_view(workbook: pd.ExcelFile, folder_lookup: dict[str, Any]) -> 
         parse_down_time(workbook), folder_lookup, canonical_book_df
     )
 
-    joined = _join_book_general_downtime(canonical_book_df, general_df, down_time_df)
+    joined = _join_book_general_downtime(
+        canonical_book_df,
+        general_df,
+        down_time_df,
+        tower_master_lookup,
+    )
     book_details = _book_detail_records(joined)
 
     return MasterView(
@@ -358,6 +380,20 @@ def _load_uv_tower_lookup() -> dict[str, dict[str, set[str]]]:
         raise ValueError(f"Unable to read UV tower config from {path.name}: {exc}") from exc
 
     return _normalize_uv_tower_lookup(raw_config)
+
+
+def _load_tower_master_lookup() -> dict[str, dict[str, set[str]]]:
+    path = Path(__file__).resolve().parents[2] / TOWER_MASTER_CONFIG_FILENAME
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            raw_config = json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Unable to read tower master config from {path.name}: {exc}") from exc
+
+    return _normalize_tower_master_lookup(raw_config)
 
 
 def _load_folder_list_lookup() -> dict[str, Any]:
@@ -623,6 +659,75 @@ def _normalize_uv_tower_lookup(raw_config: Any) -> dict[str, dict[str, set[str]]
                 normalized[plant_key][machine_key] = clean_towers
 
     return normalized
+
+
+def _normalize_tower_master_lookup(raw_config: Any) -> dict[str, dict[str, set[str]]]:
+    if not isinstance(raw_config, dict):
+        return {}
+
+    normalized: dict[str, dict[str, set[str]]] = {}
+
+    for plant, machine_entries in raw_config.items():
+        if not isinstance(machine_entries, list):
+            continue
+
+        plant_key = _canonical_text(plant)
+        if not plant_key:
+            continue
+
+        machine_lookup = normalized.setdefault(plant_key, {})
+
+        for entry in machine_entries:
+            if not isinstance(entry, dict):
+                continue
+
+            machine_key = _canonical_text(entry.get("machine"))
+            towers = entry.get("towers")
+            if not machine_key or not isinstance(towers, list):
+                continue
+
+            clean_towers = {
+                _canonical_tower_name(tower)
+                for tower in towers
+                if _clean_text(tower)
+            }
+            if clean_towers:
+                machine_lookup.setdefault(machine_key, set()).update(clean_towers)
+
+    return {
+        plant_key: machine_lookup
+        for plant_key, machine_lookup in normalized.items()
+        if machine_lookup
+    }
+
+
+def _filter_configured_towers(
+    towers: Any,
+    plant_name: Any,
+    machine: Any,
+    tower_master_lookup: dict[str, dict[str, set[str]]],
+) -> list[str]:
+    tower_list = towers if isinstance(towers, list) else []
+    if not tower_master_lookup:
+        return tower_list
+
+    plant_key = _canonical_text(plant_name)
+    machine_key = _canonical_text(machine)
+    configured_towers = tower_master_lookup.get(plant_key, {}).get(machine_key, set())
+    if not configured_towers:
+        return []
+
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for tower in tower_list:
+        tower_name = _clean_text(tower)
+        tower_key = _canonical_tower_name(tower_name)
+        if not tower_name or not tower_key or tower_key not in configured_towers or tower_key in seen:
+            continue
+        filtered.append(tower_name)
+        seen.add(tower_key)
+
+    return filtered
 
 
 def _is_uv_tower(
@@ -947,6 +1052,7 @@ def calculate_folder_day_metrics(
     calculated_metrics = _calculate_interval_metrics_by_folder_day(interval_editions)
     runtime_segments = _calculate_runtime_segments_by_folder_day(interval_editions)
     editions = _calculate_editions_by_folder_day(interval_editions)
+    cutoff_started_editions = _calculate_cutoff_started_editions_by_folder_day(interval_editions)
     twin_folder_info = (
         interval_editions.groupby(keys, dropna=False)
         .agg(
@@ -971,6 +1077,7 @@ def calculate_folder_day_metrics(
         active_units.merge(calculated_metrics, on=keys, how="left")
         .merge(runtime_segments, on=keys, how="left")
         .merge(editions, on=keys, how="left")
+        .merge(cutoff_started_editions, on=keys, how="left")
         .merge(twin_folder_info, on=keys, how="left")
         .merge(down_grouped, on=keys, how="left")
     )
@@ -1057,6 +1164,12 @@ def calculate_folder_day_metrics(
         metrics["editions"] = metrics["editions"].apply(
             lambda value: value if isinstance(value, list) else []
         )
+    if "cutoff_started_editions" not in metrics:
+        metrics["cutoff_started_editions"] = [[] for _ in range(len(metrics))]
+    else:
+        metrics["cutoff_started_editions"] = metrics["cutoff_started_editions"].apply(
+            lambda value: value if isinstance(value, list) else []
+        )
     metrics["twin_folder_mode"] = metrics["twin_folder_mode"].fillna(False).astype(bool)
     metrics["twin_folder_group"] = metrics["twin_folder_group"].fillna("").apply(_clean_text)
 
@@ -1086,6 +1199,7 @@ def calculate_folder_day_metrics(
             "last_issue_id",
             "runtime_segments",
             "editions",
+            "cutoff_started_editions",
             "twin_folder_mode",
             "twin_folder_group",
         ]
@@ -1167,6 +1281,7 @@ def _unplanned_folder_day_row(report_date: date, folder_reference: dict[str, str
         "last_issue_id": "",
         "runtime_segments": [],
         "editions": [],
+        "cutoff_started_editions": [],
         "twin_folder_mode": False,
         "twin_folder_group": "",
     }
@@ -1795,6 +1910,56 @@ def _calculate_editions_by_folder_day(book_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _calculate_cutoff_started_editions_by_folder_day(book_df: pd.DataFrame) -> pd.DataFrame:
+    keys = [REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"]
+    columns = [*keys, "cutoff_started_editions"]
+
+    if book_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    sort_columns = [
+        column
+        for column in [*keys, "Effective Start DateTime", "Effective End DateTime", "Issue Id"]
+        if column in book_df.columns
+    ]
+    df = book_df.sort_values(sort_columns).copy() if sort_columns else book_df.copy()
+    rows = []
+
+    for (report_date, plant_name, machine, folder), group in df.groupby(keys, dropna=False):
+        editions: list[str] = []
+        seen: set[str] = set()
+
+        for _, row in group.iterrows():
+            window_end = row.get("Window End")
+            start_dt = row.get("Start DateTime")
+            if pd.isna(window_end) or pd.isna(start_dt) or pd.Timestamp(start_dt) >= pd.Timestamp(window_end):
+                continue
+
+            edition = _edition_display_name(row)
+            edition_key = _canonical_text(edition)
+
+            if not edition_key or edition_key in seen:
+                continue
+
+            editions.append(edition)
+            seen.add(edition_key)
+
+        rows.append(
+            {
+                REPORT_DATE_COLUMN: report_date,
+                "Plant Name": plant_name,
+                "Machine": machine,
+                "Folder": folder,
+                "cutoff_started_editions": editions,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(rows)
+
+
 def _edition_display_name(row: pd.Series) -> str:
     edition = _clean_text(row.get("Edition"))
     if edition:
@@ -2173,6 +2338,7 @@ def calculate_tower_day_metrics(
     general_df: pd.DataFrame,
     uv_tower_lookup: dict[str, dict[str, set[str]]] | None = None,
     reflong_issue_ids: set[str] | None = None,
+    tower_master_lookup: dict[str, dict[str, set[str]]] | None = None,
 ) -> pd.DataFrame:
     """Calculate engaged minutes for each tower in the Issue Date 00:00-04:00 window."""
     columns = [
@@ -2211,6 +2377,7 @@ def calculate_tower_day_metrics(
         return pd.DataFrame(columns=columns)
 
     uv_tower_lookup = uv_tower_lookup or {}
+    tower_master_lookup = tower_master_lookup or {}
 
     interval_editions = interval_editions[
         [
@@ -2245,7 +2412,12 @@ def calculate_tower_day_metrics(
         issue_id = row["Issue Id"]
         machine = row["Machine"]
         folder = row["Folder"]
-        towers = tower_lookup.get(issue_id, [])
+        towers = _filter_configured_towers(
+            tower_lookup.get(issue_id, []),
+            plant_name,
+            machine,
+            tower_master_lookup,
+        )
 
         if not report_date or not towers or not machine or not folder:
             continue
@@ -2520,10 +2692,11 @@ def build_capacity_response_staged(
 
     emit("parsing", "Reading workbook sheets", 10)
     folder_lookup = _load_folder_list_lookup()
+    tower_master_lookup = _load_tower_master_lookup()
 
     emit("parsing", "Normalizing production rows", 20)
     emit("preprocessing", "Building master view (Book Wise + General + Down Time)", 32)
-    master = build_master_view(workbook, folder_lookup)
+    master = build_master_view(workbook, folder_lookup, tower_master_lookup)
     general_df = master.general_df
     book_df = master.book_active
     down_time_df = master.down_time
@@ -2606,7 +2779,14 @@ def build_capacity_response_staged(
         emit("folder_dashboard_ready", "Folder and daily dashboard data is ready", 70, partial_result)
 
     emit("tower_dashboard", "Adding tower and downtime details", 82)
-    tower_day_df = calculate_tower_day_metrics(book_df, down_time_df, general_df, uv_tower_lookup, reflong_issue_ids)
+    tower_day_df = calculate_tower_day_metrics(
+        book_df,
+        down_time_df,
+        general_df,
+        uv_tower_lookup,
+        reflong_issue_ids,
+        tower_master_lookup,
+    )
     downtime_reasons = _downtime_reason_records(folder_down_time_df)
 
     payload = _build_capacity_payload(
@@ -3164,6 +3344,10 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
     if folder_day_df.empty:
         return []
 
+    if "cutoff_started_editions" not in folder_day_df.columns:
+        folder_day_df = folder_day_df.copy()
+        folder_day_df["cutoff_started_editions"] = [[] for _ in range(len(folder_day_df))]
+
     renamed = folder_day_df.rename(
         columns={
             REPORT_DATE_COLUMN: "run_date",
@@ -3206,6 +3390,7 @@ def _detail_records(folder_day_df: pd.DataFrame) -> list[dict[str, Any]]:
                 "last_issue_id",
                 "runtime_segments",
                 "editions",
+                "cutoff_started_editions",
                 "twin_folder_mode",
                 "twin_folder_group",
             ]
@@ -3323,6 +3508,7 @@ def _empty_folder_day_metrics() -> pd.DataFrame:
             "last_issue_id",
             "runtime_segments",
             "editions",
+            "cutoff_started_editions",
             "twin_folder_mode",
             "twin_folder_group",
         ]
