@@ -17,6 +17,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import Dashboard from "./components/Dashboard.jsx";
+import EvalLogPage from "./components/EvalLogPage.jsx";
 
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const FISCAL_YEAR_START_MONTH = 4;
@@ -102,6 +103,14 @@ function delay(ms) {
 }
 
 export default function App() {
+  if (window.location.pathname === "/eval_n_log") {
+    return <EvalLogPage />;
+  }
+
+  return <DashboardApp />;
+}
+
+function DashboardApp() {
   const fileInputRef = useRef(null);
   const folderMenuRef = useRef(null);
   const [result, setResult] = useState(null);

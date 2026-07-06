@@ -16,6 +16,7 @@ data/~$*.xlsx
 notebools/
 *.ipynb
 queries.txt
+backend/logs/
 
 # Ignore environment variable files
 .env

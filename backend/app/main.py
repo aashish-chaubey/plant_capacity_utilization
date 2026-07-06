@@ -10,13 +10,14 @@ from threading import Lock
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.services.capacity import build_capacity_response, build_capacity_response_staged, scope_capacity_result
+from app.services.eval_n_log import chat_eval_log_stats, log_chat_eval_async, read_chat_eval_logs
 from app.services.intelligence import build_capacity_intelligence, build_chat_response
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -330,6 +331,21 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
             history=request.history,
             force_full_llm=request.force_full_llm,
         )
+        context_json = json.dumps(_safe_json(scoped), separators=(",", ":"))
+        log_chat_eval_async(
+            chat_id=uuid.uuid4().hex,
+            query=request.message,
+            response=result.get("answer", ""),
+            system_prompt="Answer using only the scoped dashboard context supplied in retrieval_context.",
+            retrieval_context=[context_json],
+            metadata={
+                "job_id": request.job_id,
+                "selected_plant": request.selected_plant,
+                "selected_folders": request.selected_folders,
+                "timeframe": request.timeframe.model_dump() if request.timeframe else None,
+                "status": result.get("status", "ok"),
+            },
+        )
         return JSONResponse({
             "valid": True,
             "answer": result.get("answer", ""),
@@ -347,6 +363,18 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
             "status": "error",
             "error": str(exc),
         })
+
+
+# Chat evaluation log viewer API.
+# The frontend `/eval_n_log` page uses this endpoint to read compact records from
+# backend/logs/chat_eval.jsonl without exposing the raw large JSONL file directly.
+@app.get("/api/eval_n_log")
+def eval_n_log_records(limit: int = Query(default=50, ge=1, le=500)) -> dict[str, Any]:
+    return {
+        "valid": True,
+        "stats": chat_eval_log_stats(),
+        "records": read_chat_eval_logs(limit=limit),
+    }
 
 
 # Serve built frontend in production (skipped silently in dev when dist/ doesn't exist)
