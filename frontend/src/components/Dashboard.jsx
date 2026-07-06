@@ -56,23 +56,23 @@ const RUNTIME_SEGMENT_STYLES = {
   snp: {
     color: "#CCDCCC",
     textColor: "#0f172a",
-    label: "Runtime"
+    label: "Run Time: SNP"
   },
   snp_complex: {
     color: "#CCDCCC",
     textColor: "#0f172a",
-    label: "Runtime",
+    label: "Run Time: SNP Complex",
     isComplex: true
   },
   gnp: {
     color: "#88AA88",
     textColor: "#0f172a",
-    label: "Runtime"
+    label: "Run Time: GNP"
   },
   gnp_complex: {
     color: "#88AA88",
     textColor: "#0f172a",
-    label: "Runtime",
+    label: "Run Time: GNP Complex",
     isComplex: true
   },
   unknown: {
@@ -117,7 +117,7 @@ export default function Dashboard({
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
-  const [forceLLM, setForceLLM] = useState(false);
+  const [forceLLM, setForceLLM] = useState(true);
   const [chatSize, setChatSize] = useState({ width: 360, height: 480 });
   const chatEndRef = useRef(null);
   const prevIntelligenceRef = useRef(null);
@@ -237,10 +237,7 @@ export default function Dashboard({
   );
 
   const breakdownTowerDetails = useMemo(
-    () =>
-      focusedDay
-        ? (data.tower_details || []).filter((row) => row.run_date === focusedDay)
-        : data.tower_details || [],
+    () => buildTowerBreakdownSourceRows(data.tower_details || [], focusedDay),
     [data.tower_details, focusedDay]
   );
 
@@ -269,7 +266,7 @@ export default function Dashboard({
     [data.daily]
   );
   const selectedTowerBreakdownStacks = useMemo(
-    () => BREAKDOWN_STACKS.filter((stack) => selectedBreakdownKeys.includes(stack.key)),
+    () => FOLDER_BREAKDOWN_STACKS.filter((stack) => selectedBreakdownKeys.includes(stack.key)),
     [selectedBreakdownKeys]
   );
   const selectedFolderBreakdownStacks = useMemo(
@@ -389,6 +386,7 @@ export default function Dashboard({
             rowHeight={36}
             emptyMessage="No tower usage found for this selection."
             showPlannedNights={!focusedDay}
+            patternedUnplanned
           />
           <UtilizationBreakdownChart
             title="Folder utilization"
@@ -1184,6 +1182,40 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
             const x = xFor(dayIndex, isPlantView ? 0 : row.folderIndex);
             const rowCapacity = Math.max(Number(row.total_capacity || CAPACITY_WINDOW_MINUTES), 1);
             let cursorY = yFor(0);
+            const segmentLayouts = (row.segments || [])
+              .map((segment) => {
+                const segmentChartValue = isPlantView
+                  ? calculateRawPercentage(segment.value, rowCapacity)
+                  : segment.value;
+                const segmentHeight = heightFor(segmentChartValue);
+                const y = cursorY - segmentHeight;
+                cursorY = y;
+                const sparePercent = row.isIdle ? 0 : calculatePercentage(row.spare_time, rowCapacity);
+                const runtimeLabelText = formatRuntimeSegmentLabel(segment);
+                const runtimeLabelFontSize = calculateRuntimeLabelFontSize(runtimeLabelText, segmentHeight, barWidth);
+                const canShowRuntimeLabel = segment.runtimeSegment && runtimeLabelText && runtimeLabelFontSize >= 8;
+
+                return {
+                  segment,
+                  segmentHeight,
+                  y,
+                  sparePercent,
+                  runtimeLabelText,
+                  runtimeLabelFontSize,
+                  canShowRuntimeLabel,
+                };
+              })
+              .filter((layout) => Number(layout.segment.value || 0) > 0 && layout.segmentHeight > 0);
+            const externalComplexMarkers = layoutExternalComplexMarkers(
+              segmentLayouts.filter((layout) => layout.segment.runtimeSegment && layout.segment.isComplex && !layout.canShowRuntimeLabel),
+              {
+                x,
+                barWidth,
+                plotTop: margins.top,
+                plotBottom: margins.top + plotHeight,
+                chartRight: width - margins.right,
+              }
+            );
 
             return (
               <g
@@ -1192,25 +1224,13 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                 onDoubleClick={(event) => handleBarDoubleClick(event, row)}
                 className="cursor-pointer"
               >
-                {row.segments.map((segment) => {
-                  const segmentChartValue = isPlantView
-                    ? calculateRawPercentage(segment.value, rowCapacity)
-                    : segment.value;
-                  const segmentHeight = heightFor(segmentChartValue);
-                  const y = cursorY - segmentHeight;
-                  cursorY = y;
-
-                  if (segment.value <= 0) return null;
-
+                {segmentLayouts.map((layout) => {
+                  const { segment, segmentHeight, y, sparePercent, runtimeLabelText, runtimeLabelFontSize, canShowRuntimeLabel } = layout;
                   const fill = getSegmentFill(segment);
-                  const sparePercent = row.isIdle ? 0 : calculatePercentage(row.spare_time, rowCapacity);
-                  const runtimeLabelText = formatRuntimeSegmentLabel(segment);
                   const canShowSpareLabel = segment.key === "spare_time" && sparePercent > 0;
                   const showSpareLabelAboveBar = canShowSpareLabel && segmentHeight < 22;
                   const spareLabel = `${Math.round(sparePercent)}%`;
                   const spareLabelY = Math.max(margins.top + 10, y - 8);
-                  const runtimeLabelFontSize = calculateRuntimeLabelFontSize(runtimeLabelText, segmentHeight, barWidth);
-                  const canShowRuntimeLabel = segment.runtimeSegment && runtimeLabelText && runtimeLabelFontSize >= 8;
                   const textRotation = `rotate(-90 ${x + barWidth / 2} ${y + segmentHeight / 2})`;
 
                   return (
@@ -1225,9 +1245,12 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                         strokeWidth="0.6"
                       >
                         <title>
-                          {isPlantView
-                            ? `${segment.runtimeSegment ? segment.label || "Run Time" : segment.label} ${formatPercent(calculatePercentage(segment.value, rowCapacity))} (${formatMinutes(segment.value)})`
-                            : `${folder.alias}: ${segment.runtimeSegment ? segment.label || "Run Time" : segment.label} ${formatMinutes(segment.value)}`}
+                          {formatCapacitySegmentTitle({
+                            segment,
+                            rowCapacity,
+                            folderAlias: folder.alias,
+                            isPlantView,
+                          })}
                         </title>
                       </rect>
                       {canShowRuntimeLabel && (
@@ -1286,6 +1309,16 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                     </g>
                   );
                 })}
+                {externalComplexMarkers.map((marker) => (
+                  <ComplexPrintMarker
+                    key={`complex-marker-${marker.segment.key}-${marker.index}`}
+                    x={marker.x}
+                    y={marker.y}
+                    side={marker.side}
+                    label={formatRuntimeSegmentShortType(marker.segment)}
+                    color={marker.segment.textColor || "#0f172a"}
+                  />
+                ))}
               </g>
             );
           })}
@@ -1294,8 +1327,10 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
             const groupCenter = margins.left + dayIndex * groupWidth + groupWidth / 2;
             const dayLabelY = margins.top + plotHeight + dayLabelYOffset;
             const monthLabelY = dayLabelY + monthLabelGap;
+            const weekdayLabelY = monthLabelY + monthLabelGap;
             const axisLabel = formatCapacityAxisLabel(day, capacityPeriods.grain);
             const dayTwinMarkers = twinMarkers.filter((marker) => marker.run_date === day);
+            const axisLabelColor = axisLabel.isWeekend ? "#ea580c" : "#334155";
             return (
               <g key={day}>
                 {!isPlantView && folders.map((folder, folderIndex) => (
@@ -1362,7 +1397,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                   textAnchor="middle"
                   fontSize="12"
                   fontWeight="800"
-                  fill="#334155"
+                  fill={axisLabelColor}
                 >
                   {axisLabel.day}
                 </text>
@@ -1376,6 +1411,18 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                 >
                   {axisLabel.month}
                 </text>
+                {axisLabel.weekday && (
+                  <text
+                    x={groupCenter}
+                    y={weekdayLabelY}
+                    textAnchor="middle"
+                    fontSize="10"
+                    fontWeight="800"
+                    fill={axisLabelColor}
+                  >
+                    {axisLabel.weekday}
+                  </text>
+                )}
               </g>
             );
           })}
@@ -1515,7 +1562,12 @@ function BreakdownComponentSelector({ options, selectedKeys, onToggle }) {
                 />
                 <span
                   className="h-2.5 w-2.5 rounded-full"
-                  style={{ backgroundColor: option.color }}
+                  style={{
+                    backgroundColor: option.color,
+                    backgroundImage: option.key === "idle_time"
+                      ? "repeating-linear-gradient(135deg, rgba(100,116,139,0.45) 0 1px, transparent 1px 4px)"
+                      : "none",
+                  }}
                 />
                 {option.label}
               </label>
@@ -1705,6 +1757,41 @@ function PatternedUtilizationBar(props) {
       strokeWidth="1.25"
       vectorEffect="non-scaling-stroke"
     />
+  );
+}
+
+function ComplexPrintMarker({ x, y, side, label, color }) {
+  const anchor = side === "left" ? "end" : "start";
+  const labelOffset = side === "left" ? -8 : 8;
+  const trianglePoints = side === "left"
+    ? `${x},${y} ${x - 8},${y - 5} ${x - 8},${y + 5}`
+    : `${x},${y} ${x + 8},${y - 5} ${x + 8},${y + 5}`;
+
+  return (
+    <g pointerEvents="none">
+      <rect
+        x={side === "left" ? x - 39 : x}
+        y={y - 8}
+        width="39"
+        height="16"
+        rx="4"
+        fill="#ffffff"
+        fillOpacity="0.9"
+        stroke="#cbd5e1"
+        strokeWidth="0.6"
+      />
+      <polygon points={trianglePoints} fill={color} opacity="0.95" />
+      <text
+        x={x + labelOffset}
+        y={y + 3}
+        textAnchor={anchor}
+        fontSize="8.5"
+        fontWeight="900"
+        fill="#0f172a"
+      >
+        {label}
+      </text>
+    </g>
   );
 }
 
@@ -2442,7 +2529,7 @@ function buildPlantRuntimeTooltipDetails(row) {
     .filter((segment) => segment.runtimeSegment && Number(segment.value || 0) > 0)
     .map((segment) => ({
       key: `${row.run_date}||Plant||${segment.key}`,
-      folderAlias: segment.label || "Run Time",
+      folderAlias: formatCapacitySegmentLabel(segment),
       minutes: segment.value,
       color: segment.color || CAPACITY_SPLIT_COLORS.runtime,
       detailText: formatRuntimeSegmentDetail(segment) || formatPercent(calculatePercentage(segment.value, row.total_capacity))
@@ -2459,12 +2546,11 @@ function buildRuntimeTooltipDetails(rows) {
       const detailText = formatRuntimeSegmentDetail(segment, row.twin_folder_mode);
       if (!detailText) continue;
 
-      const complexityCode = formatRuntimeComplexityCode(segment);
       const folderAlias = `F${Number(row.folderIndex || 0) + 1}`;
 
       details.push({
         key: `${row.run_date}||${row.folderKey}||${segment.key}`,
-        folderAlias: complexityCode ? `${folderAlias}` : folderAlias,
+        folderAlias: `${folderAlias}: ${formatCapacitySegmentLabel(segment)}`,
         minutes: segment.value,
         color: segment.color || CAPACITY_SPLIT_COLORS.runtime,
         detailText,
@@ -2502,6 +2588,59 @@ function getSegmentFill(segment) {
   if (segment.fill) return segment.fill;
   if (segment.key === "idle_time") return "url(#idlePattern)";
   return segment.color;
+}
+
+function layoutExternalComplexMarkers(layouts, { x, barWidth, plotTop, plotBottom, chartRight }) {
+  if (!layouts.length) return [];
+
+  const markerGap = 16;
+  const useLeftSide = x + barWidth + 48 > chartRight;
+  let lastY = plotTop - markerGap;
+  const positioned = layouts
+    .map((layout, index) => ({
+      index,
+      segment: layout.segment,
+      targetY: layout.y + layout.segmentHeight / 2,
+    }))
+    .sort((a, b) => a.targetY - b.targetY)
+    .map((marker) => {
+      const y = Math.min(
+        Math.max(marker.targetY, lastY + markerGap, plotTop + 8),
+        plotBottom - 8
+      );
+      lastY = y;
+      return {
+        ...marker,
+        y,
+        x: useLeftSide ? x - 6 : x + barWidth + 6,
+        side: useLeftSide ? "left" : "right",
+      };
+    });
+  const overflow = positioned.length > 0 ? positioned[positioned.length - 1].y - (plotBottom - 8) : 0;
+
+  if (overflow > 0) {
+    return positioned.map((marker) => ({
+      ...marker,
+      y: Math.max(plotTop + 8, marker.y - overflow),
+    }));
+  }
+
+  return positioned;
+}
+
+function formatCapacitySegmentTitle({ segment, rowCapacity, folderAlias, isPlantView }) {
+  const label = formatCapacitySegmentLabel(segment);
+
+  if (isPlantView) {
+    return `${label} ${formatPercent(calculatePercentage(segment.value, rowCapacity))} (${formatMinutes(segment.value)})`;
+  }
+
+  return `${folderAlias}: ${label} ${formatMinutes(segment.value)}`;
+}
+
+function formatCapacitySegmentLabel(segment) {
+  if (!segment?.runtimeSegment) return segment?.label || "";
+  return segment.label || runtimeSegmentLabel(getRuntimeBucketKey(segment)) || "Run Time";
 }
 
 function buildCapacitySegments(values, capacityLimit = CAPACITY_WINDOW_MINUTES) {
@@ -2719,13 +2858,17 @@ function formatDayLabel(dateStr) {
 
 function formatDayAxisLabel(dateStr) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ""));
-  if (!match) return { day: String(dateStr || ""), month: "" };
+  if (!match) return { day: String(dateStr || ""), weekday: "", month: "", isWeekend: false };
 
   const year = Number(match[1]);
   const month = Number(match[2]);
+  const date = new Date(year, month - 1, Number(match[3]));
+  const weekday = date.toLocaleDateString("en-US", { weekday: "short" });
   return {
     day: match[3],
-    month: new Date(year, month - 1, 1).toLocaleDateString("en-US", { month: "short" })
+    weekday,
+    month: new Date(year, month - 1, 1).toLocaleDateString("en-US", { month: "short" }),
+    isWeekend: weekday === "Sat" || weekday === "Sun"
   };
 }
 
@@ -2736,7 +2879,9 @@ function formatCapacityAxisLabel(value, grain) {
 
     return {
       day: new Date(monthParts.year, monthParts.month - 1, 1).toLocaleDateString("en-US", { month: "short" }),
-      month: String(monthParts.year)
+      weekday: "",
+      month: String(monthParts.year),
+      isWeekend: false
     };
   }
 
@@ -2851,6 +2996,42 @@ function normalizeResourceBreakdownValues(row) {
   };
 }
 
+function buildTowerBreakdownSourceRows(towerRows, focusedDay) {
+  const rows = Array.isArray(towerRows) ? towerRows : [];
+  if (!focusedDay) return rows;
+
+  const towers = new Map();
+  for (const row of rows) {
+    if (!row.tower) continue;
+    const current = towers.get(row.tower) || {
+      tower: row.tower,
+      uv_tower: false,
+    };
+    current.uv_tower = current.uv_tower || Boolean(row.uv_tower);
+    towers.set(row.tower, current);
+  }
+
+  const rowsForDay = rows.filter((row) => row.run_date === focusedDay);
+  const towersSeenOnDay = new Set(rowsForDay.map((row) => row.tower).filter(Boolean));
+  const idleTowerRows = Array.from(towers.values())
+    .filter((tower) => !towersSeenOnDay.has(tower.tower))
+    .map((tower) => ({
+      run_date: focusedDay,
+      tower: tower.tower,
+      uv_tower: tower.uv_tower,
+      waiting_time: 0,
+      lost_time: 0,
+      downtime: 0,
+      runtime: 0,
+      buffer_time: 0,
+      idle_time: CAPACITY_WINDOW_MINUTES,
+      available_capacity: CAPACITY_WINDOW_MINUTES,
+      runtime_segments: [],
+    }));
+
+  return [...rowsForDay, ...idleTowerRows];
+}
+
 function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
   if (!selectedProductionDays || rows.length === 0) return [];
 
@@ -2873,6 +3054,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
       reflong_related_downtime: 0,
       late_start_time: 0,
       uv_tower: false,
+      observedDates: new Set(),
       plannedDates: new Set()
     };
 
@@ -2887,6 +3069,10 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
     current.late_start_time += rowValues.late_start_time;
     current.uv_tower = current.uv_tower || Boolean(row.uv_tower);
 
+    if (row.run_date) {
+      current.observedDates.add(row.run_date);
+    }
+
     if (row.run_date && isActiveCapacityDetailRow(row)) {
       current.plannedDates.add(row.run_date);
     }
@@ -2896,18 +3082,19 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
 
   return Array.from(grouped.values())
     .map((row) => {
-      const isFolderBreakdown = nameKey === "folder";
       const selectedCapacity = selectedProductionDays * CAPACITY_WINDOW_MINUTES;
       const plannedCapacity = row.plannedDates.size * CAPACITY_WINDOW_MINUTES;
-      const capacityBasis = isFolderBreakdown ? selectedCapacity : plannedCapacity;
-      const breakdownStacks = isFolderBreakdown ? FOLDER_BREAKDOWN_STACKS : BREAKDOWN_STACKS;
+      const observedCapacity = row.observedDates.size * CAPACITY_WINDOW_MINUTES;
+      const missingUnplannedTime = Math.max(selectedCapacity - observedCapacity, 0);
+      const capacityBasis = selectedCapacity;
+      const breakdownStacks = FOLDER_BREAKDOWN_STACKS;
       const capacityValues = normalizeBreakdownCapacityValues({
         waiting_time: row.waiting_time,
         loss_time: row.loss_time,
         downtime: row.downtime,
         runtime_snp: row.runtime_snp,
         runtime_gnp: row.runtime_gnp,
-        idle_time: isFolderBreakdown ? row.idle_time : 0
+        idle_time: row.idle_time + missingUnplannedTime
       }, capacityBasis);
       const finalNonWaitLoss = scaleLossSubcomponents(
         {
@@ -3263,6 +3450,13 @@ function formatRuntimeSegmentLabel(segment) {
   if (!segment?.runtimeSegment) return "";
   if (!segment.isComplex) return "";
   return "▲";
+}
+
+function formatRuntimeSegmentShortType(segment) {
+  const text = `${segment?.key || ""} ${segment?.label || ""}`.toLowerCase();
+  if (text.includes("snp")) return "SNP";
+  if (text.includes("gnp")) return "GNP";
+  return "Run";
 }
 
 function formatRuntimeSegmentDetail(segment, isTwin = false) {
