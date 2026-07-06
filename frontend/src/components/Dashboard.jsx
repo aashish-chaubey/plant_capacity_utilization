@@ -291,13 +291,13 @@ export default function Dashboard({
   const totalAvailableCapacity = Number(data.summary.total_available_capacity || 0);
   const totalActiveTowerCapacity = Number(data.summary.active_tower_days || 0);
   const kpis = [
-    ["Available Time", formatPercent(totalAvailableCapacity > 0 ? 100 : 0), "blue", formatMinutes(totalAvailableCapacity)],
-    ["Runtime", formatPercent(calculatePercentage(data.summary.total_runtime, totalAvailableCapacity)), "green", formatMinutes(data.summary.total_runtime)],
-    ["Wait Time", formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), "wait", formatMinutes(data.summary.total_waiting_time)],
-    ["Lost Time", formatPercent(calculatePercentage(data.summary.total_lost_time, totalAvailableCapacity)), "amber", formatMinutes(data.summary.total_lost_time)],
-    ["Downtime", formatPercent(calculatePercentage(data.summary.total_downtime, totalAvailableCapacity)), "red", formatMinutes(data.summary.total_downtime)],
-    ["Spare Time", formatPercent(calculatePercentage(data.summary.total_buffer_time, totalAvailableCapacity)), "spare", formatMinutes(data.summary.total_buffer_time)],
-    ["Unplanned Time", formatPercent(calculatePercentage(data.summary.total_idle_time, totalAvailableCapacity)), "unplanned", formatMinutes(data.summary.total_idle_time)],
+    ["Available Time", formatPercent(totalAvailableCapacity > 0 ? 100 : 0), "blue", formatKpiDuration(totalAvailableCapacity)],
+    ["Runtime", formatPercent(calculatePercentage(data.summary.total_runtime, totalAvailableCapacity)), "green", formatKpiDuration(data.summary.total_runtime)],
+    ["Wait Time", formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), "wait", formatKpiDuration(data.summary.total_waiting_time)],
+    ["Lost Time", formatPercent(calculatePercentage(data.summary.total_lost_time, totalAvailableCapacity)), "amber", formatKpiDuration(data.summary.total_lost_time)],
+    ["Downtime", formatPercent(calculatePercentage(data.summary.total_downtime, totalAvailableCapacity)), "red", formatKpiDuration(data.summary.total_downtime)],
+    ["Spare Time", formatPercent(calculatePercentage(data.summary.total_buffer_time, totalAvailableCapacity)), "spare", formatKpiDuration(data.summary.total_buffer_time)],
+    ["Unplanned Time", formatPercent(calculatePercentage(data.summary.total_idle_time, totalAvailableCapacity)), "unplanned", formatKpiDuration(data.summary.total_idle_time)],
     [
       "Spare Capacity",
       formatPercent(
@@ -3435,6 +3435,16 @@ function formatNumber(value) {
 
 function formatMinutes(value) {
   return `${formatNumber(value)} min`;
+}
+
+function formatKpiDuration(value) {
+  const totalMinutes = Math.max(Math.round(Number(value || 0)), 0);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours <= 0) return `${minutes} min`;
+  if (minutes <= 0) return `${formatNumber(hours)} hr`;
+  return `${formatNumber(hours)} hr ${minutes} min`;
 }
 
 function formatCapacityMinutes(value) {
