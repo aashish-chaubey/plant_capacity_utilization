@@ -1,9 +1,8 @@
 {
   "Sahibabad": {
     "Colorman-C": ["PU-5"],
-    "Colorman-D": ["PU-5"],
-    "Geoman-B": ["PU-4"],
-    "Geoman-A": ["PU-2"]
+    "Colorman-D": ["PU-2", "PU-5"],
+    "Geoman-B": ["PU-4"]
   },
   "Bommasandra": {
     "Regioman-A": ["PU-05"],

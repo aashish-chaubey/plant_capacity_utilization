@@ -73,7 +73,7 @@ export default function DelayedPrintFinishWidget({ details }) {
         </span>
         <div>
           <h3 className="text-base font-semibold text-slate-950">
-            Folderwise & Plant-Level Delayed PF
+            Folderwise Delayed PF
           </h3>
           <p className="mt-1 text-sm text-slate-500">
             {formatNumber(analysis.folderBreaches.length)} breach{analysis.folderBreaches.length === 1 ? "" : "es"}

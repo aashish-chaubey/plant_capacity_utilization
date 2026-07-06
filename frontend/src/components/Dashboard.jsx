@@ -34,8 +34,11 @@ const CAPACITY_SPLIT_COLORS = {
   loss_time: "#F3C97B",
   downtime: "#FF9AA2",
   runtime: "#B2CFB2",
+  runtime_snp: "#CCDCCC",
+  runtime_gnp: "#88AA88",
   spare_time: "#C5E1FF",
   idle_time: "#E5E7EB",
+  idle_stripe: "#B4BBC7",
   window_line: "#234775",
   twin_folder: "#2563eb"
 };
@@ -44,8 +47,8 @@ const CAPACITY_SPLIT_LEGEND = [
   { key: "waiting_time", label: "Wait Time", color: CAPACITY_SPLIT_COLORS.waiting_time },
   { key: "loss_time", label: "Loss Time", color: CAPACITY_SPLIT_COLORS.loss_time },
   { key: "downtime", label: "Downtime", color: CAPACITY_SPLIT_COLORS.downtime },
-  { key: "runtime_snp", label: "Run Time: SNP", color: "#CCDCCC" },
-  { key: "runtime_gnp", label: "Run Time: GNP", color: "#88AA88" },
+  { key: "runtime_snp", label: "Run Time: SNP", color: CAPACITY_SPLIT_COLORS.runtime_snp },
+  { key: "runtime_gnp", label: "Run Time: GNP", color: CAPACITY_SPLIT_COLORS.runtime_gnp },
   { key: "spare_time", label: "Spare Time", color: CAPACITY_SPLIT_COLORS.spare_time },
   { key: "idle_time", label: "Unplanned Time", color: CAPACITY_SPLIT_COLORS.idle_time, pattern: "idle" },
   { key: "complex_prints", label: "Complex prints", marker: "triangle" },
@@ -54,23 +57,23 @@ const CAPACITY_SPLIT_LEGEND = [
 
 const RUNTIME_SEGMENT_STYLES = {
   snp: {
-    color: "#CCDCCC",
+    color: CAPACITY_SPLIT_COLORS.runtime_snp,
     textColor: "#0f172a",
     label: "Run Time: SNP"
   },
   snp_complex: {
-    color: "#CCDCCC",
+    color: CAPACITY_SPLIT_COLORS.runtime_snp,
     textColor: "#0f172a",
     label: "Run Time: SNP Complex",
     isComplex: true
   },
   gnp: {
-    color: "#88AA88",
+    color: CAPACITY_SPLIT_COLORS.runtime_gnp,
     textColor: "#0f172a",
     label: "Run Time: GNP"
   },
   gnp_complex: {
-    color: "#88AA88",
+    color: CAPACITY_SPLIT_COLORS.runtime_gnp,
     textColor: "#0f172a",
     label: "Run Time: GNP Complex",
     isComplex: true
@@ -655,11 +658,14 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
 const CHAT_CHART_PALETTE = ["#2563eb", "#16a34a", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#64748b"];
 const CHAT_CAPACITY_SLICE_COLORS = {
-  "Run Time": "#8FBB8F",
-  "Loss Time": "#F3C97B",
-  "Downtime": "#FF9AA2",
-  "Wait Time": "#9CA3AF",
-  "Spare Time": "#8FB8E8",
+  "Run Time": CAPACITY_SPLIT_COLORS.runtime,
+  "Run Time: SNP": CAPACITY_SPLIT_COLORS.runtime_snp,
+  "Run Time: GNP": CAPACITY_SPLIT_COLORS.runtime_gnp,
+  "Loss Time": CAPACITY_SPLIT_COLORS.loss_time,
+  "Downtime": CAPACITY_SPLIT_COLORS.downtime,
+  "Wait Time": CAPACITY_SPLIT_COLORS.waiting_time,
+  "Spare Time": CAPACITY_SPLIT_COLORS.spare_time,
+  "Unplanned Time": CAPACITY_SPLIT_COLORS.idle_time,
 };
 
 function ChatChart({ chart }) {
@@ -976,7 +982,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                   style={{
                     backgroundColor: item.color,
                     backgroundImage: item.pattern === "idle"
-                      ? "repeating-linear-gradient(135deg, rgba(100,116,139,0.38) 0 1px, transparent 1px 4px)"
+                      ? `repeating-linear-gradient(135deg, ${CAPACITY_SPLIT_COLORS.idle_stripe} 0 1px, transparent 1px 5px)`
                       : "none"
                   }}
                 />
@@ -1087,9 +1093,9 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
           aria-label={isPlantView ? "Daily plant capacity split" : "Daily machine-folder capacity split"}
         >
           <defs>
-            <pattern id="idlePattern" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(35)">
-              <rect width="8" height="8" fill={CAPACITY_SPLIT_COLORS.idle_time} opacity="0.55" />
-              <line x1="0" y1="0" x2="0" y2="8" stroke="#94a3b8" strokeWidth="1" opacity="0.55" />
+            <pattern id="idlePattern" patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(35)">
+              <rect width="5" height="5" fill={CAPACITY_SPLIT_COLORS.idle_time} />
+              <line x1="0" y1="0" x2="0" y2="5" stroke={CAPACITY_SPLIT_COLORS.idle_stripe} strokeWidth="1" />
             </pattern>
           </defs>
 
@@ -1193,7 +1199,12 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                 const sparePercent = row.isIdle ? 0 : calculatePercentage(row.spare_time, rowCapacity);
                 const runtimeLabelText = formatRuntimeSegmentLabel(segment);
                 const runtimeLabelFontSize = calculateRuntimeLabelFontSize(runtimeLabelText, segmentHeight, barWidth);
-                const canShowRuntimeLabel = segment.runtimeSegment && runtimeLabelText && runtimeLabelFontSize >= 8;
+                const canShowComplexIcon = segment.runtimeSegment && segment.isComplex && segmentHeight >= 10 && barWidth >= 8;
+                const canShowRuntimeLabel = canShowComplexIcon || (
+                  segment.runtimeSegment
+                  && runtimeLabelText
+                  && runtimeLabelFontSize >= 8
+                );
 
                 return {
                   segment,
@@ -1202,6 +1213,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                   sparePercent,
                   runtimeLabelText,
                   runtimeLabelFontSize,
+                  canShowComplexIcon,
                   canShowRuntimeLabel,
                 };
               })
@@ -1225,7 +1237,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                 className="cursor-pointer"
               >
                 {segmentLayouts.map((layout) => {
-                  const { segment, segmentHeight, y, sparePercent, runtimeLabelText, runtimeLabelFontSize, canShowRuntimeLabel } = layout;
+                  const { segment, segmentHeight, y, sparePercent, runtimeLabelText, runtimeLabelFontSize, canShowComplexIcon, canShowRuntimeLabel } = layout;
                   const fill = getSegmentFill(segment);
                   const canShowSpareLabel = segment.key === "spare_time" && sparePercent > 0;
                   const showSpareLabelAboveBar = canShowSpareLabel && segmentHeight < 22;
@@ -1253,7 +1265,14 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                           })}
                         </title>
                       </rect>
-                      {canShowRuntimeLabel && (
+                      {canShowComplexIcon && (
+                        <ComplexPrintStackIcon
+                          x={x + barWidth / 2}
+                          y={y + segmentHeight / 2}
+                          color={segment.textColor || "#0f172a"}
+                        />
+                      )}
+                      {canShowRuntimeLabel && !canShowComplexIcon && runtimeLabelText !== "▲" && (
                         <text
                           x={x + barWidth / 2}
                           y={y + segmentHeight / 2 + 3}
@@ -1293,18 +1312,29 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                         </g>
                       )}
                       {canShowSpareLabel && !showSpareLabelAboveBar && (
-                        <text
-                          x={x + barWidth / 2}
-                          y={y + segmentHeight / 2 + 4}
-                          textAnchor="middle"
-                          fontSize="11"
-                          fontWeight="800"
-                          fill="#1e3a5f"
-                          transform={textRotation}
-                          pointerEvents="none"
-                        >
-                          {spareLabel}
-                        </text>
+                        <g pointerEvents="none">
+                          {barWidth < 30 && (
+                            <rect
+                              x={x + barWidth / 2 - 13}
+                              y={y + segmentHeight / 2 - 8}
+                              width="26"
+                              height="15"
+                              rx="3"
+                              fill="#ffffff"
+                              fillOpacity="0.72"
+                            />
+                          )}
+                          <text
+                            x={x + barWidth / 2}
+                            y={y + segmentHeight / 2 + 4}
+                            textAnchor="middle"
+                            fontSize="11"
+                            fontWeight="800"
+                            fill="#1e3a5f"
+                          >
+                            {spareLabel}
+                          </text>
+                        </g>
                       )}
                     </g>
                   );
@@ -1561,11 +1591,11 @@ function BreakdownComponentSelector({ options, selectedKeys, onToggle }) {
                   className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                 />
                 <span
-                  className="h-2.5 w-2.5 rounded-full"
+                  className="h-3 w-3 rounded-sm border border-slate-300"
                   style={{
                     backgroundColor: option.color,
                     backgroundImage: option.key === "idle_time"
-                      ? "repeating-linear-gradient(135deg, rgba(100,116,139,0.45) 0 1px, transparent 1px 4px)"
+                      ? `repeating-linear-gradient(135deg, ${CAPACITY_SPLIT_COLORS.idle_stripe} 0 1px, transparent 1px 5px)`
                       : "none",
                   }}
                 />
@@ -1672,9 +1702,9 @@ function UtilizationBreakdownChart({
             <ResponsiveContainer>
               <BarChart data={data} layout="vertical" margin={chartMargin}>
                 <defs>
-                  <pattern id={idlePatternId} patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(35)">
-                    <rect width="8" height="8" fill={CAPACITY_SPLIT_COLORS.idle_time} opacity="0.55" />
-                    <line x1="0" y1="0" x2="0" y2="8" stroke="#94a3b8" strokeWidth="1" opacity="0.55" />
+                  <pattern id={idlePatternId} patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(35)">
+                    <rect width="5" height="5" fill={CAPACITY_SPLIT_COLORS.idle_time} />
+                    <line x1="0" y1="0" x2="0" y2="5" stroke={CAPACITY_SPLIT_COLORS.idle_stripe} strokeWidth="1" />
                   </pattern>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" horizontal={false} />
@@ -1760,20 +1790,35 @@ function PatternedUtilizationBar(props) {
   );
 }
 
+function ComplexPrintStackIcon({ x, y, color }) {
+  const halfWidth = 3.5;
+  const topOffset = 3.5;
+  const bottomOffset = 3.5;
+
+  return (
+    <polygon
+      points={`${x},${y - topOffset} ${x + halfWidth},${y + bottomOffset} ${x - halfWidth},${y + bottomOffset}`}
+      fill={color}
+      opacity="0.95"
+      pointerEvents="none"
+    />
+  );
+}
+
 function ComplexPrintMarker({ x, y, side, label, color }) {
   const anchor = side === "left" ? "end" : "start";
-  const labelOffset = side === "left" ? -8 : 8;
-  const trianglePoints = side === "left"
-    ? `${x},${y} ${x - 8},${y - 5} ${x - 8},${y + 5}`
-    : `${x},${y} ${x + 8},${y - 5} ${x + 8},${y + 5}`;
+  const badgeWidth = 48;
+  const triangleCenterX = side === "left" ? x - 8 : x + 8;
+  const labelOffset = side === "left" ? -17 : 17;
+  const trianglePoints = `${triangleCenterX},${y - 4.2} ${triangleCenterX + 4.2},${y + 3.5} ${triangleCenterX - 4.2},${y + 3.5}`;
 
   return (
     <g pointerEvents="none">
       <rect
-        x={side === "left" ? x - 39 : x}
-        y={y - 8}
-        width="39"
-        height="16"
+        x={side === "left" ? x - badgeWidth : x}
+        y={y - 9}
+        width={badgeWidth}
+        height="18"
         rx="4"
         fill="#ffffff"
         fillOpacity="0.9"
@@ -1786,7 +1831,7 @@ function ComplexPrintMarker({ x, y, side, label, color }) {
         y={y + 3}
         textAnchor={anchor}
         fontSize="8.5"
-        fontWeight="900"
+        fontWeight="500"
         fill="#0f172a"
       >
         {label}
