@@ -2930,6 +2930,80 @@ def build_capacity_response_staged(
     )
 
 
+def combine_staged_capacity_results(staged_results: list[StagedCapacityResult]) -> StagedCapacityResult:
+    """Combine independently processed workbooks into one dashboard dataset."""
+    results = [result for result in staged_results if result is not None]
+    if not results:
+        folder_day_df = _empty_folder_day_metrics()
+        payload = _build_capacity_payload(
+            folder_day_df,
+            tower_day_df=None,
+            downtime_source_df=None,
+            processing_complete=True,
+            partial=False,
+            loaded_quarters=[],
+            total_quarters=0,
+            available_plants=[],
+            book_details=[],
+        )
+        return StagedCapacityResult(
+            payload=payload,
+            folder_day_df=folder_day_df,
+            tower_day_df=None,
+            book_details=[],
+            downtime_reasons=[],
+        )
+
+    folder_day_df = _concat_folder_day_frames([result.folder_day_df for result in results])
+    tower_frames = [
+        result.tower_day_df
+        for result in results
+        if result.tower_day_df is not None and not result.tower_day_df.empty
+    ]
+    tower_day_df = pd.concat(tower_frames, ignore_index=True, sort=False) if tower_frames else None
+    book_details = [
+        row
+        for result in results
+        for row in (result.book_details or [])
+    ]
+    downtime_reasons = [
+        row
+        for result in results
+        for row in (result.downtime_reasons or [])
+    ]
+    available_plants = sorted({
+        plant
+        for result in results
+        for plant in (result.payload.get("available_plants") or [])
+        if plant
+    })
+    loaded_quarters = list(dict.fromkeys(
+        quarter
+        for result in results
+        for quarter in (result.payload.get("loaded_quarters") or [])
+        if quarter
+    ))
+    payload = _build_capacity_payload(
+        folder_day_df,
+        tower_day_df=tower_day_df,
+        downtime_source_df=None,
+        processing_complete=True,
+        partial=False,
+        loaded_quarters=loaded_quarters,
+        total_quarters=len(loaded_quarters),
+        available_plants=available_plants,
+        book_details=book_details,
+    )
+    payload["downtime_reasons"] = downtime_reasons
+    return StagedCapacityResult(
+        payload=payload,
+        folder_day_df=folder_day_df,
+        tower_day_df=tower_day_df,
+        book_details=book_details,
+        downtime_reasons=downtime_reasons,
+    )
+
+
 def _build_capacity_payload(
     folder_day_df: pd.DataFrame,
     tower_day_df: pd.DataFrame | None,

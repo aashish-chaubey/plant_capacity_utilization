@@ -1,17 +1,12 @@
 import {
-  Activity,
   AlertCircle,
   BarChart2,
   Check,
   ChevronDown,
   FileSpreadsheet,
-  Gauge,
   Info,
-  Layers,
   Loader2,
   RotateCcw,
-  ShieldCheck,
-  UploadCloud,
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -111,12 +106,14 @@ export default function App() {
 }
 
 function DashboardApp() {
-  const fileInputRef = useRef(null);
   const folderMenuRef = useRef(null);
+  const dataLoadStartedRef = useRef(false);
   const [result, setResult] = useState(null);
+  const [datasetMeta, setDatasetMeta] = useState(null);
   const [jobId, setJobId] = useState("");
   const [errors, setErrors] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [plantDataLoading, setPlantDataLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [intelligence, setIntelligence] = useState(null);
   const [intelligenceLoading, setIntelligenceLoading] = useState(false);
@@ -128,7 +125,7 @@ function DashboardApp() {
   const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [definitionsOpen, setDefinitionsOpen] = useState(false);
 
-  const plantOptions = useMemo(() => buildPlantOptions(result), [result]);
+  const plantOptions = useMemo(() => buildPlantOptions(datasetMeta || result), [datasetMeta, result]);
   const folderOptions = useMemo(
     () => buildFolderOptions(result, selectedPlant),
     [result, selectedPlant]
@@ -152,7 +149,13 @@ function DashboardApp() {
   );
 
   useEffect(() => {
-    if (!result) {
+    if (dataLoadStartedRef.current) return;
+    dataLoadStartedRef.current = true;
+    loadServerDataset();
+  }, []);
+
+  useEffect(() => {
+    if (!datasetMeta && !result) {
       setSelectedPlant("");
       setSelectedFolders([]);
       return;
@@ -161,7 +164,18 @@ function DashboardApp() {
       if (current && plantOptions.some((option) => option.value === current)) return current;
       return plantOptions.length === 1 ? plantOptions[0].value : "";
     });
-  }, [plantOptions, result]);
+  }, [datasetMeta, plantOptions, result]);
+
+  useEffect(() => {
+    if (!selectedPlant || !jobId) {
+      setResult(null);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    loadPlantDataset(selectedPlant, controller.signal);
+    return () => controller.abort();
+  }, [jobId, selectedPlant]);
 
   useEffect(() => {
     setSelectedFolders((current) => {
@@ -266,79 +280,94 @@ function DashboardApp() {
     return () => controller.abort();
   }, [filteredResult, timeframeRange?.label]);
 
-  async function handleUpload(file) {
-    if (!file) return;
+  async function loadServerDataset() {
     setLoading(true);
-    setUploadProgress({ progress: 0, message: "Uploading workbook" });
+    setUploadProgress({ progress: 0, message: "Loading server dataset" });
     setErrors([]);
+    setDatasetMeta(null);
+    setResult(null);
     setIntelligence(null);
     setIntelligenceError("");
     setIntelligenceLoading(false);
-    setFileName(file.name);
+    setFileName("");
     setTimeframe(createDefaultTimeframe());
     setSelectedPlant("");
     setSelectedFolders([]);
     setJobId("");
 
-    const formData = new FormData();
-    formData.append("file", file);
-
     try {
-      const response = await fetch(`${API_BASE_URL}/api/upload/start`, {
-        method: "POST",
-        body: formData
-      });
-      if (!response.ok) {
-        throw new Error(await readApiError(response, `Upload failed with status ${response.status}`));
-      }
-      const startPayload = await response.json();
-      if (!startPayload.valid || !startPayload.job_id) {
-        setResult(null);
-        setIntelligence(null);
-        setJobId("");
-        setErrors(startPayload.errors || ["The workbook could not be processed."]);
-        return;
-      }
-      setJobId(startPayload.job_id);
-
       let finished = false;
       while (!finished) {
-        await delay(900);
-        const statusResponse = await fetch(`${API_BASE_URL}/api/upload/status/${startPayload.job_id}`);
+        const statusResponse = await fetch(`${API_BASE_URL}/api/data/status`);
         if (!statusResponse.ok) {
-          throw new Error(await readApiError(statusResponse, `Upload status failed with status ${statusResponse.status}`));
+          throw new Error(await readApiError(statusResponse, `Server data load failed with status ${statusResponse.status}`));
         }
         const statusPayload = await statusResponse.json();
+        if (statusPayload.job_id) setJobId(statusPayload.job_id);
+        if (statusPayload.dataset_name) setFileName(statusPayload.dataset_name);
+        if (statusPayload.metadata) {
+          setDatasetMeta(statusPayload.metadata);
+          if (statusPayload.metadata.dataset_name) setFileName(statusPayload.metadata.dataset_name);
+        }
         setUploadProgress({
           progress: statusPayload.progress || 0,
-          message: statusPayload.message || "Processing workbook"
+          message: statusPayload.message || "Processing server dataset"
         });
-
-        if (statusPayload.result?.valid) {
-          setResult(statusPayload.result);
-        }
 
         if (statusPayload.status === "complete") {
           finished = true;
-          if (statusPayload.result?.valid) {
-            setResult(statusPayload.result);
-          }
         } else if (statusPayload.status === "error" || !statusPayload.valid) {
+          setDatasetMeta(null);
           setResult(null);
           setIntelligence(null);
           setJobId("");
-          setErrors(statusPayload.errors || [statusPayload.message || "The workbook could not be processed."]);
+          setErrors(statusPayload.errors || [statusPayload.message || "The server dataset could not be processed."]);
           finished = true;
+        } else {
+          await delay(900);
         }
       }
     } catch (error) {
       setResult(null);
+      setDatasetMeta(null);
       setIntelligence(null);
       setJobId("");
       setErrors([error.message || "Unable to connect to the backend API."]);
     } finally {
       setLoading(false);
       setUploadProgress(null);
+    }
+  }
+
+  async function loadPlantDataset(plantName, signal) {
+    setPlantDataLoading(true);
+    setErrors([]);
+    setResult(null);
+    setSelectedFolders([]);
+    setFolderMenuOpen(false);
+    setTimeframe(createDefaultTimeframe());
+    setIntelligence(null);
+    setIntelligenceError("");
+    setIntelligenceLoading(false);
+
+    try {
+      const params = new URLSearchParams({ selected_plant: plantName });
+      const response = await fetch(`${API_BASE_URL}/api/data/scope?${params.toString()}`, { signal });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, `Plant data failed with status ${response.status}`));
+      }
+      const payload = await response.json();
+      if (!payload.valid) {
+        throw new Error(payload.errors?.[0] || "Plant data could not be loaded.");
+      }
+      setResult(payload);
+      if (payload.dataset_name) setFileName(payload.dataset_name);
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      setResult(null);
+      setErrors([error.message || "Unable to load the selected plant."]);
+    } finally {
+      if (!signal.aborted) setPlantDataLoading(false);
     }
   }
 
@@ -364,8 +393,6 @@ function DashboardApp() {
 
   function handlePlantChange(plantName) {
     setSelectedPlant(plantName);
-    setSelectedFolders([]);
-    setFolderMenuOpen(false);
   }
 
   function handleFolderToggle(folderName) {
@@ -383,12 +410,13 @@ function DashboardApp() {
 
   const showControlStrip = Boolean(result && selectedPlant);
   const folderSelectionLabel = formatFolderSelectionLabel(selectedFolders);
-  const showLandingPage = !result && !loading && errors.length === 0;
+  const showPlantSelection = Boolean(datasetMeta && plantOptions.length > 1 && !selectedPlant && errors.length === 0);
+  const showLandingExperience = showPlantSelection;
 
   return (
     <div className="min-h-screen bg-[#f6f8fb] text-slate-900">
       {/* ── Header ──────────────────────────────────────────────── */}
-      {!showLandingPage && (
+      {!showLandingExperience && (
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white shadow-[0_1px_4px_rgba(0,0,0,0.06)]">
         <div className="mx-auto flex h-14 w-full max-w-[1800px] items-center gap-4 px-4 sm:px-5 xl:px-6">
           {/* Brand */}
@@ -406,37 +434,19 @@ function DashboardApp() {
             </div>
           </div>
 
-          {/* Right: filename badge + upload button */}
+          {/* Right: shared dataset badge */}
           <div className="flex shrink-0 items-center gap-2.5">
-            {fileName && !loading && (
-              <span className="hidden max-w-[180px] items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-500 sm:flex">
+            {fileName && (
+              <span className="hidden max-w-[260px] items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-500 sm:flex">
                 <FileSpreadsheet className="h-3 w-3 shrink-0 text-slate-400" aria-hidden="true" />
                 <span className="truncate">{fileName}</span>
               </span>
             )}
-            {!result && (
-              <>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".xlsx,.xls"
-                  className="hidden"
-                  onChange={(event) => handleUpload(event.target.files?.[0])}
-                />
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={loading}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 active:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-                >
-                  {loading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <UploadCloud className="h-4 w-4" aria-hidden="true" />
-                  )}
-                  <span>{loading ? "Processing…" : "Upload report"}</span>
-                </button>
-              </>
+            {(loading || plantDataLoading) && (
+              <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 text-sm font-semibold text-blue-700">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                {plantDataLoading ? "Loading plant" : "Loading data"}
+              </span>
             )}
           </div>
         </div>
@@ -638,12 +648,7 @@ function DashboardApp() {
       )}
 
       {/* ── Main ────────────────────────────────────────────────── */}
-      <main className={showLandingPage ? "w-full" : "mx-auto w-full max-w-[1800px] px-4 py-6 sm:px-5 xl:px-6"}>
-
-        {/* Empty state */}
-        {showLandingPage && (
-          <EmptyDropZone onUpload={handleUpload} />
-        )}
+      <main className={showLandingExperience ? "w-full" : "mx-auto w-full max-w-[1800px] px-4 py-6 sm:px-5 xl:px-6"}>
 
         {/* Error banner */}
         {errors.length > 0 && (
@@ -651,7 +656,7 @@ function DashboardApp() {
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
               <div>
-                <h2 className="text-sm font-semibold">Upload issue</h2>
+                <h2 className="text-sm font-semibold">Data issue</h2>
                 <ul className="mt-2 space-y-1 text-sm">
                   {errors.map((error) => (
                     <li key={error}>{error}</li>
@@ -667,7 +672,7 @@ function DashboardApp() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-slate-950">
-                  {result ? "Finishing full dashboard data" : "Processing uploaded report"}
+                  {result ? "Finishing full dashboard data" : "Loading shared production data"}
                 </p>
                 <p className="mt-1 text-sm text-slate-500">{uploadProgress.message}</p>
               </div>
@@ -678,6 +683,18 @@ function DashboardApp() {
                 className="h-full rounded-full bg-blue-600 transition-all"
                 style={{ width: `${Math.min(Math.max(Number(uploadProgress.progress || 0), 0), 100)}%` }}
               />
+            </div>
+          </section>
+        )}
+
+        {plantDataLoading && (
+          <section className="mb-4 rounded-xl border border-blue-100 bg-white p-4 shadow-soft">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-4 w-4 animate-spin text-blue-700" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-semibold text-slate-950">Loading {selectedPlant}</p>
+                <p className="mt-1 text-sm text-slate-500">Fetching only the selected plant from the shared server dataset.</p>
+              </div>
             </div>
           </section>
         )}
@@ -698,31 +715,17 @@ function DashboardApp() {
           </section>
         )}
 
-        {/* Multi-plant selection required */}
-        {result && plantOptions.length > 1 && !selectedPlant && errors.length === 0 && (
-          <section className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-amber-900">
-            <h2 className="text-base font-semibold">Select a plant to continue</h2>
-            <p className="mt-1 text-sm">
-              This report contains multiple plants. Choose one using the{" "}
-              <span className="font-semibold">Plant</span> selector in the control bar above.
-            </p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {plantOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => handlePlantChange(option.value)}
-                  className="rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-800 shadow-sm transition hover:bg-amber-100"
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </section>
+        {showPlantSelection && (
+          <LandingPlantSelection
+            datasetMeta={datasetMeta}
+            fileName={fileName}
+            plantOptions={plantOptions}
+            onSelectPlant={handlePlantChange}
+          />
         )}
 
         {/* Dashboard */}
-        {selectedPlant && filteredResult?.daily?.length > 0 && (
+        {!plantDataLoading && selectedPlant && filteredResult?.daily?.length > 0 && (
           <Dashboard
             data={filteredResult}
             intelligence={intelligence}
@@ -737,15 +740,174 @@ function DashboardApp() {
         )}
 
         {/* Empty timeframe */}
-        {!loading && selectedPlant && filteredResult && filteredResult.daily.length === 0 && errors.length === 0 && (
+        {!loading && !plantDataLoading && selectedPlant && filteredResult && filteredResult.daily.length === 0 && errors.length === 0 && (
           <section className="mt-2 rounded-xl border border-slate-200 bg-white p-8 text-center shadow-soft">
             <p className="text-sm font-semibold text-slate-950">No rows in this timeframe</p>
             <p className="mt-1 text-sm text-slate-500">
-              The selected range contains no production dates from the uploaded report.
+              The selected range contains no production dates from the shared dataset.
             </p>
           </section>
         )}
       </main>
+    </div>
+  );
+}
+
+function LandingPlantSelection({ datasetMeta, fileName, plantOptions, onSelectPlant }) {
+  const dateRange = datasetMeta?.loaded_date_range?.start && datasetMeta?.loaded_date_range?.end
+    ? formatDateRangeLabel(datasetMeta.loaded_date_range.start, datasetMeta.loaded_date_range.end)
+    : "";
+
+  return (
+    <section className="relative min-h-screen overflow-hidden bg-[#eef6ff] text-slate-950">
+      <div className="absolute inset-x-0 bottom-0 h-56 opacity-70" aria-hidden="true">
+        <div className="h-full w-full bg-[linear-gradient(165deg,transparent_0_38%,rgba(37,99,235,0.10)_38.4%,transparent_39%,transparent_45%,rgba(37,99,235,0.08)_45.4%,transparent_46%,transparent_52%,rgba(14,165,233,0.08)_52.4%,transparent_53%)]" />
+      </div>
+
+      <div className="relative mx-auto flex min-h-screen w-full max-w-[1220px] flex-col px-5 py-5 sm:px-8">
+        <nav className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-[0_12px_28px_rgba(37,99,235,0.25)]">
+              <BarChart2 className="h-6 w-6" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-base font-extrabold text-slate-950">Plant Capacity Utilization</p>
+              <p className="truncate text-xs font-semibold text-blue-600">Tower-level capacity intelligence</p>
+            </div>
+          </div>
+
+          {fileName && (
+            <span className="hidden max-w-[280px] items-center gap-1.5 rounded-full border border-blue-100 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-500 shadow-sm sm:flex">
+              <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-blue-600" aria-hidden="true" />
+              <span className="truncate">{fileName}</span>
+            </span>
+          )}
+        </nav>
+
+        <div className="grid flex-1 items-center gap-8 py-8 lg:grid-cols-[0.94fr_1.06fr] lg:py-6">
+          <div className="max-w-xl">
+            <h1 className="text-[42px] font-black leading-[1.05] text-slate-950 sm:text-[56px] lg:text-[62px]">
+              Select Your Plant. <span className="text-blue-600">Start Analysis.</span>
+            </h1>
+            <p className="mt-5 max-w-lg text-base font-medium leading-8 text-slate-700 sm:text-lg">
+              Shared production data is ready. Choose the plant you want to work with.
+            </p>
+
+            <div className="mt-7 flex flex-wrap gap-2.5">
+              <span className="rounded-full border border-blue-100 bg-white/80 px-3 py-1.5 text-xs font-bold text-blue-700 shadow-sm">
+                {plantOptions.length} plants
+              </span>
+              {dateRange && (
+                <span className="rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-bold text-slate-600 shadow-sm">
+                  {dateRange}
+                </span>
+              )}
+            </div>
+
+            <div className="mt-9 max-w-[520px] rounded-xl border border-blue-100 bg-white/88 p-4 shadow-[0_18px_46px_rgba(37,99,235,0.12)] backdrop-blur">
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+                {plantOptions.map((option, index) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => onSelectPlant(option.value)}
+                    className="group flex min-h-[64px] items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-blue-300 hover:bg-blue-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-200"
+                  >
+                    <span
+                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-black text-white shadow-sm"
+                      style={{ backgroundColor: landingPlantColor(index) }}
+                      aria-hidden="true"
+                    >
+                      {plantInitials(option.label)}
+                    </span>
+                    <span className="min-w-0 truncate text-sm font-extrabold text-slate-900 group-hover:text-blue-700">
+                      {option.label}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <LandingCapacityPreview />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function LandingCapacityPreview() {
+  const bars = [
+    { day: "01", run: 50, loss: 18, spare: 22, idle: 10 },
+    { day: "05", run: 62, loss: 14, spare: 16, idle: 8 },
+    { day: "09", run: 47, loss: 20, spare: 24, idle: 9 },
+    { day: "13", run: 58, loss: 16, spare: 18, idle: 8 },
+    { day: "17", run: 68, loss: 12, spare: 14, idle: 6 },
+    { day: "21", run: 54, loss: 17, spare: 20, idle: 9 },
+  ];
+
+  return (
+    <div className="relative mx-auto w-full max-w-[590px]">
+      <div className="absolute left-0 top-6 hidden h-[500px] w-16 rounded-2xl bg-slate-950 shadow-[0_22px_60px_rgba(15,23,42,0.30)] lg:block">
+        <div className="flex h-full flex-col items-center gap-5 py-8 text-slate-500">
+          {[0, 1, 2, 3, 4].map((item) => (
+            <span
+              key={item}
+              className={`flex h-8 w-8 items-center justify-center rounded-lg ${item === 0 ? "bg-blue-600" : "bg-slate-900"}`}
+            >
+              <span className={`h-3 w-3 rounded ${item === 0 ? "bg-white" : "bg-slate-600"}`} />
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="relative rounded-2xl border border-white/80 bg-white p-4 shadow-[0_28px_70px_rgba(30,64,175,0.18)] lg:ml-11">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-extrabold text-slate-950">Overview</p>
+            <p className="text-xs font-medium text-slate-400">Plant capacity snapshot</p>
+          </div>
+          <div className="flex h-8 items-center gap-1 rounded-full border border-slate-100 bg-slate-50 px-2">
+            <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+            <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
+            <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[
+            ["Runtime", "52%", "text-blue-600"],
+            ["Loss", "17%", "text-amber-500"],
+            ["Spare", "21%", "text-sky-500"],
+            ["Unplanned", "10%", "text-slate-500"],
+          ].map(([label, value, color]) => (
+            <div key={label} className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+              <p className="text-[11px] font-bold text-slate-400">{label}</p>
+              <p className={`mt-2 text-2xl font-black ${color}`}>{value}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3 rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-extrabold text-slate-700">Daily Capacity Split</p>
+            <span className="text-[11px] font-bold text-blue-600">100%</span>
+          </div>
+          <div className="mt-4 flex h-48 items-end gap-3">
+            {bars.map((bar) => (
+              <div key={bar.day} className="flex h-full flex-1 flex-col justify-end gap-1">
+                <div className="flex h-[168px] flex-col-reverse overflow-hidden rounded-t-md bg-slate-100">
+                  <div className="bg-[#B2CFB2]" style={{ height: `${bar.run}%` }} />
+                  <div className="bg-[#F3C97B]" style={{ height: `${bar.loss}%` }} />
+                  <div className="bg-[#C5E1FF]" style={{ height: `${bar.spare}%` }} />
+                  <div className="bg-[repeating-linear-gradient(135deg,#E5E7EB_0_5px,#B4BBC7_5px_6px,#E5E7EB_6px_11px)]" style={{ height: `${bar.idle}%` }} />
+                </div>
+                <span className="text-center text-[10px] font-bold text-slate-400">{bar.day}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -786,237 +948,23 @@ function MetricDefinitionsModal({ onClose }) {
   );
 }
 
-// ── Empty drop zone ────────────────────────────────────────────────
-function EmptyDropZone({ onUpload }) {
-  const inputRef = useRef(null);
-  const [dragging, setDragging] = useState(false);
-
-  function submitFile(file) {
-    if (file) onUpload(file);
-  }
-
-  return (
-    <section className="relative min-h-screen overflow-hidden bg-[#eef6ff] text-slate-950">
-      <input
-        ref={inputRef}
-        type="file"
-        accept=".xlsx,.xls"
-        className="hidden"
-        onChange={(event) => submitFile(event.target.files?.[0])}
-      />
-
-      <div className="absolute inset-x-0 bottom-0 h-52 opacity-70" aria-hidden="true">
-        <div className="h-full w-full bg-[linear-gradient(165deg,transparent_0_38%,rgba(37,99,235,0.10)_38.4%,transparent_39%,transparent_45%,rgba(37,99,235,0.08)_45.4%,transparent_46%,transparent_52%,rgba(14,165,233,0.08)_52.4%,transparent_53%)]" />
-      </div>
-
-      <div className="relative mx-auto flex min-h-screen w-full max-w-[1200px] flex-col px-5 py-5 sm:px-8">
-        <nav className="flex items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-[0_12px_28px_rgba(37,99,235,0.25)]">
-              <BarChart2 className="h-6 w-6" aria-hidden="true" />
-            </div>
-            <div className="min-w-0">
-              <p className="truncate text-base font-extrabold text-slate-950">Plant Capacity Utilization</p>
-              <p className="truncate text-xs font-semibold text-blue-600">Tower-level capacity intelligence</p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl bg-slate-950 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
-          >
-            <UploadCloud className="h-4 w-4" aria-hidden="true" />
-            Upload
-          </button>
-        </nav>
-
-        <div className="grid flex-1 items-center gap-10 py-10 lg:grid-cols-[0.92fr_1.08fr] lg:py-8">
-          <div className="max-w-xl">
-            <h1 className="text-[44px] font-black leading-[1.04] text-slate-950 sm:text-[58px] lg:text-[64px]">
-              Understand Your Capacity. <span className="text-blue-600">Instantly.</span>
-            </h1>
-            <p className="mt-6 max-w-lg text-base font-medium leading-8 text-slate-700 sm:text-lg">
-              Upload an Excel production report to map plant capacity by tower, folder, product mix, and the 00:00-04:00 operating window.
-            </p>
-
-            <div id="features" className="mt-8 grid grid-cols-2 gap-x-5 gap-y-5 sm:grid-cols-4">
-              {[
-                { icon: Layers, title: "Tower Mapping", detail: "Plant capacity by tower" },
-                { icon: Gauge, title: "Live KPIs", detail: "Runtime, loss, spare" },
-                { icon: Activity, title: "AI Insights", detail: "Ask the data" },
-                { icon: ShieldCheck, title: "Scoped Views", detail: "Plant and period filters" },
-              ].map(({ icon: Icon, title, detail }) => (
-                <div key={title} className="min-w-0">
-                  <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-xl border border-blue-100 bg-white text-blue-600 shadow-sm">
-                    <Icon className="h-5 w-5" aria-hidden="true" />
-                  </div>
-                  <p className="text-sm font-extrabold text-slate-950">{title}</p>
-                  <p className="mt-1 text-xs font-medium leading-4 text-slate-500">{detail}</p>
-                </div>
-              ))}
-            </div>
-
-            <div
-              onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={(event) => {
-                event.preventDefault();
-                setDragging(false);
-                submitFile(event.dataTransfer.files?.[0]);
-              }}
-              className={`mt-10 max-w-[360px] rounded-xl border-2 border-dashed bg-white/84 p-6 text-center shadow-[0_16px_40px_rgba(37,99,235,0.10)] transition ${
-                dragging ? "border-blue-500 ring-4 ring-blue-100" : "border-blue-200"
-              }`}
-            >
-              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
-                <UploadCloud className="h-8 w-8" aria-hidden="true" />
-              </div>
-              <p className="mt-4 text-base font-extrabold text-slate-950">
-                {dragging ? "Release to upload" : "Upload Excel Files"}
-              </p>
-              <p className="mt-1 text-sm leading-5 text-slate-500">
-                Drag and drop production reports here or choose a workbook.
-              </p>
-              <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                className="mt-4 inline-flex h-10 items-center justify-center rounded-lg bg-blue-600 px-7 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
-              >
-                Choose Files
-              </button>
-              <p className="mt-2 text-xs font-medium text-slate-400">.xlsx and .xls supported</p>
-            </div>
-          </div>
-
-          <LandingDashboardPreview />
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function LandingDashboardPreview() {
-  const capacityBars = [
-    { label: "01", snp: 54, gnp: 18, idle: 28 },
-    { label: "05", snp: 46, gnp: 32, idle: 22 },
-    { label: "09", snp: 58, gnp: 14, idle: 28 },
-    { label: "13", snp: 42, gnp: 36, idle: 22 },
-    { label: "17", snp: 62, gnp: 20, idle: 18 },
-    { label: "21", snp: 51, gnp: 27, idle: 22 },
-  ];
-  const topTowers = [
-    ["Tower 04", 92],
-    ["Tower 07", 87],
-    ["Tower 12", 81],
-    ["Tower 02", 75],
-  ];
-
-  return (
-    <div className="relative mx-auto w-full max-w-[590px]">
-      <div className="absolute left-0 top-6 hidden h-[520px] w-16 rounded-2xl bg-slate-950 shadow-[0_22px_60px_rgba(15,23,42,0.30)] lg:block">
-        <div className="flex h-full flex-col items-center gap-6 py-8 text-slate-500">
-          {[BarChart2, Gauge, Layers, Activity, ShieldCheck].map((Icon, index) => (
-            <div
-              key={index}
-              className={`flex h-8 w-8 items-center justify-center rounded-lg ${index === 0 ? "bg-blue-600 text-white" : "text-slate-400"}`}
-            >
-              <Icon className="h-4 w-4" aria-hidden="true" />
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="relative rounded-2xl border border-white/80 bg-white p-4 shadow-[0_28px_70px_rgba(30,64,175,0.18)] lg:ml-11">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <p className="text-sm font-extrabold text-slate-950">Overview</p>
-            <p className="text-xs font-medium text-slate-400">Selected plant capacity snapshot</p>
-          </div>
-          <div className="flex h-8 items-center gap-1 rounded-full border border-slate-100 bg-slate-50 px-2">
-            <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
-            <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-            <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-          </div>
-        </div>
-
-        <div id="kpis" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[
-            ["Total Towers", "17", "text-blue-600"],
-            ["Runtime", "49%", "text-indigo-600"],
-            ["Spare Capacity", "18%", "text-amber-500"],
-            ["Utilization", "82%", "text-emerald-600"],
-          ].map(([label, value, color]) => (
-            <div key={label} className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
-              <p className="text-[11px] font-bold text-slate-400">{label}</p>
-              <p className={`mt-2 text-2xl font-black ${color}`}>{value}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-3 grid gap-3 lg:grid-cols-[1.08fr_0.92fr]">
-          <div className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-extrabold text-slate-700">Capacity by Tower</p>
-              <span className="text-[11px] font-bold text-blue-600">100% split</span>
-            </div>
-            <div className="mt-4 flex h-32 items-end gap-3">
-              {capacityBars.map((bar) => (
-                <div key={bar.label} className="flex h-full flex-1 flex-col justify-end gap-1">
-                  <div className="flex h-[104px] flex-col justify-end overflow-hidden rounded-t-md bg-slate-100">
-                    <div className="bg-blue-600" style={{ height: `${bar.snp}%` }} />
-                    <div className="bg-sky-300" style={{ height: `${bar.gnp}%` }} />
-                    <div className="bg-slate-200" style={{ height: `${bar.idle}%` }} />
-                  </div>
-                  <span className="text-center text-[10px] font-bold text-slate-400">{bar.label}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
-            <p className="text-xs font-extrabold text-slate-700">Capacity by Folder</p>
-            <div className="mt-4 flex items-center gap-4">
-              <div className="grid h-28 w-28 shrink-0 place-items-center rounded-full bg-[conic-gradient(#2563eb_0_45%,#38bdf8_45%_72%,#8b5cf6_72%_100%)]">
-                <div className="grid h-16 w-16 place-items-center rounded-full bg-white text-xl font-black text-slate-950">128</div>
-              </div>
-              <div className="space-y-2 text-xs font-bold text-slate-500">
-                <p><span className="mr-2 inline-block h-2 w-2 rounded-full bg-blue-600" />High</p>
-                <p><span className="mr-2 inline-block h-2 w-2 rounded-full bg-sky-400" />Medium</p>
-                <p><span className="mr-2 inline-block h-2 w-2 rounded-full bg-violet-500" />Low</p>
-              </div>
-            </div>
-          </div>
-
-          <div id="workflow" className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
-            <p className="text-xs font-extrabold text-slate-700">Utilization Trend</p>
-            <svg className="mt-3 h-28 w-full" viewBox="0 0 220 110" role="img" aria-label="Utilization trend preview">
-              <path d="M5 90 L34 72 L62 78 L90 54 L118 66 L146 34 L174 48 L210 18" fill="none" stroke="#2563eb" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M5 90 L34 72 L62 78 L90 54 L118 66 L146 34 L174 48 L210 18 L210 108 L5 108 Z" fill="#dbeafe" opacity="0.9" />
-            </svg>
-          </div>
-
-          <div id="security" className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
-            <p className="text-xs font-extrabold text-slate-700">Top Towers by Utilization</p>
-            <div className="mt-4 space-y-3">
-              {topTowers.map(([name, value]) => (
-                <div key={name} className="grid grid-cols-[68px_1fr_34px] items-center gap-2">
-                  <span className="text-[11px] font-bold text-slate-500">{name}</span>
-                  <span className="h-2 overflow-hidden rounded-full bg-slate-100">
-                    <span className="block h-full rounded-full bg-blue-600" style={{ width: `${value}%` }} />
-                  </span>
-                  <span className="text-right text-[11px] font-black text-slate-700">{value}%</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────
+
+const LANDING_PLANT_COLORS = ["#2563EB", "#0891B2", "#059669", "#7C3AED", "#D97706", "#475569"];
+
+function landingPlantColor(index) {
+  return LANDING_PLANT_COLORS[index % LANDING_PLANT_COLORS.length];
+}
+
+function plantInitials(value) {
+  const text = String(value || "").trim();
+  if (!text) return "P";
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length > 1) {
+    return words.slice(0, 2).map((word) => word[0]).join("").toUpperCase();
+  }
+  return text.slice(0, 2).toUpperCase();
+}
 
 function createDefaultTimeframe() {
   return {

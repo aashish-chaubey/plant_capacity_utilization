@@ -97,15 +97,16 @@ def build_chat_response(
     )
 
     if not endpoint or not api_key:
-        fallback_answer = _fallback_answer_from_context(message, context)
-        if fallback_answer:
-            return {
-                "answer": fallback_answer,
-                "status": "ok",
-                "plan": None,
-                "chart": _chart_for_answer(fallback_answer, message, context, history),
-            }
-        return {"answer": "LLM is not configured.", "status": "unconfigured", "plan": None, "chart": None}
+        return {
+            "answer": "LLM is not configured.",
+            "status": "unconfigured",
+            "detail": "AZURE_ENDPOINT and API_KEY/AZURE_API_KEY are required.",
+            "plan": None,
+            "llm_used": False,
+            "llm_status": "unconfigured",
+            "refined": False,
+            "chart": None,
+        }
 
     # Phase 1 — Query Understanding: decompose the question into a rich structured plan,
     # then execute it deterministically. Only falls through to the full LLM when the executor
@@ -132,6 +133,8 @@ def build_chat_response(
                     "plan": qu_plan,
                     "confidence": confidence,
                     "refined": False,
+                    "llm_used": False,
+                    "llm_status": "fast_path",
                     "chart": _chart_for_answer(qu_answer, message, context, history, qu_plan),
                 }
             # Below threshold — fall through to full LLM for a better answer
@@ -198,6 +201,9 @@ def build_chat_response(
         "SNP runtime_min where tower_type_key='gnp_uv' / All runtime_min where tower_type_key='gnp_uv' * 100.\n"
         "- When tower_runtime_segments is present, it is the filtered segment-level source for tower/product runtime math. "
         "Use its minutes, print_order, committed_speed_cph, actual_speed_cph, and efficiency_pct fields to recompute or validate numerator/denominator rather than saying segment data is absent.\n"
+        "- For GNP-vs-SNP folder/edition questions about average spare, loss, wait, LPR-to-print-start, reflong, downtime, delayed finish, or minimum-3-GNP-folder nights, use gnp_snp_folder_analysis first. "
+        "Its comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, and delayed_finish_complexity tables are precomputed from the data. "
+        "For web-break comparisons on named towers, use web_break_gnp_snp_tower_comparison; if can_split_web_break_by_product_type=false, explicitly state that web-break events are not stored with product type and compare against GNP/SNP runtime mix only.\n"
         "- For any efficiency question involving DATES, DAYS, or THRESHOLDS (e.g. 'days below 90% efficiency', 'average efficiency per night', 'trend of efficiency'), "
         "use daily_efficiency. It has one row per production night with run_date, efficiency_pct, total_po, total_runtime_min, total_dt_min, actual_speed_cph, committed_speed_cph. "
         "Filter rows by efficiency_pct threshold, count matching rows, or group by month/weekday from run_date.\n"
@@ -356,6 +362,9 @@ def build_chat_response(
         "- tower_runtime_mix: generic runtime mix by tower type and product type. Fields: tower_type_key, tower_type, "
         "product_type, runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count, towers. "
         "Use this for runtime share/percentage questions involving SNP/GNP products on GNP/UV or non-UV towers.\n"
+        "- gnp_snp_folder_analysis: precomputed folder-night comparisons between base GNP (C5-C15) and base SNP (C1-C4). "
+        "Use this for questions comparing GNP vs SNP editions on spare time, loss time, wait time, LPR-to-print-start, reflong, downtime, and delayed print finish. "
+        "Tables: comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, delayed_finish_complexity, web_break_gnp_snp_tower_comparison.\n"
         "- tower_downtime_reason_attribution: folder-level downtime reason events attributed to towers that ran the same plant/machine/folder in the selected period. "
         "Use this for questions like web break frequency by individual tower. State that reason attribution is folder-to-tower attribution when giving reason-specific tower counts.\n"
         "- editions_by_tower: unique edition names printed per tower across the period. "
@@ -423,49 +432,41 @@ def build_chat_response(
         answer = _call_plain_chat_completion(endpoint, api_key, messages).strip()
         if _chat_debug_enabled():
             print(f"[chat-debug] raw_answer={answer!r}", flush=True)
-        if _is_weak_chat_answer(answer):
-            fallback_answer = _fallback_answer_from_context(message, context, qu_plan)
-            if fallback_answer:
-                return {
-                    "answer": fallback_answer,
-                    "status": "ok",
-                    "plan": qu_plan,
-                    "refined": True,
-                    "chart": _chart_for_answer(fallback_answer, message, context, history, qu_plan),
-                }
         return {
             "answer": answer,
             "status": "ok",
             "plan": qu_plan,
             "refined": True,
+            "llm_used": True,
+            "llm_status": "weak_answer" if _is_weak_chat_answer(answer) else "answered",
             "chart": _chart_for_answer(answer, message, context, history, qu_plan),
         }
     except Exception as exc:
+        detail = _sanitize_error_message(exc, api_key)
         if _chat_debug_enabled():
-            print(f"[chat] executor fallback used: {_chat_error_kind(exc)} — {_sanitize_error_message(exc, api_key)}", flush=True)
-        fallback_answer = _fallback_answer_from_context(message, context, qu_plan)
-        if fallback_answer:
-            return {
-                "answer": fallback_answer,
-                "status": "ok",
-                "plan": qu_plan,
-                "refined": True,
-                "chart": _chart_for_answer(fallback_answer, message, context, history, qu_plan),
-            }
+            print(f"[chat] full LLM request failed: {_chat_error_kind(exc)} — {detail}", flush=True)
         if _is_timeout_error(exc):
             return {
                 "answer": (
-                    "This query is too broad for one pass. "
-                    "Please narrow it by plant, date range, folder, tower, or metric."
+                    "The full AI request timed out before producing an answer. "
+                    "Please try again with a narrower plant, date range, folder, tower, or metric."
                 ),
                 "status": "timeout",
+                "detail": detail,
                 "plan": qu_plan,
+                "llm_used": False,
+                "llm_status": "timeout",
+                "refined": False,
                 "chart": None,
             }
         return {
-            "answer": "I could not answer that from the current computed dashboard context.",
-            "status": "unanswered",
+            "answer": "The full AI request failed before producing an answer.",
+            "status": "llm_error",
+            "detail": detail,
             "plan": qu_plan,
+            "llm_used": False,
+            "llm_status": "failed",
+            "refined": False,
             "chart": None,
         }
 
@@ -583,6 +584,21 @@ tower_runtime_segments — segment-level runtime rows included only when needed
   print_order, source_print_order, committed_speed_cph, actual_speed_cph, efficiency_pct.
   Use these rows for direct calculation when product/tower runtime percentages or speed efficiency require raw segment detail.
 
+gnp_snp_folder_analysis — precomputed GNP vs SNP folder-night comparison tables
+  comparison_by_product_type fields: product_type (GNP/SNP), folder_day_count, total_runtime_min,
+  avg_spare_time_min, avg_loss_time_min, avg_waiting_time_min, avg_lpr_to_start_min,
+  avg_reflong_time_min, avg_downtime_min, delayed_folder_day_count, delayed_folder_day_pct,
+  avg_overrun_min.
+  gnp_loss_breakdown_by_folder fields: folder, gnp_folder_day_count, total_loss_time_min,
+  avg_loss_time_min, change_over_time_min, lpr_to_start_min, reflong_time_min.
+  nights_with_min_3_gnp_folders fields: run_date, gnp_folder_count, avg_spare_time_min,
+  total_spare_time_min, folders.
+  delayed_finish_complexity fields: run_date, folder, print_finish_time, overrun_minutes,
+  complexity_codes, complexity_categories, largest_components, editions.
+  web_break_gnp_snp_tower_comparison fields: tower, product_type, event_count, total_minutes,
+  avg_minutes_per_event, matching_note.
+  Use this source for the questions in query.docx about GNP vs SNP editions/folders and web break.
+
 COMPUTATION NOTES:
 - "average [metric] per folder" → exact_dashboard.folders; divide total_field by active_nights
 - loss_time = changeover + late_start + reflong (NEVER includes waiting_time)
@@ -674,6 +690,7 @@ towers                      — per-tower period totals; fields: tower, machine,
 tower_days                  — per-tower per-date; fields: tower, run_date, weekday, month, runtime_min, downtime_min, loss_time_min, waiting_time_min, utilization_pct, uv_tower
 tower_runtime_mix           — runtime split by tower TYPE × product TYPE (use this for any question about SNP/GNP products running on UV/GNP or non-UV towers); fields: tower_type_key ("gnp_uv" or "non_uv"), tower_type (human label), product_type ("SNP", "GNP", or "Unknown"), runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count
 tower_runtime_segments      — segment-level runtime rows (most granular; use when tower_runtime_mix is not precise enough); fields: run_date, tower, tower_type_key, tower_type, uv_tower, product_type, complexity_code, category, minutes, print_order, committed_speed_cph, actual_speed_cph, efficiency_pct
+gnp_snp_folder_analysis     — precomputed GNP vs SNP folder-night comparisons. Use for GNP/SNP questions about average spare, loss, wait, LPR-to-start, reflong, downtime, delayed finish, and web break. Subtables include comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, delayed_finish_complexity, web_break_gnp_snp_tower_comparison.
 daily_efficiency            — per-date plant-wide efficiency summary (one row per production night); fields: run_date, total_po, total_runtime_min, total_dt_min, actual_speed_cph, committed_speed_cph, efficiency_pct. USE THIS for any question about efficiency by date, days above/below an efficiency threshold, or efficiency trends over time.
 downtime_by_reason          — top reasons ranked by event count; fields: reason, count, total_minutes
 complexity_by_code          — runtime by C1-C15 code; fields: code, runtime_min, print_order
@@ -1561,6 +1578,11 @@ def _build_chat_context(
         key=lambda r: -r["incident_count"],
     )
     tower_reason_attribution = _build_tower_downtime_reason_attribution(tower_details, downtime_reasons or [])
+    gnp_snp_folder_analysis = _build_gnp_snp_folder_analysis(
+        folder_rows=details or [],
+        tower_day_rows=tower_day_rows,
+        tower_reason_attribution=tower_reason_attribution,
+    )
 
     # Editions by folder: unique edition names printed per folder across all dates
     folder_editions_map: dict[str, set[str]] = {}
@@ -1663,6 +1685,7 @@ def _build_chat_context(
         "tower_downtime_runs": tower_downtime_runs[:1000],
         "tower_downtime_runs_all": tower_downtime_runs,
         "tower_downtime_reason_attribution": tower_reason_attribution,
+        "gnp_snp_folder_analysis": gnp_snp_folder_analysis,
         "uv_towers": uv_towers,
         "non_uv_towers": non_uv_towers,
         "delayed_pf": delayed_pf_rows[:500],
@@ -1680,6 +1703,7 @@ def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -
     exact = context.get("exact_dashboard") or {}
     downtime_by_reason = context.get("downtime_by_reason") or {}
     tower_attribution = context.get("tower_downtime_reason_attribution") or {}
+    gnp_snp_analysis = context.get("gnp_snp_folder_analysis") or {}
     malt = context.get("max_allowable_loss_time") or {}
 
     # tower_days is per-tower-per-date and dominates payload size (hundreds of rows x ~23 fields each).
@@ -1832,6 +1856,29 @@ def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -
             "attribution_note": tower_attribution.get("attribution_note"),
             "by_tower": _compact_rows(tower_attribution.get("by_tower") or [], limit=60),
             "by_tower_reason": _compact_rows(tower_attribution.get("by_tower_reason") or [], limit=60),
+        },
+        "gnp_snp_folder_analysis": {
+            "definition": gnp_snp_analysis.get("definition"),
+            "comparison_by_product_type": _compact_rows(
+                gnp_snp_analysis.get("comparison_by_product_type") or [], limit=10
+            ),
+            "gnp_loss_breakdown_by_folder": _compact_rows(
+                gnp_snp_analysis.get("gnp_loss_breakdown_by_folder") or [],
+                limit=200 if ("folder" in question_cf or "break" in question_cf or "loss" in question_cf) else 30,
+            ),
+            "nights_with_min_3_gnp_folders": _compact_rows(
+                gnp_snp_analysis.get("nights_with_min_3_gnp_folders") or [],
+                limit=220 if ("three" in question_cf or "3" in question_cf or "minimum" in question_cf) else 30,
+            ),
+            "delayed_finish_complexity": _compact_rows(
+                gnp_snp_analysis.get("delayed_finish_complexity") or [],
+                limit=220 if wants_delay else 40,
+            ),
+            "web_break_gnp_snp_tower_comparison": _compact_rows(
+                gnp_snp_analysis.get("web_break_gnp_snp_tower_comparison") or [],
+                limit=120 if "web break" in question_cf else 30,
+            ),
+            "correlation_summary": gnp_snp_analysis.get("correlation_summary") or {},
         },
         "delayed_pf": _compact_rows(context.get("delayed_pf") or [], limit=delayed_pf_limit),
         "uv_nights": {
@@ -3241,6 +3288,187 @@ def _is_weak_chat_answer(answer: str) -> bool:
     return any(phrase in text for phrase in weak_phrases)
 
 
+def _answer_gnp_snp_folder_question(question: str, context: dict[str, Any]) -> str:
+    analysis = context.get("gnp_snp_folder_analysis") or {}
+    exact = context.get("exact_dashboard") or {}
+
+    if _asks_folder_wise_average_spare(question):
+        rows = exact.get("folders") or []
+        answer_rows = []
+        for row in rows:
+            active_nights = int(_number(row.get("active_nights")))
+            if active_nights <= 0:
+                continue
+            answer_rows.append({
+                "folder": row.get("resource"),
+                "active_nights": active_nights,
+                "avg_spare_time_min": _clean_number(_number(row.get("spare_time_min")) / active_nights),
+            })
+        answer_rows.sort(key=lambda row: (-_number(row.get("avg_spare_time_min")), row.get("folder", "")))
+        return _markdown_table(
+            ["Folder", "Active nights", "Avg spare time (min)"],
+            [
+                [row["folder"], row["active_nights"], row["avg_spare_time_min"]]
+                for row in answer_rows
+            ],
+        )
+
+    if "finish" in question and ("4 am" in question or "04:00" in question or "beyond" in question or "delay" in question):
+        rows = analysis.get("delayed_finish_complexity") or []
+        if not rows:
+            return "No print-finish rows beyond the cutoff were found in the selected period."
+        return _markdown_table(
+            ["Date", "Folder", "Finish", "Overrun", "Product mix", "Complexity", "Largest components"],
+            [
+                [
+                    row.get("run_date"),
+                    row.get("folder"),
+                    row.get("print_finish_time") or row.get("estimated_print_finish_time"),
+                    row.get("overrun_minutes"),
+                    row.get("product_mix"),
+                    ", ".join(row.get("complexity_codes") or []),
+                    ", ".join(f"{c.get('label')}: {c.get('minutes')} min" for c in (row.get("largest_components") or [])[:3]),
+                ]
+                for row in rows[:80]
+            ],
+        )
+
+    if not any(term in question for term in ["gnp", "snp", "uv", "glossy", "standard", "web break"]):
+        return ""
+
+    if "web break" in question:
+        rows = analysis.get("web_break_gnp_snp_tower_comparison") or []
+        if not rows:
+            return "No matching web-break attribution rows were found for the named towers in the selected plant/period."
+        return (
+            "Web-break events are not stored with product type, so they cannot be split directly into GNP vs SNP events. "
+            "The table below compares attributed web-break events with each tower's GNP/SNP runtime mix.\n\n"
+            + _markdown_table(
+                ["Tower", "Events", "Minutes", "GNP runtime", "SNP runtime", "Can split by product?"],
+                [
+                    [
+                        row.get("tower"),
+                        row.get("attributed_event_count"),
+                        row.get("attributed_minutes"),
+                        row.get("gnp_runtime_min"),
+                        row.get("snp_runtime_min"),
+                        "Yes" if row.get("can_split_web_break_by_product_type") else "No",
+                    ]
+                    for row in rows
+                ],
+            )
+        )
+
+    if "minimum" in question and ("three" in question or "3" in question) and "gnp" in question:
+        rows = analysis.get("nights_with_min_3_gnp_folders") or []
+        if not rows:
+            return "No nights had at least three folders running GNP editions in the selected period."
+        avg_spare = _clean_number(_average([_number(row.get("avg_spare_time_min")) for row in rows]))
+        if "correlation" in question or "finish" in question or "4 am" in question or "04:00" in question:
+            delayed_rows = analysis.get("delayed_finish_complexity") or []
+            min3_dates = {_clean_text(row.get("run_date")) for row in rows}
+            delayed_on_min3 = [row for row in delayed_rows if _clean_text(row.get("run_date")) in min3_dates]
+            return (
+                f"**{len(rows)}** nights had at least three GNP folders. "
+                f"Average spare time across those GNP folder groups was **{avg_spare} min**. "
+                f"Delayed print finish occurred on **{len(_sorted_unique(row.get('run_date') for row in delayed_on_min3))}** of those nights.\n\n"
+                + _markdown_table(
+                    ["Date", "GNP folders", "Avg spare (min)", "Folders"],
+                    [[row.get("run_date"), row.get("gnp_folder_count"), row.get("avg_spare_time_min"), ", ".join(row.get("folders") or [])] for row in rows[:30]],
+                )
+            )
+        return (
+            f"Across **{len(rows)}** nights with at least three GNP folders, the average spare time was **{avg_spare} min**.\n\n"
+            + _markdown_table(
+                ["Date", "GNP folders", "Avg spare (min)", "Total spare (min)"],
+                [[row.get("run_date"), row.get("gnp_folder_count"), row.get("avg_spare_time_min"), row.get("total_spare_time_min")] for row in rows],
+            )
+        )
+
+    if "break" in question and "loss" in question:
+        rows = analysis.get("gnp_loss_breakdown_by_folder") or []
+        if not rows:
+            return "No GNP folder loss rows were found in the selected period."
+        return _markdown_table(
+            ["Folder", "GNP folder-days", "Total loss", "Avg loss", "Changeover", "LPR-to-start", "Reflong"],
+            [
+                [
+                    row.get("folder"),
+                    row.get("gnp_folder_day_count"),
+                    row.get("total_loss_time_min"),
+                    row.get("avg_loss_time_min"),
+                    row.get("change_over_time_min"),
+                    row.get("lpr_to_start_min"),
+                    row.get("reflong_time_min"),
+                ]
+                for row in rows
+            ],
+        )
+
+    comparison = analysis.get("comparison_by_product_type") or []
+    if comparison and (
+        "compare" in question
+        or "average" in question
+        or "correlation" in question
+        or "waiting time" in question
+        or "loss time" in question
+        or "downtime" in question
+        or "reflong" in question
+        or "lpr" in question
+    ):
+        selected_fields = ["folder_day_count"]
+        if "spare" in question:
+            selected_fields.append("avg_spare_time_min")
+        if "loss" in question:
+            selected_fields.append("avg_loss_time_min")
+        if "wait" in question:
+            selected_fields.append("avg_waiting_time_min")
+        if "lpr" in question or "print start" in question:
+            selected_fields.append("avg_lpr_to_start_min")
+        if "reflong" in question:
+            selected_fields.append("avg_reflong_time_min")
+        if "downtime" in question:
+            selected_fields.append("avg_downtime_min")
+        if "correlation" in question or "finish" in question or "4 am" in question or "04:00" in question:
+            selected_fields.extend(["delayed_folder_day_pct", "avg_overrun_min"])
+        if len(selected_fields) == 1:
+            selected_fields.extend(["avg_loss_time_min", "avg_waiting_time_min", "avg_downtime_min"])
+        headers = ["Product type"] + [_humanize_field(field) for field in selected_fields]
+        return _markdown_table(
+            headers,
+            [
+                [row.get("product_type"), *[_format_plan_metric_value(field, row.get(field)) for field in selected_fields]]
+                for row in comparison
+            ],
+        )
+
+    return ""
+
+
+def _asks_folder_wise_average_spare(question: str) -> bool:
+    return (
+        "spare" in question
+        and "average" in question
+        and ("folder wise" in question or "folder-wise" in question or "per folder" in question or "folder" in question)
+        and "gnp" not in question
+        and "snp" not in question
+    )
+
+
+def _markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
+    if not rows:
+        return "No matching rows found."
+    def cell(value: Any) -> str:
+        if isinstance(value, float):
+            value = _clean_number(value)
+        text = _clean_text(value)
+        return text.replace("|", "/")
+    header_line = "| " + " | ".join(cell(h) for h in headers) + " |"
+    sep_line = "| " + " | ".join("---" for _ in headers) + " |"
+    row_lines = ["| " + " | ".join(cell(v) for v in row) + " |" for row in rows]
+    return "\n".join([header_line, sep_line, *row_lines])
+
+
 def _fallback_answer_from_context(
     message: str,
     context: dict[str, Any],
@@ -3262,6 +3490,10 @@ def _fallback_answer_from_context(
 
     if _asks_malt(question):
         return _answer_malt_question(question, context)
+
+    gnp_snp_answer = _answer_gnp_snp_folder_question(question, context)
+    if gnp_snp_answer:
+        return gnp_snp_answer
 
     if _asks_delayed_pf(question):
         return _answer_delayed_pf_question(question, context)
@@ -3459,6 +3691,12 @@ def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict
         "max_allowable_loss_time.night_exceedances": (context.get("max_allowable_loss_time") or {}).get("night_exceedances"),
         "tower_downtime_reason_attribution.by_tower": (context.get("tower_downtime_reason_attribution") or {}).get("by_tower"),
         "tower_downtime_reason_attribution.by_tower_reason": (context.get("tower_downtime_reason_attribution") or {}).get("by_tower_reason"),
+        "gnp_snp_folder_analysis": (context.get("gnp_snp_folder_analysis") or {}).get("comparison_by_product_type"),
+        "gnp_snp_folder_analysis.comparison_by_product_type": (context.get("gnp_snp_folder_analysis") or {}).get("comparison_by_product_type"),
+        "gnp_snp_folder_analysis.gnp_loss_breakdown_by_folder": (context.get("gnp_snp_folder_analysis") or {}).get("gnp_loss_breakdown_by_folder"),
+        "gnp_snp_folder_analysis.nights_with_min_3_gnp_folders": (context.get("gnp_snp_folder_analysis") or {}).get("nights_with_min_3_gnp_folders"),
+        "gnp_snp_folder_analysis.delayed_finish_complexity": (context.get("gnp_snp_folder_analysis") or {}).get("delayed_finish_complexity"),
+        "gnp_snp_folder_analysis.web_break_gnp_snp_tower_comparison": (context.get("gnp_snp_folder_analysis") or {}).get("web_break_gnp_snp_tower_comparison"),
         "loss_time.all_days": (context.get("loss_time") or {}).get("all_days"),
     }
     downtime_by_reason = context.get("downtime_by_reason") or {}
@@ -5460,6 +5698,282 @@ def _complexity_categories_for_segments(segments: list[dict[str, Any]]) -> list[
 
 def _has_gnp_runtime(rows: list[dict[str, Any]]) -> bool:
     return any(_is_gnp_segment(segment) for row in rows for segment in _runtime_segment_rows(row))
+
+
+def _build_gnp_snp_folder_analysis(
+    folder_rows: list[dict[str, Any]],
+    tower_day_rows: list[dict[str, Any]],
+    tower_reason_attribution: dict[str, Any],
+) -> dict[str, Any]:
+    """Small precomputed tables for recurring GNP-vs-SNP natural-language questions.
+
+    Metrics are split by runtime-segment share when a folder/night has both GNP and SNP
+    runtime. This keeps the table compact while still letting the model calculate from data
+    rather than infer from an arbitrary sample of raw folder rows.
+    """
+    product_buckets: dict[str, dict[str, Any]] = {}
+    gnp_folder_buckets: dict[str, dict[str, Any]] = {}
+    gnp_dates: dict[str, dict[str, Any]] = {}
+    delayed_complexity_rows: list[dict[str, Any]] = []
+
+    def product_bucket(product_type: str) -> dict[str, Any]:
+        return product_buckets.setdefault(product_type, {
+            "product_type": product_type,
+            "folder_day_count": 0,
+            "runtime_min": 0.0,
+            "spare_time_min": 0.0,
+            "loss_time_min": 0.0,
+            "waiting_time_min": 0.0,
+            "lpr_to_start_min": 0.0,
+            "reflong_time_min": 0.0,
+            "change_over_time_min": 0.0,
+            "downtime_min": 0.0,
+            "overrun_min": 0.0,
+            "delayed_folder_day_count": 0,
+        })
+
+    for row in folder_rows or []:
+        if not _is_active_folder_row(row):
+            continue
+        segments = _runtime_segment_rows(row)
+        gnp_runtime = sum(_number(seg.get("minutes")) for seg in segments if _is_gnp_segment(seg))
+        snp_runtime = sum(_number(seg.get("minutes")) for seg in segments if _is_snp_segment(seg))
+        total_classified_runtime = gnp_runtime + snp_runtime
+        if total_classified_runtime <= 0:
+            continue
+
+        run_date = _clean_text(row.get("run_date"))
+        folder = _display_resource_name(row.get("folder"))
+        runtime = _number(row.get("runtime"))
+        loss_time = _loss_time_minutes(row)
+        waiting_time = _number(row.get("waiting_time"))
+        lpr_to_start = _number(row.get("late_start_time"))
+        reflong_time = _number(row.get("reflong_related_downtime"))
+        change_over_time = _number(row.get("change_over_time"))
+        downtime = _number(row.get("downtime"))
+        spare_time = _number(row.get("buffer_time"))
+        overrun = _number(row.get("overrun_minutes"))
+        row_codes = _complexity_codes_for_segments(segments)
+        row_categories = _complexity_categories_for_segments(segments)
+
+        product_shares = []
+        if gnp_runtime > 0:
+            product_shares.append(("GNP", gnp_runtime / total_classified_runtime, gnp_runtime))
+        if snp_runtime > 0:
+            product_shares.append(("SNP", snp_runtime / total_classified_runtime, snp_runtime))
+
+        for product_type, share, product_runtime in product_shares:
+            bucket = product_bucket(product_type)
+            bucket["folder_day_count"] += 1
+            bucket["runtime_min"] += product_runtime
+            bucket["spare_time_min"] += spare_time * share
+            bucket["loss_time_min"] += loss_time * share
+            bucket["waiting_time_min"] += waiting_time * share
+            bucket["lpr_to_start_min"] += lpr_to_start * share
+            bucket["reflong_time_min"] += reflong_time * share
+            bucket["change_over_time_min"] += change_over_time * share
+            bucket["downtime_min"] += downtime * share
+            bucket["overrun_min"] += overrun * share
+            if overrun > 0:
+                bucket["delayed_folder_day_count"] += 1
+
+        if gnp_runtime > 0:
+            date_bucket = gnp_dates.setdefault(run_date, {
+                "run_date": run_date,
+                "folders": set(),
+                "spare_time_min": 0.0,
+            })
+            if folder:
+                date_bucket["folders"].add(folder)
+            date_bucket["spare_time_min"] += spare_time
+
+            folder_bucket = gnp_folder_buckets.setdefault(folder, {
+                "folder": folder,
+                "gnp_folder_day_count": 0,
+                "loss_time_min": 0.0,
+                "change_over_time_min": 0.0,
+                "lpr_to_start_min": 0.0,
+                "reflong_time_min": 0.0,
+            })
+            folder_bucket["gnp_folder_day_count"] += 1
+            folder_bucket["loss_time_min"] += loss_time
+            folder_bucket["change_over_time_min"] += change_over_time
+            folder_bucket["lpr_to_start_min"] += lpr_to_start
+            folder_bucket["reflong_time_min"] += reflong_time
+
+        if overrun > 0:
+            delayed_complexity_rows.append({
+                "run_date": run_date,
+                "folder": folder,
+                "print_finish_time": _print_finish_clock_time(row.get("actual_print_finish_time")),
+                "estimated_print_finish_time": _format_clock_time(_pf_compliance_minutes(row.get("plant_name")) + overrun),
+                "overrun_minutes": _clean_number(overrun),
+                "product_mix": "/".join(product for product, _, _ in product_shares),
+                "has_gnp": gnp_runtime > 0,
+                "has_snp": snp_runtime > 0,
+                "complexity_codes": row_codes,
+                "complexity_categories": row_categories,
+                "editions": _editions_for_rows([row]),
+                "largest_components": _largest_delayed_pf_components(row),
+            })
+
+    comparison_rows = []
+    for product_type in ("GNP", "SNP"):
+        bucket = product_buckets.get(product_type)
+        if not bucket:
+            continue
+        count = max(int(bucket["folder_day_count"]), 1)
+        delayed_count = int(bucket["delayed_folder_day_count"])
+        comparison_rows.append({
+            "product_type": product_type,
+            "folder_day_count": int(bucket["folder_day_count"]),
+            "total_runtime_min": _clean_number(bucket["runtime_min"]),
+            "avg_spare_time_min": _clean_number(bucket["spare_time_min"] / count),
+            "avg_loss_time_min": _clean_number(bucket["loss_time_min"] / count),
+            "avg_waiting_time_min": _clean_number(bucket["waiting_time_min"] / count),
+            "avg_lpr_to_start_min": _clean_number(bucket["lpr_to_start_min"] / count),
+            "avg_reflong_time_min": _clean_number(bucket["reflong_time_min"] / count),
+            "avg_downtime_min": _clean_number(bucket["downtime_min"] / count),
+            "avg_change_over_time_min": _clean_number(bucket["change_over_time_min"] / count),
+            "delayed_folder_day_count": delayed_count,
+            "delayed_folder_day_pct": _percentage(delayed_count, bucket["folder_day_count"]),
+            "avg_overrun_min": _clean_number(bucket["overrun_min"] / count),
+        })
+
+    gnp_loss_breakdown = []
+    for bucket in gnp_folder_buckets.values():
+        count = max(int(bucket["gnp_folder_day_count"]), 1)
+        gnp_loss_breakdown.append({
+            "folder": bucket["folder"],
+            "gnp_folder_day_count": int(bucket["gnp_folder_day_count"]),
+            "total_loss_time_min": _clean_number(bucket["loss_time_min"]),
+            "avg_loss_time_min": _clean_number(bucket["loss_time_min"] / count),
+            "change_over_time_min": _clean_number(bucket["change_over_time_min"]),
+            "lpr_to_start_min": _clean_number(bucket["lpr_to_start_min"]),
+            "reflong_time_min": _clean_number(bucket["reflong_time_min"]),
+        })
+    gnp_loss_breakdown.sort(key=lambda row: (-_number(row.get("total_loss_time_min")), row.get("folder", "")))
+
+    nights_with_min_3 = []
+    for bucket in gnp_dates.values():
+        folders = sorted(bucket["folders"])
+        count = len(folders)
+        if count < 3:
+            continue
+        nights_with_min_3.append({
+            "run_date": bucket["run_date"],
+            "gnp_folder_count": count,
+            "total_spare_time_min": _clean_number(bucket["spare_time_min"]),
+            "avg_spare_time_min": _clean_number(bucket["spare_time_min"] / count) if count else 0,
+            "folders": folders,
+        })
+    nights_with_min_3.sort(key=lambda row: row["run_date"])
+
+    delayed_complexity_rows.sort(key=lambda row: (-_number(row.get("overrun_minutes")), row.get("run_date", ""), row.get("folder", "")))
+
+    web_break_rows = _build_web_break_gnp_snp_tower_comparison(tower_day_rows, tower_reason_attribution)
+
+    return {
+        "definition": (
+            "Base GNP includes C5-C15 and base SNP includes C1-C4. "
+            "When a folder/night contains both, row-level non-runtime metrics are allocated by classified runtime share."
+        ),
+        "comparison_by_product_type": comparison_rows,
+        "gnp_loss_breakdown_by_folder": gnp_loss_breakdown,
+        "nights_with_min_3_gnp_folders": nights_with_min_3,
+        "delayed_finish_complexity": delayed_complexity_rows,
+        "web_break_gnp_snp_tower_comparison": web_break_rows,
+        "correlation_summary": _gnp_snp_delay_correlation_summary(comparison_rows),
+    }
+
+
+def _build_web_break_gnp_snp_tower_comparison(
+    tower_day_rows: list[dict[str, Any]],
+    tower_reason_attribution: dict[str, Any],
+) -> list[dict[str, Any]]:
+    target_aliases = {
+        "colorman c pu5": ["colorman c", "pu 5"],
+        "colorman d pu5": ["colorman d", "pu 5"],
+        "groman b pu4": ["groman b", "pu 4"],
+        "geoman b pu4": ["geoman b", "pu 4"],
+    }
+    def normalized(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", _clean_text(value).casefold()).strip()
+
+    product_runtime_by_tower: dict[str, dict[str, Any]] = {}
+    for row in tower_day_rows or []:
+        tower = _clean_text(row.get("tower"))
+        if not tower:
+            continue
+        bucket = product_runtime_by_tower.setdefault(tower, {
+            "GNP": 0.0,
+            "SNP": 0.0,
+            "gnp_tower_day_count": 0,
+            "snp_tower_day_count": 0,
+        })
+        has_gnp = False
+        has_snp = False
+        for segment in row.get("runtime_segments") or []:
+            minutes = _number(segment.get("minutes"))
+            if _is_gnp_segment(segment):
+                bucket["GNP"] += minutes
+                has_gnp = True
+            elif _is_snp_segment(segment):
+                bucket["SNP"] += minutes
+                has_snp = True
+        if has_gnp:
+            bucket["gnp_tower_day_count"] += 1
+        if has_snp:
+            bucket["snp_tower_day_count"] += 1
+
+    rows = []
+    for attr in (tower_reason_attribution.get("by_tower_reason") or []):
+        reason = _clean_text(attr.get("reason")).casefold()
+        if "web break" not in reason:
+            continue
+        tower = _clean_text(attr.get("tower"))
+        tower_norm = normalized(tower)
+        if not any(all(part in tower_norm for part in parts) for parts in target_aliases.values()):
+            continue
+        event_count = int(attr.get("attributed_event_count") or 0)
+        total_minutes = _number(attr.get("attributed_minutes"))
+        runtime_bucket = product_runtime_by_tower.get(tower, {})
+        gnp_runtime = _number(runtime_bucket.get("GNP"))
+        snp_runtime = _number(runtime_bucket.get("SNP"))
+        rows.append({
+            "tower": tower,
+            "reason": attr.get("reason"),
+            "attributed_event_count": event_count,
+            "attributed_minutes": _clean_number(total_minutes),
+            "avg_minutes_per_event": _clean_number(total_minutes / event_count) if event_count else 0,
+            "gnp_runtime_min": _clean_number(gnp_runtime),
+            "snp_runtime_min": _clean_number(snp_runtime),
+            "gnp_tower_day_count": int(runtime_bucket.get("gnp_tower_day_count") or 0),
+            "snp_tower_day_count": int(runtime_bucket.get("snp_tower_day_count") or 0),
+            "can_split_web_break_by_product_type": False,
+            "matching_note": (
+                "Web break reason rows are attributed to the tower at plant/machine/folder level. "
+                "They can be compared with the tower's GNP/SNP runtime mix, but the event itself is not stored with product type."
+            ),
+        })
+    rows.sort(key=lambda row: row.get("tower", ""))
+    return rows
+
+
+def _gnp_snp_delay_correlation_summary(comparison_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_type = {row.get("product_type"): row for row in comparison_rows}
+    gnp = by_type.get("GNP") or {}
+    snp = by_type.get("SNP") or {}
+    if not gnp or not snp:
+        return {}
+    return {
+        "metric": "delayed folder-day rate and average overrun by product type",
+        "gnp_delayed_folder_day_pct": gnp.get("delayed_folder_day_pct"),
+        "snp_delayed_folder_day_pct": snp.get("delayed_folder_day_pct"),
+        "gnp_avg_overrun_min": gnp.get("avg_overrun_min"),
+        "snp_avg_overrun_min": snp.get("avg_overrun_min"),
+        "interpretation_rule": "Use this as an association/correlation signal, not proof of root cause.",
+    }
 
 
 def _gnp_night_lookup(folder_rows: list[dict[str, Any]]) -> dict[str, bool]:

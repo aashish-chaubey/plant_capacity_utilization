@@ -17,6 +17,7 @@ notebools/
 *.ipynb
 queries.txt
 backend/logs/
+backend/.cache/
 
 # Ignore environment variable files
 .env

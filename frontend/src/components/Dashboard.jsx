@@ -213,6 +213,10 @@ export default function Dashboard({
         chart: payload.chart || null,
         confidence: payload.confidence ?? null,
         refined: payload.refined ?? false,
+        status: payload.status || "",
+        detail: payload.detail || "",
+        llmUsed: payload.llm_used ?? false,
+        llmStatus: payload.llm_status || "",
       }]);
     } catch {
       setChatMessages([...nextMessages, {
@@ -491,12 +495,17 @@ export default function Dashboard({
                     {msg.role === "assistant" && msg.chart && (
                       <ChatChart chart={msg.chart} />
                     )}
-                    {msg.role === "assistant" && msg.refined && (
+                    {msg.role === "assistant" && msg.refined && msg.llmUsed && (
                       <div className="ml-1 mt-1 flex items-center gap-1.5 text-xs text-violet-600">
                         <svg className="h-3 w-3 shrink-0" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                           <path d="M6 1l1.2 2.4L10 4.2l-2 1.95.47 2.75L6 7.6l-2.47 1.3L4 6.15 2 4.2l2.8-.8z"/>
                         </svg>
                         Enhanced with full AI analysis
+                      </div>
+                    )}
+                    {msg.role === "assistant" && msg.detail && msg.status !== "ok" && (
+                      <div className="ml-1 mt-1 text-xs text-slate-400">
+                        {msg.detail}
                       </div>
                     )}
                     {msg.role === "assistant" && !msg.refined && msg.confidence !== null && msg.confidence !== undefined && (
@@ -1237,12 +1246,8 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                 className="cursor-pointer"
               >
                 {segmentLayouts.map((layout) => {
-                  const { segment, segmentHeight, y, sparePercent, runtimeLabelText, runtimeLabelFontSize, canShowComplexIcon, canShowRuntimeLabel } = layout;
+                  const { segment, segmentHeight, y, runtimeLabelText, runtimeLabelFontSize, canShowComplexIcon, canShowRuntimeLabel } = layout;
                   const fill = getSegmentFill(segment);
-                  const canShowSpareLabel = segment.key === "spare_time" && sparePercent > 0;
-                  const showSpareLabelAboveBar = canShowSpareLabel && segmentHeight < 22;
-                  const spareLabel = `${Math.round(sparePercent)}%`;
-                  const spareLabelY = Math.max(margins.top + 10, y - 8);
                   const textRotation = `rotate(-90 ${x + barWidth / 2} ${y + segmentHeight / 2})`;
 
                   return (
@@ -1286,59 +1291,50 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                           {runtimeLabelText}
                         </text>
                       )}
-                      {canShowSpareLabel && showSpareLabelAboveBar && (
-                        <g pointerEvents="none">
-                          <rect
-                            x={x + barWidth / 2 - 14}
-                            y={spareLabelY - 13}
-                            width="28"
-                            height="16"
-                            rx="3"
-                            fill="#ffffff"
-                            fillOpacity="0.88"
-                            stroke="#cbd5e1"
-                            strokeWidth="0.5"
-                          />
-                          <text
-                            x={x + barWidth / 2}
-                            y={spareLabelY}
-                            textAnchor="middle"
-                            fontSize="10"
-                            fontWeight="800"
-                            fill="#1e3a5f"
-                          >
-                            {spareLabel}
-                          </text>
-                        </g>
-                      )}
-                      {canShowSpareLabel && !showSpareLabelAboveBar && (
-                        <g pointerEvents="none">
-                          {barWidth < 30 && (
-                            <rect
-                              x={x + barWidth / 2 - 13}
-                              y={y + segmentHeight / 2 - 8}
-                              width="26"
-                              height="15"
-                              rx="3"
-                              fill="#ffffff"
-                              fillOpacity="0.72"
-                            />
-                          )}
-                          <text
-                            x={x + barWidth / 2}
-                            y={y + segmentHeight / 2 + 4}
-                            textAnchor="middle"
-                            fontSize="11"
-                            fontWeight="800"
-                            fill="#1e3a5f"
-                          >
-                            {spareLabel}
-                          </text>
-                        </g>
-                      )}
                     </g>
                   );
                 })}
+                {segmentLayouts
+                  .filter((layout) => layout.segment.key === "spare_time" && layout.sparePercent > 0)
+                  .map((layout) => {
+                    const { segment, segmentHeight, y, sparePercent } = layout;
+                    const showSpareLabelAboveBar = segmentHeight < 22;
+                    const spareLabel = `${Math.round(sparePercent)}%`;
+                    const labelX = x + barWidth / 2;
+                    const labelY = showSpareLabelAboveBar
+                      ? Math.max(margins.top + 10, y - 8)
+                      : y + segmentHeight / 2 + 4;
+                    const labelWidth = Math.max(28, spareLabel.length * 7 + 10);
+                    const showLabelBackground = showSpareLabelAboveBar || barWidth < 30;
+
+                    return (
+                      <g key={`${segment.key}-label`} pointerEvents="none">
+                        {showLabelBackground && (
+                          <rect
+                            x={labelX - labelWidth / 2}
+                            y={labelY - 13}
+                            width={labelWidth}
+                            height="16"
+                            rx="3"
+                            fill="#ffffff"
+                            fillOpacity={showSpareLabelAboveBar ? "0.88" : "0.72"}
+                            stroke={showSpareLabelAboveBar ? "#cbd5e1" : "transparent"}
+                            strokeWidth="0.5"
+                          />
+                        )}
+                        <text
+                          x={labelX}
+                          y={labelY}
+                          textAnchor="middle"
+                          fontSize={showSpareLabelAboveBar ? "10" : "11"}
+                          fontWeight="700"
+                          fill="#1e3a5f"
+                        >
+                          {spareLabel}
+                        </text>
+                      </g>
+                    );
+                  })}
                 {externalComplexMarkers.map((marker) => (
                   <ComplexPrintMarker
                     key={`complex-marker-${marker.segment.key}-${marker.index}`}
