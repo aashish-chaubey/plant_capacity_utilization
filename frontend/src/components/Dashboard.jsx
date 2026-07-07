@@ -50,7 +50,7 @@ const CAPACITY_SPLIT_LEGEND = [
   { key: "runtime_snp", label: "Run Time: SNP", color: CAPACITY_SPLIT_COLORS.runtime_snp },
   { key: "runtime_gnp", label: "Run Time: GNP", color: CAPACITY_SPLIT_COLORS.runtime_gnp },
   { key: "spare_time", label: "Spare Time", color: CAPACITY_SPLIT_COLORS.spare_time },
-  { key: "idle_time", label: "Unused Capacity", color: CAPACITY_SPLIT_COLORS.idle_time, pattern: "idle" },
+  { key: "idle_time", label: "Unplanned Capacity", color: CAPACITY_SPLIT_COLORS.idle_time, pattern: "idle" },
   { key: "complex_prints", label: "Complex prints", marker: "triangle" },
   { key: "twin_folder", label: "Twin folders", marker: "twin" }
 ];
@@ -97,7 +97,7 @@ const BREAKDOWN_STACKS = [
 ];
 const UNPLANNED_BREAKDOWN_STACK = {
   key: "idle_time",
-  label: "Unused Capacity",
+  label: "Unplanned Capacity",
   color: CAPACITY_SPLIT_COLORS.idle_time
 };
 const FOLDER_BREAKDOWN_STACKS = [...BREAKDOWN_STACKS, UNPLANNED_BREAKDOWN_STACK];
@@ -299,20 +299,20 @@ export default function Dashboard({
   const totalActiveTowerCapacity = Number(data.summary.active_tower_days || 0);
   const plannedAvailableCapacity = Math.max(totalAvailableCapacity - Number(data.summary.total_idle_time || 0), 0);
   const kpis = [
-    ["Available Time", formatPercent(totalAvailableCapacity > 0 ? 100 : 0), "blue", formatKpiDuration(totalAvailableCapacity)],
-    ["Runtime", formatPercent(calculatePercentage(data.summary.total_runtime, plannedAvailableCapacity)), "green", formatKpiDuration(data.summary.total_runtime)],
-    ["Wait Time", formatPercent(calculatePercentage(data.summary.total_waiting_time, plannedAvailableCapacity)), "wait", formatKpiDuration(data.summary.total_waiting_time)],
-    ["Lost Time", formatPercent(calculatePercentage(data.summary.total_lost_time, plannedAvailableCapacity)), "amber", formatKpiDuration(data.summary.total_lost_time)],
-    ["Downtime", formatPercent(calculatePercentage(data.summary.total_downtime, totalAvailableCapacity)), "red", formatKpiDuration(data.summary.total_downtime)],
-    ["Spare Time", formatPercent(calculatePercentage(data.summary.total_buffer_time, plannedAvailableCapacity)), "spare", formatKpiDuration(data.summary.total_buffer_time)],
-    ["Unused Capacity", formatPercent(calculatePercentage(data.summary.total_idle_time, totalAvailableCapacity)), "unplanned", formatKpiDuration(data.summary.total_idle_time)],
+    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity) },
+    { label: "Runtime",            valuePlanned: formatPercent(calculatePercentage(data.summary.total_runtime,      plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_runtime,      totalAvailableCapacity)), tone: "green",     detail: formatKpiDuration(data.summary.total_runtime) },
+    { label: "Wait Time",          valuePlanned: formatPercent(calculatePercentage(data.summary.total_waiting_time, plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), tone: "wait",      detail: formatKpiDuration(data.summary.total_waiting_time) },
+    { label: "Lost Time",          valuePlanned: formatPercent(calculatePercentage(data.summary.total_lost_time,    plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_lost_time,    totalAvailableCapacity)), tone: "amber",     detail: formatKpiDuration(data.summary.total_lost_time) },
+    { label: "Downtime",           valuePlanned: formatPercent(calculatePercentage(data.summary.total_downtime,     plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_downtime,     totalAvailableCapacity)), tone: "red",       detail: formatKpiDuration(data.summary.total_downtime) },
+    { label: "Spare Time",         valuePlanned: formatPercent(calculatePercentage(data.summary.total_buffer_time,  plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_buffer_time,  totalAvailableCapacity)), tone: "spare",     detail: formatKpiDuration(data.summary.total_buffer_time) },
+    { label: "Unplanned Capacity", value: formatPercent(calculatePercentage(data.summary.total_idle_time,          totalAvailableCapacity)),                                                                                                                 tone: "unplanned", detail: formatKpiDuration(data.summary.total_idle_time) },
   ];
 
   return (
     <div className="mt-5 space-y-5">
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-        {kpis.map(([label, value, tone, detail]) => (
-          <KpiCard key={label} label={label} value={value} detail={detail} tone={tone} />
+        {kpis.map((kpi) => (
+          <KpiCard key={kpi.label} {...kpi} />
         ))}
       </section>
 
@@ -663,7 +663,7 @@ const CHAT_CAPACITY_SLICE_COLORS = {
   "Downtime": CAPACITY_SPLIT_COLORS.downtime,
   "Wait Time": CAPACITY_SPLIT_COLORS.waiting_time,
   "Spare Time": CAPACITY_SPLIT_COLORS.spare_time,
-  "Unused Capacity": CAPACITY_SPLIT_COLORS.idle_time,
+  "Unplanned Capacity": CAPACITY_SPLIT_COLORS.idle_time,
 };
 
 function ChatChart({ chart }) {
@@ -1884,7 +1884,7 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
         />
         {showIdleTime && (
           <TooltipRow
-            label="Unused Capacity"
+            label="Unplanned Capacity"
             value={`${formatMinutes(row.idle_time)} (${formatPercent(row.idle_time_percentage)})`}
             color={CAPACITY_SPLIT_COLORS.idle_time}
           />
@@ -2477,7 +2477,7 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
       },
       {
         key: "idle_time",
-        label: "Unused Capacity",
+        label: "Unplanned Capacity",
         value: idleTime,
         color: CAPACITY_SPLIT_COLORS.idle_time
       }
@@ -2546,7 +2546,7 @@ function buildPlantCapacityPeriodSummary(selectedPeriod, periodRows) {
       },
       {
         key: "idle_time",
-        label: "Unused Capacity",
+        label: "Unplanned Capacity",
         value: idleTime,
         color: CAPACITY_SPLIT_COLORS.idle_time
       }
@@ -2702,7 +2702,7 @@ function buildCapacitySegments(values, capacityLimit = CAPACITY_WINDOW_MINUTES) 
     },
     {
       key: "idle_time",
-      label: "Unused Capacity",
+      label: "Unplanned Capacity",
       value: values.idle_time,
       color: CAPACITY_SPLIT_COLORS.idle_time
     }

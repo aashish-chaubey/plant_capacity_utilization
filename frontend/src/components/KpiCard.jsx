@@ -1,4 +1,4 @@
-export default function KpiCard({ label, value, detail = "", tone = "slate" }) {
+export default function KpiCard({ label, value, valuePlanned, valueAvailable, detail = "", tone = "slate" }) {
   const tones = {
     blue: { className: "border-blue-200 bg-blue-50 text-blue-800" },
     green: { className: "text-slate-950", bg: "#B2CFB2", border: "#B2CFB2" },
@@ -26,8 +26,21 @@ export default function KpiCard({ label, value, detail = "", tone = "slate" }) {
   return (
     <article className={`rounded-lg border p-3 shadow-sm ${selectedTone.className}`} style={style}>
       <p className="text-xs font-semibold uppercase tracking-normal opacity-75">{label}</p>
-      <p className="mt-2 text-2xl font-semibold tracking-normal">{value}</p>
-{detail && <p className="mt-1 truncate text-xs font-semibold opacity-70">{detail}</p>}
+      {valuePlanned != null ? (
+        <>
+          <p className="mt-2">
+            <span className="text-2xl font-semibold tracking-normal">{valuePlanned}</span>
+            <span className="ml-1 text-xs font-medium opacity-60">of Planned Time</span>
+          </p>
+          {detail && <p className="mt-1 truncate text-xs font-semibold opacity-70">{detail}</p>}
+          <p className="mt-1 text-right" style={{ fontSize: "0.6rem", opacity: 0.4 }}>{valueAvailable} of Available Time</p>
+        </>
+      ) : (
+        <>
+          <p className="mt-2 text-2xl font-semibold tracking-normal">{value}</p>
+          {detail && <p className="mt-1 truncate text-xs font-semibold opacity-70">{detail}</p>}
+        </>
+      )}
     </article>
   );
 }
