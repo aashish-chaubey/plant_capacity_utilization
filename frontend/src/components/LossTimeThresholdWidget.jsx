@@ -39,10 +39,10 @@ export default function LossTimeThresholdWidget({ details }) {
           </span>
           <div>
             <h2 className="text-base font-semibold text-slate-950">
-              Loss time threshold · complexity-based
+              Lost time threshold · complexity-based
             </h2>
             <p className="text-xs text-slate-500">
-              Max affordable loss time derived from {totalFolderDays} folder-day{totalFolderDays === 1 ? "" : "s"} of historical data
+              Max affordable lost time derived from {totalFolderDays} folder-day{totalFolderDays === 1 ? "" : "s"} of historical data
             </p>
           </div>
         </div>
@@ -94,7 +94,7 @@ export default function LossTimeThresholdWidget({ details }) {
             <p>
               <strong className="text-slate-900">Why complexity matters:</strong>{" "}
               Complex variants (SNP C4, GNP C9–C15) run significantly slower than
-              simple variants. A heavy-complex day leaves far less room for loss time
+              simple variants. A heavy-complex day leaves far less room for lost time
               within the 240-minute window before risking a 04:00 AM overrun.
               The threshold self-adjusts — it is lower on complex-mix days and higher
               on fast, simple-print days.

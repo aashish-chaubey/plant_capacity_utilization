@@ -28,11 +28,11 @@ const TIMEFRAME_TABS = [
 const METRIC_DEFINITIONS = [
   {
     term: "Wait Time",
-    definition: "Idle time at the start of the 00:00 window where the press cannot operate because editorial LPR has not been issued. Wait ends when LPR is issued. If an earlier edition finishes before LPR for the next edition, the PF-to-LPR gap also counts as Wait."
+    definition: "Waiting for actual LPR after LPRS."
   },
   {
-    term: "Loss Time",
-    definition: "Preparation time after editorial release and before printing. Components are Makeready from LPR to Press Start, Changeover from Print Finish to Press Start when a physical change is required, and Reflong changeover losses."
+    term: "Lost Time",
+    definition: "Preparation time after editorial release and before printing. Components are Makeready from LPR to Press Start, Changeover from Print Finish to Press Start, and Reflong changeover."
   },
   {
     term: "Downtime",
@@ -44,19 +44,11 @@ const METRIC_DEFINITIONS = [
   },
   {
     term: "Spare Time",
-    definition: "Unused capacity remaining within the 00:00-04:00 reference window after all other components are accounted for. Formula: Spare Time = 240 - (Wait + Loss + Downtime + Run). Spare Time cannot be negative."
+    definition: "Unused capacity remaining within the 00:00-04:00 (Regardless of the early PF schedule of 3 plants) reference window after all other components are accounted for. Formula: Spare Time = 240 min - (Wait + Loss + Downtime + Run). Spare Time cannot be negative."
   },
   {
-    term: "Unused Capacity",
+    term: "Unplanned Capacity",
     definition: "Periods where the folder or tower was not scheduled or available for production."
-  },
-  {
-    term: "Utilized Time / Utilisation",
-    definition: "Runtime (SNP + GNP) + Loss Time + Downtime. Wait Time, Spare Time, and Unused Capacity are not included."
-  },
-  {
-    term: "GNP/UV Night",
-    definition: "Any night where at least one folder runs a GNP or GNP Complex edition, meaning C5-C15. If no GNP or GNP Complex edition runs, the night is SNP/non-UV."
   },
 ];
 

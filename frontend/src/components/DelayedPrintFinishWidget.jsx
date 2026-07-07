@@ -73,7 +73,7 @@ export default function DelayedPrintFinishWidget({ details }) {
         </span>
         <div>
           <h3 className="text-base font-semibold text-slate-950">
-            Folderwise Delayed PF
+            Summary of Print Finish Delay in Selected Period
           </h3>
           <p className="mt-1 text-sm text-slate-500">
             {formatNumber(analysis.folderBreaches.length)} breach{analysis.folderBreaches.length === 1 ? "" : "es"}
@@ -107,7 +107,7 @@ function DelayCauseDonut({ rows, topCause, delayedPlantDays }) {
   return (
     <aside className="rounded-lg border border-slate-100 bg-slate-50 p-3">
       <div className="flex items-center justify-between gap-3">
-        <h4 className="text-sm font-semibold text-slate-950">Plant-level cause mix</h4>
+        <h4 className="text-sm font-semibold text-slate-950">Root cause mix</h4>
         <span className="text-xs font-semibold text-slate-500">
           {formatNumber(delayedPlantDays)} delayed day{delayedPlantDays === 1 ? "" : "s"}
         </span>

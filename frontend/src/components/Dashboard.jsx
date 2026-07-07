@@ -45,7 +45,7 @@ const CAPACITY_SPLIT_COLORS = {
 
 const CAPACITY_SPLIT_LEGEND = [
   { key: "waiting_time", label: "Wait Time", color: CAPACITY_SPLIT_COLORS.waiting_time },
-  { key: "loss_time", label: "Loss Time", color: CAPACITY_SPLIT_COLORS.loss_time },
+  { key: "loss_time", label: "Lost Time", color: CAPACITY_SPLIT_COLORS.loss_time },
   { key: "downtime", label: "Downtime", color: CAPACITY_SPLIT_COLORS.downtime },
   { key: "runtime_snp", label: "Run Time: SNP", color: CAPACITY_SPLIT_COLORS.runtime_snp },
   { key: "runtime_gnp", label: "Run Time: GNP", color: CAPACITY_SPLIT_COLORS.runtime_gnp },
@@ -89,7 +89,7 @@ const FOLDER_ALIAS_COLORS = ["#2563eb", "#7c3aed", "#dc2626", "#d97706", "#05966
 
 const BREAKDOWN_STACKS = [
   { key: "waiting_time", label: "Wait time", color: CAPACITY_SPLIT_COLORS.waiting_time },
-  { key: "loss_time", label: "Loss time", color: CAPACITY_SPLIT_COLORS.loss_time },
+  { key: "loss_time", label: "Lost Time", color: CAPACITY_SPLIT_COLORS.loss_time },
   { key: "downtime", label: "Downtime", color: CAPACITY_SPLIT_COLORS.downtime },
   { key: "runtime_snp", label: "Run Time: SNP", color: RUNTIME_SEGMENT_STYLES.snp.color },
   { key: "runtime_gnp", label: "Run Time: GNP", color: RUNTIME_SEGMENT_STYLES.gnp.color },
@@ -466,7 +466,7 @@ export default function Dashboard({
             <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
               {chatMessages.length === 0 && (
                 <p className="mt-8 text-center text-xs text-slate-400">
-                  Ask about towers, folders, utilization, or loss time.
+                  Ask about towers, folders, utilization, or lost time.
                 </p>
               )}
               {chatMessages.map((msg, idx) => (
@@ -659,7 +659,7 @@ const CHAT_CAPACITY_SLICE_COLORS = {
   "Run Time": CAPACITY_SPLIT_COLORS.runtime,
   "Run Time: SNP": CAPACITY_SPLIT_COLORS.runtime_snp,
   "Run Time: GNP": CAPACITY_SPLIT_COLORS.runtime_gnp,
-  "Loss Time": CAPACITY_SPLIT_COLORS.loss_time,
+  "Lost Time": CAPACITY_SPLIT_COLORS.loss_time,
   "Downtime": CAPACITY_SPLIT_COLORS.downtime,
   "Wait Time": CAPACITY_SPLIT_COLORS.waiting_time,
   "Spare Time": CAPACITY_SPLIT_COLORS.spare_time,
@@ -1846,7 +1846,7 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
           color={CAPACITY_SPLIT_COLORS.waiting_time}
         />
         <TooltipRow
-          label="Loss time"
+          label="Lost Time"
           value={`${formatMinutes(row.loss_time)} (${formatPercent(row.loss_time_percentage)})`}
           color={CAPACITY_SPLIT_COLORS.loss_time}
         />
@@ -2453,7 +2453,7 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
       },
       {
         key: "loss_time",
-        label: "Loss Time",
+        label: "Lost Time",
         value: lossTime,
         color: CAPACITY_SPLIT_COLORS.loss_time
       },
@@ -2522,7 +2522,7 @@ function buildPlantCapacityPeriodSummary(selectedPeriod, periodRows) {
       },
       {
         key: "loss_time",
-        label: "Loss Time",
+        label: "Lost Time",
         value: lossTime,
         color: CAPACITY_SPLIT_COLORS.loss_time
       },
@@ -2683,7 +2683,7 @@ function buildCapacitySegments(values, capacityLimit = CAPACITY_WINDOW_MINUTES) 
     },
     {
       key: "loss_time",
-      label: "Loss Time",
+      label: "Lost Time",
       value: values.loss_time,
       color: CAPACITY_SPLIT_COLORS.loss_time
     },

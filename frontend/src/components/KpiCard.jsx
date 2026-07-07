@@ -33,7 +33,7 @@ export default function KpiCard({ label, value, valuePlanned, valueAvailable, de
             <span className="ml-1 text-xs font-medium opacity-60">of Planned Time</span>
           </p>
           {detail && <p className="mt-1 truncate text-xs font-semibold opacity-70">{detail}</p>}
-          <p className="mt-1 text-right" style={{ fontSize: "0.6rem", opacity: 0.4 }}>{valueAvailable} of Available Time</p>
+          <p className="mt-1 text-right" style={{ fontSize: "0.8rem", opacity: 0.5 }}>{valueAvailable} of Available Time</p>
         </>
       ) : (
         <>
