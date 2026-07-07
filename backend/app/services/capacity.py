@@ -635,13 +635,26 @@ def _build_plant_date_universe(book_df: pd.DataFrame) -> list[tuple[date, str]]:
     if book_df.empty or REPORT_DATE_COLUMN not in book_df.columns or "Plant Name" not in book_df.columns:
         return []
 
-    plant_dates = {
-        (row[REPORT_DATE_COLUMN], _clean_text(row.get("Plant Name")))
-        for _, row in book_df.iterrows()
-        if row[REPORT_DATE_COLUMN] is not None
-        and not pd.isna(row[REPORT_DATE_COLUMN])
-        and _clean_text(row.get("Plant Name"))
-    }
+    valid = book_df[
+        book_df[REPORT_DATE_COLUMN].notna()
+        & book_df["Plant Name"].notna()
+        & (book_df["Plant Name"].astype(str).str.strip() != "")
+    ]
+
+    if valid.empty:
+        return []
+
+    all_plants = {_clean_text(p) for p in valid["Plant Name"].unique() if _clean_text(p)}
+    min_date: date = valid[REPORT_DATE_COLUMN].min()
+    max_date: date = valid[REPORT_DATE_COLUMN].max()
+
+    all_dates: list[date] = []
+    current = min_date
+    while current <= max_date:
+        all_dates.append(current)
+        current += timedelta(days=1)
+
+    plant_dates = {(d, plant) for d in all_dates for plant in all_plants}
 
     return sorted(plant_dates, key=lambda item: (item[0], item[1]))
 
@@ -2023,7 +2036,7 @@ def _effective_runtime_minutes(row: pd.Series) -> float:
     start_dt = row.get("Effective Start DateTime")
     end_dt = row.get("Effective End DateTime")
     if pd.notna(start_dt) and pd.notna(end_dt):
-        interval_runtime = max((pd.Timestamp(end_dt) - pd.Timestamp(start_dt)).total_seconds() / 60, 0.0)
+        interval_runtime = max(round((pd.Timestamp(end_dt) - pd.Timestamp(start_dt)).total_seconds() / 60), 0)
         if source_runtime > 0:
             return min(source_runtime, interval_runtime)
         return interval_runtime
@@ -2121,7 +2134,7 @@ def _scale_runtime_segments(value: Any, runtime_minutes: float, downtime_minutes
             continue
 
         scaled = dict(segment)
-        scaled["minutes"] = _clean_number(source_minutes * scale)
+        scaled["minutes"] = round(source_minutes * scale)
         for metric_key in ("print_order", "source_print_order"):
             if metric_key in scaled:
                 scaled[metric_key] = _clean_number(float(scaled.get(metric_key) or 0) * scale)

@@ -47,25 +47,17 @@ const METRIC_DEFINITIONS = [
     definition: "Unused capacity remaining within the 00:00-04:00 reference window after all other components are accounted for. Formula: Spare Time = 240 - (Wait + Loss + Downtime + Run). Spare Time cannot be negative."
   },
   {
-    term: "Unplanned Time",
+    term: "Unused Capacity",
     definition: "Periods where the folder or tower was not scheduled or available for production."
   },
   {
-    term: "Spare Capacity",
-    definition: "The efficiency ratio of spare time relative to the window that was actually available. Formula: Spare Capacity = (Spare Time / (Total Available Time - Unplanned Time)) * 100."
-  },
-  {
     term: "Utilized Time / Utilisation",
-    definition: "Runtime (SNP + GNP) + Loss Time + Downtime. Wait Time, Spare Time, and Unplanned Time are not included."
+    definition: "Runtime (SNP + GNP) + Loss Time + Downtime. Wait Time, Spare Time, and Unused Capacity are not included."
   },
   {
     term: "GNP/UV Night",
     definition: "Any night where at least one folder runs a GNP or GNP Complex edition, meaning C5-C15. If no GNP or GNP Complex edition runs, the night is SNP/non-UV."
   },
-  {
-    term: "MALT",
-    definition: "Maximum Allowable Loss Time. Formula: MALT = 240 - P50(Wait) - P85(MOT) - P30(Spare), where MOT = Run Time + Downtime. It is calibrated per plant and complexity using on-time nights only."
-  }
 ];
 
 function normalizeApiBaseUrl(value) {
@@ -764,7 +756,7 @@ function LandingPlantSelection({ datasetMeta, fileName, plantOptions, onSelectPl
         <div className="h-full w-full bg-[linear-gradient(165deg,transparent_0_38%,rgba(37,99,235,0.10)_38.4%,transparent_39%,transparent_45%,rgba(37,99,235,0.08)_45.4%,transparent_46%,transparent_52%,rgba(14,165,233,0.08)_52.4%,transparent_53%)]" />
       </div>
 
-      <div className="relative mx-auto flex min-h-screen w-full max-w-[1220px] flex-col px-5 py-5 sm:px-8">
+      <div className="relative mx-auto flex min-h-screen w-full max-w-[1320px] flex-col px-5 py-5 sm:px-8">
         <nav className="flex items-center justify-between gap-4">
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-[0_12px_28px_rgba(37,99,235,0.25)]">
@@ -784,8 +776,8 @@ function LandingPlantSelection({ datasetMeta, fileName, plantOptions, onSelectPl
           )}
         </nav>
 
-        <div className="grid flex-1 items-center gap-8 py-8 lg:grid-cols-[0.94fr_1.06fr] lg:py-6">
-          <div className="max-w-xl">
+        <div className="grid flex-1 items-center gap-8 py-8 lg:grid-cols-[1.08fr_0.92fr] xl:gap-10 lg:py-6">
+          <div className="max-w-[660px]">
             <h1 className="text-[42px] font-black leading-[1.05] text-slate-950 sm:text-[56px] lg:text-[62px]">
               Select Your Plant. <span className="text-blue-600">Start Analysis.</span>
             </h1>
@@ -804,7 +796,7 @@ function LandingPlantSelection({ datasetMeta, fileName, plantOptions, onSelectPl
               )}
             </div>
 
-            <div className="mt-9 max-w-[520px] rounded-xl border border-blue-100 bg-white/88 p-4 shadow-[0_18px_46px_rgba(37,99,235,0.12)] backdrop-blur">
+            <div className="mt-9 max-w-[640px] rounded-xl border border-blue-100 bg-white/88 p-4 shadow-[0_18px_46px_rgba(37,99,235,0.12)] backdrop-blur">
               <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
                 {plantOptions.map((option, index) => (
                   <button
@@ -820,7 +812,7 @@ function LandingPlantSelection({ datasetMeta, fileName, plantOptions, onSelectPl
                     >
                       {plantInitials(option.label)}
                     </span>
-                    <span className="min-w-0 truncate text-sm font-extrabold text-slate-900 group-hover:text-blue-700">
+                    <span className="min-w-0 whitespace-nowrap text-sm font-extrabold text-slate-900 group-hover:text-blue-700">
                       {option.label}
                     </span>
                   </button>
@@ -879,7 +871,7 @@ function LandingCapacityPreview() {
             ["Runtime", "52%", "text-blue-600"],
             ["Loss", "17%", "text-amber-500"],
             ["Spare", "21%", "text-sky-500"],
-            ["Unplanned", "10%", "text-slate-500"],
+            ["Unused", "10%", "text-slate-500"],
           ].map(([label, value, color]) => (
             <div key={label} className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
               <p className="text-[11px] font-bold text-slate-400">{label}</p>

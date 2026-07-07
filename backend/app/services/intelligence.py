@@ -23,11 +23,6 @@ PF_COMPLIANCE_MINUTES_BY_PLANT = {
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("CAPACITY_CHAT_REQUEST_TIMEOUT_SECONDS", "180") or "180")
 CHAT_RESPONSE_MAX_TOKENS = int(os.getenv("CAPACITY_CHAT_RESPONSE_MAX_TOKENS", "4000") or "4000")
 CHAT_REASONING_RESPONSE_MAX_TOKENS = int(os.getenv("CAPACITY_CHAT_REASONING_RESPONSE_MAX_TOKENS", "8000") or "8000")
-MALT_WAIT_PERCENTILE = 50
-MALT_MOT_PERCENTILE = 85
-MALT_SPARE_PERCENTILE = 30
-MALT_IDENTITY_TOLERANCE_MINUTES = 1.0
-
 LOSS_COMPONENTS = [
     ("change_over_time", "Changeover time"),
     ("late_start_time", "LPR to print start"),
@@ -160,7 +155,7 @@ def build_chat_response(
             "5. Format your response as specified in output_format\n\n"
         )
 
-    llm_context = _compact_chat_context_for_llm(context, message)
+    llm_context = _compact_chat_context_for_llm(context, message, qu_plan=qu_plan)
     context_json = json.dumps(llm_context, separators=(",", ":"), ensure_ascii=True)
 
     system_content = (
@@ -170,7 +165,7 @@ def build_chat_response(
         "For conceptual, definitional, or formula questions (e.g. 'what does X mean', 'what is the formula for Y', 'how is Z calculated', 'explain X'), answer from your domain knowledge — do not say the data is absent. "
         "Use the curated computed JSON tables supplied here "
         "(exact_dashboard.folders, exact_dashboard.daily, towers, tower_runtime_segments, tower_runtime_mix, tower_availability, downtime_by_reason, "
-        "delayed_pf, max_allowable_loss_time, editions_* tables, book_details) before using summary aggregates. "
+        "delayed_pf, editions_* tables, book_details) before using summary aggregates. "
         "Prefer exact_dashboard values over derived summaries whenever a numeric answer is available. "
         "Before responding, internally identify the metric, filters, numerator, denominator, and formula. "
         "Validate the arithmetic against the JSON, then provide only the final concise answer. "
@@ -217,9 +212,6 @@ def build_chat_response(
         "- 'utilized time' / 'utilised time' / 'utilization' with no qualifier: "
         "Utilized Time = Runtime (SNP + GNP) + Loss Time + Downtime. "
         "Waiting time, spare time, and unplanned time are excluded.\n"
-        "- 'MALT' / 'Maximum Allowable Loss Time': use max_allowable_loss_time from context. "
-        "Always state the formula used: MALT = 240 - P50(Wait) - P85(MOT) - P30(Spare), where MOT = Run Time + Downtime. "
-        "MALT is calibrated per plant per complexity using on-time nights only; compare actual loss_time to MALT for exceedance questions.\n"
         "- 'downtime': mechanical stoppage time, not loss time and not waiting time.\n"
         "- Tower questions: always check towers, tower_runtime_mix, tower_availability, "
         "tower_downtime_reason_attribution, and editions_by_tower before saying data is unavailable. "
@@ -277,6 +269,18 @@ def build_chat_response(
         "the word 'delayed', use print_finish_time (exact_dashboard.daily / exact_dashboard.folder_days), "
         "never delayed_pf — delayed_pf would silently omit every on-time night.\n\n"
 
+        "MULTI-PART AND CORRELATION QUESTIONS:\n"
+        "When a question contains multiple '?' or asks several things in sequence (e.g. 'X? Any correlation with Y? Provide Z'), "
+        "treat it as N separate sub-questions and answer each one in order under a clear heading. "
+        "Do not collapse them into a single number. Structure: answer sub-question 1 fully → answer sub-question 2 → etc.\n"
+        "For delayed print finish questions: use gnp_snp_folder_analysis.delayed_finish_complexity — it already has "
+        "run_date, folder, print_finish_time, overrun_minutes, complexity_codes, complexity_categories, largest_components, editions per delayed night. "
+        "List every delayed night as a table row, then summarise which complexity categories appear most in delayed nights.\n"
+        "For 'average spare time when minimum N GNP folders are running': use gnp_snp_folder_analysis.nights_with_min_3_gnp_folders — "
+        "it has one row per qualifying night with avg_spare_time_min already computed. Average that column across all rows.\n"
+        "For delay reasons on specific nights: match the run_date values from delayed_pf or delayed_finish_complexity against "
+        "loss_time.all_days (which has dominant_driver per date) and downtime_by_reason (overall top reasons).\n\n"
+
         "PREDICTION & EXTRAPOLATION RULES:\n"
         "When a question asks for a forecast, prediction, projection, or 'what will X be':\n"
         "1. Extract the daily time-series for the metric from exact_dashboard.daily (runtime_min, utilization_pct, loss_time_min, etc.).\n"
@@ -324,8 +328,6 @@ def build_chat_response(
         "Use this for questions like 'which complexity generated the most downtime using C1 to C15'.\n"
         "- downtime_by_reason: stoppages by machine/folder/reason. top_reasons ranked by event count. "
         "count = events; total_minutes = total downtime for that reason.\n"
-        "- max_allowable_loss_time: MALT thresholds by plant × complexity, plus night_exceedances. "
-        "percentiles_used is fixed at Wait P50, MOT P85, Spare P30.\n"
         "- downtime_by_folder: total downtime incident count and minutes per folder (machine/folder unit), "
         "sorted by incident_count descending. Use for 'frequency of downtime in each folder' or 'which folder has most incidents'.\n"
         "- editions_by_date: unique edition names printed on each date. "
@@ -565,9 +567,6 @@ book_details — per-print-job rows from master view (Book Wise + General + Down
 complexity_by_code — runtime by individual C1-C15 complexity code
   Fields: code, type (SNP/GNP/SNP Complex/GNP Complex), runtime_min, is_complex
 
-max_allowable_loss_time — MALT thresholds by plant and complexity
-  Fields in rows: plant, complexity, malt_min; in night_exceedances: date, folder, loss_min, malt_min
-
 tower_downtime_reason_attribution — downtime reasons attributed to towers
   Fields in by_tower_reason: tower, reason, event_count, total_minutes
 
@@ -721,8 +720,9 @@ _QU_DECOMPOSER_SYSTEM = (
     '  "sort_by": {"field": "<field name>", "order": "asc|desc"},\n'
     '  "limit": null,\n'
     '  "sub_questions": [\n'
-    '    {"id": "q1", "intent": "count|aggregate|breakdown|list", "description": "<what this sub-question computes>"}\n'
+    '    {"id": "q1", "intent": "count|aggregate|breakdown|list", "primary_source": "<source key or omit if same as top-level>", "description": "<what this sub-question computes>"}\n'
     '  ],\n'
+    '  "required_sources": ["<primary_source>", "<any additional source keys the full LLM will need>"],\n'
     '  "output_format": "table|single_value|list|ranked_list|comparison"\n'
     "}\n\n"
     f"DATA SOURCES:\n{{_QU_DECOMPOSER_SOURCES}}\n\n"
@@ -764,6 +764,15 @@ _QU_DECOMPOSER_SYSTEM = (
     "'per', 'by', 'each', 'wise', or 'breakdown'. "
     "For per-folder breakdowns prefer exact_dashboard.folders (one row per folder, already aggregated) "
     "with intent:'aggregate'. For per-folder per-night detail use exact_dashboard.folder_days.\n"
+    "R12 REQUIRED SOURCES — MANDATORY: Set required_sources to every source key the full LLM will need. "
+    "Rules: (a) always include primary_source; (b) for multi-part questions with multiple '?' include a "
+    "source for each distinct part; (c) for cross-reference questions (e.g. 'delayed nights AND the reasons') "
+    "include the event table AND the reason/driver table (e.g. ['gnp_snp_folder_analysis.delayed_finish_complexity', 'loss_time.all_days']); "
+    "(d) if a sub_question has a different primary_source, include it; (e) limit to 6 sources maximum. "
+    "Examples: 'days below 90% efficiency'→['daily_efficiency']; "
+    "'delayed nights, complexity, and reasons'→['gnp_snp_folder_analysis.delayed_finish_complexity','loss_time.all_days','exact_dashboard.folder_days']; "
+    "'average spare time when 3+ GNP folders'→['gnp_snp_folder_analysis.nights_with_min_3_gnp_folders']; "
+    "'downtime by tower by reason'→['towers','tower_downtime_reason_attribution'].\n"
 )
 
 # Inject the source list at runtime to avoid f-string issues with the braces in the schema above
@@ -1320,7 +1329,6 @@ def _build_chat_context(
     folder_util = sections.get("folder_utilization") or {}
     loss_time_sec = sections.get("loss_time") or {}
     complexity = sections.get("complexity_speed") or {}
-    malt = sections.get("max_allowable_loss_time") or {}
 
     # Aggregate tower metrics across all dates
     production_days = _number((intelligence.get("scope") or {}).get("production_days"))
@@ -1667,12 +1675,6 @@ def _build_chat_context(
             "low_loss_days": (loss_time_sec.get("low_loss_days") or [])[:4],
             "all_days": all_days,
         },
-        "max_allowable_loss_time": {
-            "formula": malt.get("formula"),
-            "percentile_policy": malt.get("percentile_policy"),
-            "rows": (malt.get("rows") or [])[:200],
-            "night_exceedances": (malt.get("night_exceedances") or [])[:500],
-        },
         "towers": tower_rows,
         "tower_runtime_mix": tower_runtime_mix,
         "tower_availability": tower_availability,
@@ -1699,80 +1701,56 @@ def _build_chat_context(
     }
 
 
-def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -> dict[str, Any]:
+def _compact_chat_context_for_llm(
+    context: dict[str, Any],
+    question: str = "",
+    qu_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     exact = context.get("exact_dashboard") or {}
     downtime_by_reason = context.get("downtime_by_reason") or {}
     tower_attribution = context.get("tower_downtime_reason_attribution") or {}
     gnp_snp_analysis = context.get("gnp_snp_folder_analysis") or {}
-    malt = context.get("max_allowable_loss_time") or {}
 
-    # tower_days is per-tower-per-date and dominates payload size (hundreds of rows x ~23 fields each).
-    # It's only relevant when the question is actually about towers; for everything else (plant/folder
-    # trends, month-over-month, MALT, etc.) a small safety-net slice is enough and saves real budget
-    # toward the model's context limit, which a multi-month dataset can otherwise exceed.
-    question_cf = _clean_text(question).casefold()
-    wants_tower_detail = "tower" in question_cf
-    # Weekday-PATTERN questions are answered from tower_weekday_summary (a small, always-complete
-    # pre-aggregate), not raw tower_days, so they no longer need a large tower_days slice. Only
-    # questions needing real per-date rows (specific dates, GNP/SNP comparisons, trends) still do.
-    wants_weekday_pattern = any(
-        term in question_cf for term in ["weekday", "week day", "day of week", "day-of-week"]
-    )
-    # Month-on-month / monthly questions are answered from tower_month_summary (also a small,
-    # always-complete pre-aggregate), so they likewise don't need a large tower_days slice.
-    wants_month_pattern = any(
-        term in question_cf
-        for term in ["month on month", "month-on-month", "monthly", "per month", "each month", "month wise", "month-wise"]
-    )
-    wants_specific_day_grain = any(
-        term in question_cf
-        for term in [
-            "daily", "per day", "per night", "each night", "each day", "specific date",
-            "gnp", "snp", " night", "nightly",
-        ]
-    ) or ("trend" in question_cf and not wants_weekday_pattern and not wants_month_pattern)
-    wants_day_grain = wants_weekday_pattern or wants_month_pattern or wants_specific_day_grain
-    if wants_tower_detail and wants_specific_day_grain:
-        tower_days_limit = 220
-    elif wants_tower_detail and (wants_weekday_pattern or wants_month_pattern):
-        # The pattern-specific summary table covers this; tower_days is just a small safety net here.
-        tower_days_limit = 70
-    elif wants_tower_detail:
-        tower_days_limit = 100
-    else:
-        tower_days_limit = 40
-    # Each pre-aggregated summary only needs to be full-sized when its own pattern is asked about —
-    # otherwise a small fallback (still enough for a quick lookup) keeps a generic tower question from
-    # paying for both summaries at once.
-    tower_weekday_summary_limit = 500 if (wants_tower_detail and wants_weekday_pattern) else (60 if wants_tower_detail else 10)
-    tower_month_summary_limit = 500 if (wants_tower_detail and wants_month_pattern) else (60 if wants_tower_detail else 10)
+    # ── Plan-driven context selection ────────────────────────────────────────
+    # The QU decomposer (an LLM that understands the question semantically) declares
+    # `required_sources`: the exact set of tables it needs. We use this to decide which
+    # detail tables get their full row count vs. a minimal stub.
+    # This replaces keyword heuristics — the LLM knows what it needs, we just obey.
+    required: set[str] = set()
+    if qu_plan:
+        for src in (qu_plan.get("required_sources") or []):
+            s = _clean_text(src).casefold()
+            if s:
+                required.add(s)
+        for sq in (qu_plan.get("sub_questions") or []):
+            sq_src = _clean_text(sq.get("primary_source") or "").casefold()
+            if sq_src:
+                required.add(sq_src)
 
-    # The remaining tables below are each specific to one kind of question (editions, delayed print
-    # finish, MALT, GNP/SNP night classification, folder day-grain detail) but were always sent in full
-    # regardless of relevance. On a multi-plant, multi-month dataset that pushes the total payload past
-    # the model's input limit even before the system prompt is added — so each is now full-sized only
-    # when the question actually needs it, with a small safety-net slice otherwise.
-    wants_folder_detail = "folder" in question_cf
-    wants_edition = "edition" in question_cf
-    wants_delay = any(
-        term in question_cf
-        for term in ["delay", "late", "overrun", "finish", "04:00", "03:00", "02:30", "cutoff", "compliance"]
-    )
-    wants_malt = any(term in question_cf for term in ["malt", "allowable loss", "maximum allowable"])
-    wants_night_class = any(
-        term in question_cf for term in ["gnp", "snp", "uv", "night", "glossy", "standard"]
-    )
-    wants_tower_runtime_segments = _wants_tower_runtime_segment_context(question_cf)
+    def _req(key: str) -> bool:
+        """True if key (or its parent/child) is in required_sources."""
+        k = key.casefold()
+        return k in required or any(
+            r == k or r.startswith(k + ".") or k.startswith(r + ".")
+            for r in required
+        )
 
-    folder_days_limit = 150 if (wants_folder_detail or wants_day_grain) else 30
-    delayed_pf_limit = 120 if wants_delay else 20
-    malt_rows_limit = 120 if wants_malt else 15
-    night_detail_limit = 120 if wants_night_class else 15
-    editions_limit = 200 if wants_edition else 30
+    def _lim(key: str, full: int, stub: int) -> int:
+        """Return full if source is required, stub if not.
+        When no plan is available (force_full_llm=True or decomposer skipped),
+        use a generous baseline so the LLM always has breadth."""
+        if _req(key):
+            return full
+        if not required:
+            return min(full, 300)  # generous default when no plan
+        return stub
+
+    # tower_runtime_segments is a large table — only include when explicitly required
+    wants_tower_runtime_segments = _req("tower_runtime_segments")
     tower_runtime_segment_rows = (
         _tower_runtime_segment_context_rows(
             context.get("tower_days_all") or context.get("tower_days") or [],
-            question_cf,
+            "",
             limit=2500,
         )
         if wants_tower_runtime_segments
@@ -1786,14 +1764,14 @@ def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -
             "source": exact.get("source"),
             "scope": exact.get("scope") or {},
             "summary": exact.get("summary") or {},
+            # daily and folders are always small aggregates — send unconditionally
             "daily": _compact_rows(exact.get("daily") or [], limit=370),
             "folders": _compact_rows(exact.get("folders") or [], limit=200),
-            "folder_days": _compact_rows(exact.get("folder_days") or [], limit=folder_days_limit),
+            "folder_days": _compact_rows(
+                exact.get("folder_days") or [],
+                limit=_lim("exact_dashboard.folder_days", 500, 5),
+            ),
             "complexity_downtime_by_code": _compact_rows(exact.get("complexity_downtime_by_code") or [], limit=30),
-            # night_classification, delayed_pf, and max_allowable_loss_time are computed from the same
-            # inputs as the top-level uv_nights / delayed_pf / max_allowable_loss_time tables below and
-            # are byte-for-byte identical — they're intentionally omitted here (use the top-level tables
-            # instead) since duplicating them roughly doubled this section's size for no extra information.
         },
         "folders": _compact_rows(context.get("folders") or [], limit=200),
         "unused_folders": context.get("unused_folders") or [],
@@ -1817,86 +1795,95 @@ def _compact_chat_context_for_llm(context: dict[str, Any], question: str = "") -
             "driver_totals": (context.get("loss_time") or {}).get("driver_totals"),
             "top_loss_days": _compact_rows(((context.get("loss_time") or {}).get("top_loss_days") or []), limit=20),
             "low_loss_days": _compact_rows(((context.get("loss_time") or {}).get("low_loss_days") or []), limit=20),
+            # loss_time.all_days is always small (one row per day) — send unconditionally
             "all_days": _compact_rows(((context.get("loss_time") or {}).get("all_days") or []), limit=370),
         },
-        "max_allowable_loss_time": {
-            "formula": malt.get("formula"),
-            "percentile_policy": malt.get("percentile_policy"),
-            "rows": _compact_rows(malt.get("rows") or [], limit=malt_rows_limit),
-            "night_exceedances": _compact_rows(malt.get("night_exceedances") or [], limit=malt_rows_limit),
-        },
-        # towers already carries a uv_tower boolean per row — uv_towers/non_uv_towers would just be
-        # duplicate copies of the same rows, so they're intentionally omitted from the LLM-facing context.
         "towers": _compact_rows(context.get("towers") or [], limit=200),
         "tower_runtime_segments": tower_runtime_segment_rows,
         "tower_runtime_mix": _compact_rows(context.get("tower_runtime_mix") or [], limit=80),
-        # Per-tower per-date rows (includes a precomputed weekday field) — needed for any
-        # day-of-week, trend, or specific-date tower question. Previously built but never sent
-        # to the model, even though the planner's own schema told it this table existed.
         "tower_days": _compact_rows(
-            context.get("tower_days_all") or context.get("tower_days") or [], limit=tower_days_limit
+            context.get("tower_days_all") or context.get("tower_days") or [],
+            limit=_lim("tower_days", 500, 5),
         ),
         "tower_usage_distribution": _compact_rows(context.get("tower_usage_distribution") or [], limit=80),
-        # Complete per-tower per-weekday averages (towers x at most 7 rows) — always sent in full since
-        # it's small regardless of dataset size. Prefer this over raw tower_days for weekday-pattern
-        # questions, since tower_days itself is row-capped above and may not cover every tower/weekday
-        # on a large multi-plant/multi-month dataset.
         "tower_weekday_summary": _compact_rows(
-            context.get("tower_weekday_summary") or [], limit=tower_weekday_summary_limit
+            context.get("tower_weekday_summary") or [],
+            limit=_lim("tower_weekday_summary", 500, 10),
         ),
-        # Complete per-tower per-month totals/averages (towers x number of months) — same rationale as
-        # tower_weekday_summary, but grouped by month. Prefer this over raw tower_days for tower-level
-        # month-on-month questions.
         "tower_month_summary": _compact_rows(
-            context.get("tower_month_summary") or [], limit=tower_month_summary_limit
+            context.get("tower_month_summary") or [],
+            limit=_lim("tower_month_summary", 500, 10),
         ),
         "daily_efficiency": context.get("daily_efficiency") or [],
         "tower_availability": context.get("tower_availability") or {},
         "tower_downtime_reason_attribution": {
             "attribution_note": tower_attribution.get("attribution_note"),
-            "by_tower": _compact_rows(tower_attribution.get("by_tower") or [], limit=60),
-            "by_tower_reason": _compact_rows(tower_attribution.get("by_tower_reason") or [], limit=60),
+            "by_tower": _compact_rows(
+                tower_attribution.get("by_tower") or [],
+                limit=_lim("tower_downtime_reason_attribution", 200, 5),
+            ),
+            "by_tower_reason": _compact_rows(
+                tower_attribution.get("by_tower_reason") or [],
+                limit=_lim("tower_downtime_reason_attribution", 200, 5),
+            ),
         },
         "gnp_snp_folder_analysis": {
             "definition": gnp_snp_analysis.get("definition"),
+            # comparison_by_product_type is always tiny (2 rows: GNP vs SNP) — send unconditionally
             "comparison_by_product_type": _compact_rows(
                 gnp_snp_analysis.get("comparison_by_product_type") or [], limit=10
             ),
             "gnp_loss_breakdown_by_folder": _compact_rows(
                 gnp_snp_analysis.get("gnp_loss_breakdown_by_folder") or [],
-                limit=200 if ("folder" in question_cf or "break" in question_cf or "loss" in question_cf) else 30,
+                limit=_lim("gnp_snp_folder_analysis.gnp_loss_breakdown_by_folder", 500, 5),
             ),
             "nights_with_min_3_gnp_folders": _compact_rows(
                 gnp_snp_analysis.get("nights_with_min_3_gnp_folders") or [],
-                limit=220 if ("three" in question_cf or "3" in question_cf or "minimum" in question_cf) else 30,
+                limit=_lim("gnp_snp_folder_analysis.nights_with_min_3_gnp_folders", 500, 5),
             ),
             "delayed_finish_complexity": _compact_rows(
                 gnp_snp_analysis.get("delayed_finish_complexity") or [],
-                limit=220 if wants_delay else 40,
+                limit=_lim("gnp_snp_folder_analysis.delayed_finish_complexity", 500, 5),
             ),
             "web_break_gnp_snp_tower_comparison": _compact_rows(
                 gnp_snp_analysis.get("web_break_gnp_snp_tower_comparison") or [],
-                limit=120 if "web break" in question_cf else 30,
+                limit=_lim("gnp_snp_folder_analysis.web_break_gnp_snp_tower_comparison", 200, 5),
             ),
             "correlation_summary": gnp_snp_analysis.get("correlation_summary") or {},
         },
-        "delayed_pf": _compact_rows(context.get("delayed_pf") or [], limit=delayed_pf_limit),
+        "delayed_pf": _compact_rows(
+            context.get("delayed_pf") or [],
+            limit=_lim("delayed_pf", 500, 5),
+        ),
         "uv_nights": {
             "definition": (context.get("uv_nights") or {}).get("definition"),
-            # gnp_nights/snp_nights duplicated as uv_nights/non_uv_nights elsewhere in the raw context —
-            # only the canonical pair is sent here.
             "gnp_nights": (context.get("uv_nights") or {}).get("gnp_nights") or [],
             "snp_nights": (context.get("uv_nights") or {}).get("snp_nights") or [],
-            "nights": _compact_rows((context.get("uv_nights") or {}).get("nights") or [], limit=night_detail_limit),
+            "nights": _compact_rows(
+                (context.get("uv_nights") or {}).get("nights") or [],
+                limit=_lim("uv_nights", 500, 5),
+            ),
         },
         "downtime_by_reason": {
             "top_reasons": _compact_rows(downtime_by_reason.get("top_reasons") or [], limit=50),
         },
         "downtime_by_folder": _compact_rows(context.get("downtime_by_folder") or [], limit=120),
-        "editions_by_date": _compact_rows(context.get("editions_by_date") or [], limit=editions_limit),
-        "editions_by_folder": _compact_rows(context.get("editions_by_folder") or [], limit=editions_limit),
-        "editions_by_tower": _compact_rows(context.get("editions_by_tower") or [], limit=editions_limit),
-        "book_details": _compact_rows(context.get("book_details") or [], limit=120),
+        "editions_by_date": _compact_rows(
+            context.get("editions_by_date") or [],
+            limit=_lim("editions_by_date", 300, 5),
+        ),
+        "editions_by_folder": _compact_rows(
+            context.get("editions_by_folder") or [],
+            limit=_lim("editions_by_folder", 300, 5),
+        ),
+        "editions_by_tower": _compact_rows(
+            context.get("editions_by_tower") or [],
+            limit=_lim("editions_by_tower", 300, 5),
+        ),
+        "book_details": _compact_rows(
+            context.get("book_details") or [],
+            limit=_lim("book_details", 300, 5),
+        ),
     }
 
 
@@ -2025,7 +2012,6 @@ def _build_exact_dashboard_context(
     exact_folder_rows = _exact_folder_rows(folder_rows, dates)
     exact_folder_day_rows, folder_day_note = _exact_folder_day_rows(folder_rows, question)
     exact_folder_day_rows_all = [_exact_folder_day_row(row) for row in folder_rows]
-    malt = _build_malt_analysis(folder_rows)
     night_classification = _build_gnp_night_classification(folder_rows, dates)
     delayed_pf_rows = _build_delayed_pf_rows(folder_rows)
     complexity_downtime_by_code = _complexity_downtime_by_code(folder_rows)
@@ -2085,12 +2071,6 @@ def _build_exact_dashboard_context(
         "complexity_downtime_by_code": complexity_downtime_by_code,
         "night_classification": night_classification,
         "delayed_pf": delayed_pf_rows[:500],
-        "max_allowable_loss_time": {
-            "formula": malt.get("formula"),
-            "percentile_policy": malt.get("percentile_policy"),
-            "rows": (malt.get("rows") or [])[:200],
-            "night_exceedances": (malt.get("night_exceedances") or [])[:500],
-        },
     }
 
 
@@ -3488,9 +3468,6 @@ def _fallback_answer_from_context(
     if _asks_complexity_downtime(question):
         return _answer_complexity_downtime_question(context)
 
-    if _asks_malt(question):
-        return _answer_malt_question(question, context)
-
     gnp_snp_answer = _answer_gnp_snp_folder_question(question, context)
     if gnp_snp_answer:
         return gnp_snp_answer
@@ -3686,9 +3663,6 @@ def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict
         "complexity_by_code": context.get("complexity_by_code"),
         "complexity_downtime_by_code": context.get("complexity_downtime_by_code"),
         "complexity_vs_loss": context.get("complexity_vs_loss"),
-        "max_allowable_loss_time": (context.get("max_allowable_loss_time") or {}).get("rows"),
-        "max_allowable_loss_time.rows": (context.get("max_allowable_loss_time") or {}).get("rows"),
-        "max_allowable_loss_time.night_exceedances": (context.get("max_allowable_loss_time") or {}).get("night_exceedances"),
         "tower_downtime_reason_attribution.by_tower": (context.get("tower_downtime_reason_attribution") or {}).get("by_tower"),
         "tower_downtime_reason_attribution.by_tower_reason": (context.get("tower_downtime_reason_attribution") or {}).get("by_tower_reason"),
         "gnp_snp_folder_analysis": (context.get("gnp_snp_folder_analysis") or {}).get("comparison_by_product_type"),
@@ -4235,61 +4209,6 @@ def _answer_complexity_downtime_question(context: dict[str, Any]) -> str:
         lines.append(
             f"| {index} | {row.get('code')} | {_format_chat_minutes(row.get('allocated_downtime_min'))} | "
             f"{row.get('downtime_row_count')} | {_format_chat_minutes(row.get('runtime_min'))} |"
-        )
-    return "\n".join(lines)
-
-
-def _asks_malt(question: str) -> bool:
-    return "malt" in question or "maximum allowable loss" in question or "max allowable loss" in question
-
-
-def _answer_malt_question(question: str, context: dict[str, Any]) -> str:
-    malt = context.get("max_allowable_loss_time") or {}
-    formula = (
-        malt.get("formula")
-        or "MALT = 240 - P50(Wait) - P85(MOT) - P30(Spare), where MOT = Run Time + Downtime."
-    )
-    rows = malt.get("rows") or []
-    exceedances = malt.get("night_exceedances") or []
-    wants_exceedance = any(term in question for term in ["exceed", "above", "breach", "greater than", "over malt"])
-
-    if wants_exceedance:
-        if not exceedances:
-            return f"**{formula}**\n\nNo nights exceed MALT in the current data."
-        ranked = sorted(exceedances, key=lambda row: -_number(row.get("excess_min")))[:10]
-        lines = [
-            f"**{formula}**",
-            "",
-            "Nights where actual Loss Time exceeds MALT:",
-            "",
-            "| Rank | Date | Plant | Complexity | Actual Loss | MALT | Excess |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
-        ]
-        for index, row in enumerate(ranked, start=1):
-            lines.append(
-                f"| {index} | {row.get('run_date')} | {row.get('plant')} | {row.get('complexity')} | "
-                f"{_format_chat_minutes(row.get('actual_loss_min'))} | {_format_chat_minutes(row.get('malt_min'))} | "
-                f"{_format_chat_minutes(row.get('excess_min'))} |"
-            )
-        return "\n".join(lines)
-
-    filtered = _filter_context_rows(rows, question, ["plant", "complexity", "complexity_code"])
-    selected = (filtered or rows)[:10]
-    if not selected:
-        return f"**{formula}**\n\nNot available in the current data."
-    lines = [
-        f"**{formula}**",
-        "",
-        "MALT by plant and complexity:",
-        "",
-        "| Plant | Complexity | MALT | Wait P50 | MOT P85 | Spare P30 |",
-        "| --- | --- | --- | --- | --- | --- |",
-    ]
-    for row in selected:
-        lines.append(
-            f"| {row.get('plant')} | {row.get('complexity')} | {_format_chat_minutes(row.get('malt_min'))} | "
-            f"{_format_chat_minutes(row.get('wait_min'))} | {_format_chat_minutes(row.get('mot_min'))} | "
-            f"{_format_chat_minutes(row.get('spare_min'))} |"
         )
     return "\n".join(lines)
 
@@ -6544,7 +6463,6 @@ def _build_deterministic_intelligence(
     complexity_speed = _build_complexity_speed_analysis(folder_rows)
     folder_utilization = _build_folder_utilization_analysis(folder_rows, dates)
     loss_time = _build_loss_time_analysis(daily_rows, folder_rows)
-    malt = _build_malt_analysis(folder_rows)
 
     deterministic_notes = _build_deterministic_notes(
         complexity_speed=complexity_speed,
@@ -6577,7 +6495,6 @@ def _build_deterministic_intelligence(
             "average_folder_utilization_percentage": folder_utilization["average_utilization_percentage"],
             "folder_utilization_range_percentage_points": folder_utilization["range_percentage_points"],
             "total_loss_time_minutes": loss_time["total_loss_time_minutes"],
-            "malt_formula": malt["formula"],
             "loss_time_percentage": loss_time["loss_time_percentage"],
             "dominant_loss_driver": loss_time["dominant_driver"]["label"] if loss_time["dominant_driver"] else "",
             "peak_loss_day": loss_time["peak_day"]["run_date"] if loss_time["peak_day"] else "",
@@ -6587,7 +6504,6 @@ def _build_deterministic_intelligence(
             "complexity_speed": complexity_speed,
             "folder_utilization": folder_utilization,
             "loss_time": loss_time,
-            "max_allowable_loss_time": malt,
         },
         "deterministic_notes": deterministic_notes,
     }
@@ -6926,207 +6842,6 @@ def _build_loss_time_analysis(
     }
 
 
-def _build_malt_analysis(folder_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    formula = "MALT = 240 - P50(Wait) - P85(MOT) - P30(Spare), where MOT = Run Time + Downtime"
-    groups: dict[str, dict[str, Any]] = {}
-    all_samples: list[dict[str, Any]] = []
-
-    for row in folder_rows:
-        sample = _malt_sample(row)
-        if not sample:
-            continue
-
-        all_samples.append(sample)
-        if not sample["on_time_calibration_sample"]:
-            continue
-
-        group = groups.setdefault(
-            sample["calibration_key"],
-            {
-                "key": sample["calibration_key"],
-                "plant": sample["plant"],
-                "complexity": sample["complexity"],
-                "wait_values": [],
-                "mot_values": [],
-                "spare_values": [],
-            },
-        )
-        group["wait_values"].append(sample["wait_min"])
-        group["mot_values"].append(sample["mot_min"])
-        group["spare_values"].append(sample["spare_min"])
-
-    rows = []
-    threshold_by_key: dict[str, dict[str, Any]] = {}
-    for group in groups.values():
-        sample_count = len(group["wait_values"])
-        percentiles = _malt_percentiles()
-        wait_value = _percentile(group["wait_values"], percentiles["wait"])
-        mot_value = _percentile(group["mot_values"], percentiles["mot"])
-        spare_value = _percentile(group["spare_values"], percentiles["spare"])
-        malt = max(CAPACITY_MINUTES_PER_FOLDER_DAY - wait_value - mot_value - spare_value, 0)
-        row = {
-            "key": group["key"],
-            "plant": group["plant"],
-            "complexity": group["complexity"],
-            "formula": formula,
-            "applied_formula": (
-                f"MALT = 240 - P{percentiles['wait']}(Wait) "
-                f"- P{percentiles['mot']}(MOT) - P{percentiles['spare']}(Spare); "
-                "MOT = Run Time + Downtime"
-            ),
-            "percentiles_used": percentiles,
-            "wait_min": _clean_number(wait_value),
-            "mot_min": _clean_number(mot_value),
-            "run_plus_down_label": "MOT = Run Time + Downtime",
-            "spare_min": _clean_number(spare_value),
-            "malt_min": _clean_number(malt),
-            "on_time_nights": sample_count,
-            "confidence": _malt_confidence(sample_count),
-        }
-        rows.append(row)
-        threshold_by_key[group["key"]] = row
-
-    exceedances = []
-    for sample in all_samples:
-        threshold = threshold_by_key.get(sample["calibration_key"])
-        if not threshold:
-            continue
-        excess = sample["actual_loss_min"] - _number(threshold.get("malt_min"))
-        if excess <= 0:
-            continue
-        exceedances.append({
-            "run_date": sample["run_date"],
-            "plant": sample["plant"],
-            "machine": sample["machine"],
-            "folder": sample["folder"],
-            "complexity": sample["complexity"],
-            "actual_loss_min": _clean_number(sample["actual_loss_min"]),
-            "malt_min": threshold["malt_min"],
-            "excess_min": _clean_number(excess),
-            "wait_min": _clean_number(sample["wait_min"]),
-            "mot_min": _clean_number(sample["mot_min"]),
-            "spare_min": _clean_number(sample["spare_min"]),
-            "overrun_min": _clean_number(sample["overrun_min"]),
-            "threshold_key": sample["calibration_key"],
-        })
-
-    rows.sort(key=lambda row: (
-        _clean_text(row.get("plant")).casefold(),
-        _malt_complexity_rank(_clean_text(row.get("complexity"))),
-    ))
-    exceedances.sort(key=lambda row: (-_number(row.get("excess_min")), row.get("run_date", ""), row.get("folder", "")))
-
-    return {
-        "formula": formula,
-        "formula_terms": {
-            "fixed_window_min": CAPACITY_MINUTES_PER_FOLDER_DAY,
-            "wait": "Editorial wait percentile from on-time calibration nights",
-            "mot": "Machine Operating Time percentile, where MOT = Run Time + Downtime",
-            "spare": "Finish-buffer spare percentile from on-time calibration nights",
-        },
-        "percentile_policy": {
-            "wait": MALT_WAIT_PERCENTILE,
-            "mot": MALT_MOT_PERCENTILE,
-            "spare": MALT_SPARE_PERCENTILE,
-            "selection": "Fixed percentiles: P50 Wait, P85 MOT, P30 Spare.",
-            "calibration_grain": "plant × complexity",
-        },
-        "calibration_filter": "Only active folder nights with overrun_minutes <= 0 and a 240-minute identity are used to calibrate MALT.",
-        "rows": rows,
-        "night_exceedances": exceedances,
-    }
-
-
-def _malt_sample(row: dict[str, Any]) -> dict[str, Any] | None:
-    if not _is_active_folder_row(row):
-        return None
-
-    wait = _number(row.get("waiting_time"))
-    run = _number(row.get("runtime"))
-    down = _number(row.get("downtime"))
-    spare = _number(row.get("buffer_time"))
-    idle = _number(row.get("idle_time"))
-    actual_loss = _loss_time_minutes(row)
-    overrun = _number(row.get("overrun_minutes"))
-
-    if any(value < 0 for value in [wait, run, down, spare, idle, actual_loss, overrun]):
-        return None
-    if run + down <= 0:
-        return None
-
-    plant = _clean_text(row.get("plant_name")) or "Unknown plant"
-    machine, folder_name = _split_machine_folder(_clean_text(row.get("folder")))
-    complexity = _dominant_complexity_label(row.get("runtime_segments"))
-    identity_total = wait + actual_loss + run + down + spare + idle
-    on_time = (
-        overrun <= 0
-        and abs(identity_total - CAPACITY_MINUTES_PER_FOLDER_DAY) <= MALT_IDENTITY_TOLERANCE_MINUTES
-    )
-
-    return {
-        "run_date": _clean_text(row.get("run_date")),
-        "plant": plant,
-        "machine": machine or "Unknown machine",
-        "folder": _display_resource_name(row.get("folder")) or folder_name,
-        "complexity": complexity,
-        "calibration_key": "||".join([plant, complexity]),
-        "wait_min": wait,
-        "mot_min": run + down,
-        "spare_min": spare,
-        "actual_loss_min": actual_loss,
-        "overrun_min": overrun,
-        "on_time_calibration_sample": on_time,
-    }
-
-
-def _malt_percentiles() -> dict[str, int]:
-    return {
-        "wait": MALT_WAIT_PERCENTILE,
-        "mot": MALT_MOT_PERCENTILE,
-        "spare": MALT_SPARE_PERCENTILE,
-    }
-
-
-def _malt_confidence(sample_count: int) -> str:
-    if sample_count >= 60:
-        return "High confidence"
-    if sample_count >= 30:
-        return "Medium confidence"
-    return "Low confidence"
-
-
-def _dominant_complexity_label(segments: Any) -> str:
-    if not isinstance(segments, list) or not segments:
-        return "Unknown"
-
-    best = max(
-        (segment for segment in segments if isinstance(segment, dict)),
-        key=lambda segment: _number(segment.get("minutes")),
-        default={},
-    )
-    return _complexity_label(best) if best else "Unknown"
-
-
-def _malt_complexity_rank(label: str) -> int:
-    order = ["SNP", "SNP Complex", "GNP", "GNP Complex", "Unknown"]
-    try:
-        return order.index(label)
-    except ValueError:
-        return len(order)
-
-
-def _percentile(values: list[float], percentile: float) -> float:
-    sorted_values = sorted(_number(value) for value in values if isfinite(_number(value)))
-    if not sorted_values:
-        return 0.0
-
-    index = (percentile / 100.0) * (len(sorted_values) - 1)
-    lower = int(index)
-    upper = min(lower + 1, len(sorted_values) - 1)
-    if lower == upper:
-        return sorted_values[lower]
-    fraction = index - lower
-    return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * fraction
 
 
 def _build_deterministic_notes(
@@ -7266,7 +6981,6 @@ def _compact_intelligence_for_llm(intelligence: dict[str, Any]) -> dict[str, Any
     complexity = sections.get("complexity_speed") or {}
     folder_utilization = sections.get("folder_utilization") or {}
     loss_time = sections.get("loss_time") or {}
-    malt = sections.get("max_allowable_loss_time") or {}
 
     return {
         "scope": intelligence.get("scope"),
@@ -7294,12 +7008,6 @@ def _compact_intelligence_for_llm(intelligence: dict[str, Any]) -> dict[str, Any
             "driver_totals": loss_time.get("driver_totals"),
             "top_loss_days": (loss_time.get("top_loss_days") or [])[:5],
             "inferred_factor": loss_time.get("inferred_factor"),
-        },
-        "max_allowable_loss_time": {
-            "formula": malt.get("formula"),
-            "percentile_policy": malt.get("percentile_policy"),
-            "rows": (malt.get("rows") or [])[:8],
-            "night_exceedances": (malt.get("night_exceedances") or [])[:8],
         },
     }
 
