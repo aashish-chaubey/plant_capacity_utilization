@@ -28,11 +28,11 @@ const TIMEFRAME_TABS = [
 const METRIC_DEFINITIONS = [
   {
     term: "Wait Time",
-    definition: "Waiting for actual LPR after LPRS."
+    definition: "Waiting for actual LPR after 12 midnight."
   },
   {
     term: "Lost Time",
-    definition: "Preparation time after editorial release and before printing. Components are Makeready from LPR to Press Start, Changeover from Print Finish to Press Start, and Reflong changeover."
+    definition: "Preparation time between Editorial release and Print start. Components are Makeready time from LPR to Press Start, Changeover time from Print Finish of previous edition to Print Start of next edition, Reflong changeover time."
   },
   {
     term: "Downtime",
@@ -40,11 +40,11 @@ const METRIC_DEFINITIONS = [
   },
   {
     term: "Run Time",
-    definition: "Net productive print time when the press is actively printing. For editions already printing before midnight, only the portion from midnight to Print Finish is counted."
+    definition: "Net productive print time when the press is actively printing. For editions started before midnight, only the time from midnight to Print Finish is considered."
   },
   {
     term: "Spare Time",
-    definition: "Unused capacity remaining within the 00:00-04:00 (Regardless of the early PF schedule of 3 plants) reference window after all other components are accounted for. Formula: Spare Time = 240 min - (Wait + Loss + Downtime + Run). Spare Time cannot be negative."
+    definition: "Unused capacity remaining within the 00:00-04:00 (Regardless of the early PF schedule of 3 plants) reference window after all other components have been accounted for. Formula: Spare Time = 240 min - (Wait time + Loss time+ Downtime + Runtime). Spare Time cannot be negative."
   },
   {
     term: "Unplanned Capacity",
@@ -1009,7 +1009,21 @@ function filterCapacityDataByScope(result, selectedPlant, selectedFolders) {
     ? plantTowerDetails.filter((row) => selectedFolderSet.has(row.folder))
     : plantTowerDetails;
   const daily = buildDailyRowsFromTowerDetails(towerDetails, dateUniverse);
-  return { ...result, summary: calculateSummary(daily), daily, details, tower_details: towerDetails };
+
+  // Collect all tower profiles (name + UV status) from the full pre-timeframe plant dataset.
+  // Used by the drilldown to inject idle rows for towers absent in the selected period.
+  const towerProfileMap = new Map();
+  for (const row of plantTowerDetails) {
+    if (!row.tower) continue;
+    const existing = towerProfileMap.get(row.tower);
+    towerProfileMap.set(row.tower, {
+      tower: row.tower,
+      uv_tower: Boolean(row.uv_tower) || (existing?.uv_tower ?? false),
+    });
+  }
+  const all_tower_profiles = Array.from(towerProfileMap.values());
+
+  return { ...result, summary: calculateSummary(daily), daily, details, tower_details: towerDetails, all_tower_profiles };
 }
 
 function buildDailyRowsFromTowerDetails(towerRows, dateUniverse) {

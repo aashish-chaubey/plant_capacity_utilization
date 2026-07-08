@@ -244,8 +244,8 @@ export default function Dashboard({
   );
 
   const breakdownTowerDetails = useMemo(
-    () => buildTowerBreakdownSourceRows(data.tower_details || [], focusedDay),
-    [data.tower_details, focusedDay]
+    () => buildTowerBreakdownSourceRows(data.tower_details || [], focusedDay, data.all_tower_profiles || []),
+    [data.tower_details, data.all_tower_profiles, focusedDay]
   );
 
   const breakdownProductionDays = focusedDay ? 1 : data.daily.length;
@@ -3026,24 +3026,50 @@ function normalizeResourceBreakdownValues(row) {
   };
 }
 
-function buildTowerBreakdownSourceRows(towerRows, focusedDay) {
+function buildTowerBreakdownSourceRows(towerRows, focusedDay, allTowerProfiles = []) {
   const rows = Array.isArray(towerRows) ? towerRows : [];
-  if (!focusedDay) return rows;
 
-  const towers = new Map();
+  // Build a complete tower map: actual rows first, then fill in any towers from the
+  // full-plant profile list that are absent from the current timeframe-filtered rows.
+  const towerMap = new Map();
   for (const row of rows) {
     if (!row.tower) continue;
-    const current = towers.get(row.tower) || {
+    const existing = towerMap.get(row.tower);
+    towerMap.set(row.tower, {
       tower: row.tower,
-      uv_tower: false,
-    };
-    current.uv_tower = current.uv_tower || Boolean(row.uv_tower);
-    towers.set(row.tower, current);
+      uv_tower: Boolean(row.uv_tower) || (existing?.uv_tower ?? false),
+    });
+  }
+  for (const profile of allTowerProfiles) {
+    if (profile.tower && !towerMap.has(profile.tower)) {
+      towerMap.set(profile.tower, { tower: profile.tower, uv_tower: Boolean(profile.uv_tower) });
+    }
+  }
+
+  if (!focusedDay) {
+    // Timeframe view: inject placeholder rows for towers with no data in the selected
+    // period so they still appear in the drilldown as fully unplanned.
+    const towersInPeriod = new Set(rows.map((r) => r.tower).filter(Boolean));
+    const missingRows = Array.from(towerMap.values())
+      .filter((t) => !towersInPeriod.has(t.tower))
+      .map((t) => ({
+        tower: t.tower,
+        uv_tower: t.uv_tower,
+        waiting_time: 0,
+        runtime: 0,
+        downtime: 0,
+        buffer_time: 0,
+        idle_time: 0,
+        change_over_time: 0,
+        reflong_related_downtime: 0,
+        late_start_time: 0,
+      }));
+    return [...rows, ...missingRows];
   }
 
   const rowsForDay = rows.filter((row) => row.run_date === focusedDay);
   const towersSeenOnDay = new Set(rowsForDay.map((row) => row.tower).filter(Boolean));
-  const idleTowerRows = Array.from(towers.values())
+  const idleTowerRows = Array.from(towerMap.values())
     .filter((tower) => !towersSeenOnDay.has(tower.tower))
     .map((tower) => ({
       run_date: focusedDay,
