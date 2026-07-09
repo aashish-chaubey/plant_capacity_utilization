@@ -2,7 +2,7 @@
 
 .landing-page-container {
     min-height: 100vh;
-    background-color: #020813;
+    background-color: #1f1e45;
     display: flex;
     flex-direction: column;
     color: #ffffff;
@@ -20,17 +20,19 @@
     width: min(60vw, 1075px);
     max-width: 60vw;
     height: auto;
+    max-height: 100%;
+    max-height: 100vh;
     /* Preserve aspect ratio — no stretch */
     object-fit: contain;
     object-position: top right;
-    /* Horizontal: fully transparent at 2%, fully opaque at 20% of image width  */
+    /* Horizontal: fully transparent at 8%, fully opaque at 23% of image width  */
     /* Vertical:   fully opaque until 70%, fully transparent at 90% of image height */
     -webkit-mask-image:
-        linear-gradient(to right,  transparent 2%, black 20%),
+        linear-gradient(to right,  transparent 8%, black 23%),
         linear-gradient(to bottom, black 70%, transparent 90%);
     -webkit-mask-composite: destination-in;
     mask-image:
-        linear-gradient(to right,  transparent 2%, black 20%),
+        linear-gradient(to right,  transparent 8%, black 23%),
         linear-gradient(to bottom, black 70%, transparent 90%);
     mask-composite: intersect;
     pointer-events: none;
@@ -52,10 +54,10 @@
             rgba(56, 189, 248, 0.9) 60%,
             rgba(56, 189, 248, 0.1) 100%);
     box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
-    width: 55%;
-    max-width: 700px;
-    margin-top: 1.25rem;
-    margin-bottom: 1.25rem;
+    width: 38%;
+    max-width: 500px;
+    margin-top: 0.55rem;
+    margin-bottom: 0.55rem;
 }
 
 /* Custom Card Styles matching the snapshot */
@@ -210,9 +212,7 @@
 
 @media (min-width: 1200px) {
     .landing-page-container {
-        height: 100vh;
-        max-height: 100vh;
-        overflow: hidden;
+        min-height: 100vh;
         padding-top: 0.75rem;
         padding-bottom: 0.5rem;
         padding-left: 2rem !important;
@@ -240,15 +240,13 @@
     .plants-row-container {
         min-width: 0 !important;
         width: 100% !important;
-        gap: 0.25rem !important;
+        gap: clamp(4px, 0.4vw, 8px) !important;
     }
 
-    /* Scale monuments for exact fit on screen widths between 1200px and 1439px */
+    /* Scale monuments fluidly based on viewport width to fit 14 items perfectly */
     .plant-image-wrapper {
-        height: 4.5rem !important;
-        /* 72px */
-        width: 4.5rem !important;
-        /* 72px */
+        height: clamp(58px, 4.6vw, 82px) !important;
+        width: clamp(58px, 4.6vw, 82px) !important;
     }
 
     .plant-item-btn {
@@ -281,16 +279,9 @@
         height: 140px !important;
     }
 
-    .plants-row-container {
-        gap: 0.5rem !important;
-    }
 
-    .plant-image-wrapper {
-        height: 6rem !important;
-        /* 96px */
-        width: 6rem !important;
-        /* 96px */
-    }
+
+
 
     .plant-item-btn {
         padding-top: 0.5rem !important;

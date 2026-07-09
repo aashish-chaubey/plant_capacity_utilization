@@ -18,6 +18,7 @@ import punImg from '../../images/KAN/PUN.png';
 import sbdImg from '../../images/KAN/SBD.png';
 import tvmImg from '../../images/KAN/TVM.png';
 import machineImg from '../../images/KAN/machine_img.png';
+import logoImg from '../../images/KAN/logo.png';
 
 const DESIGN_PLANTS = [
   { key: "Vejalpur", label: "AHMEDABAD", img: ahmImg },
@@ -40,7 +41,7 @@ export default function LandingPage({ onSelectPlant }) {
   return (
     <div
       className="landing-page-container flex-1 flex-col items-center justify-start py-12 px-6 sm:px-12 lg:px-20 relative"
-      style={{ backgroundColor: '#020813' }}
+      style={{ backgroundColor: '#1f1e45' }}
     >
       {/* Background machine image — absolutely positioned, native size capped, 15% fade on left & bottom */}
       <img
@@ -52,22 +53,12 @@ export default function LandingPage({ onSelectPlant }) {
       {/* Top Header Section */}
       <div className="max-w-[1360px] w-full mt-4 lg:mt-8">
         {/* PACE Logo */}
-        <div className="flex items-center select-none">
-          <span className="flex items-center font-black tracking-normal text-white text-6xl sm:text-7xl lg:text-[85px] leading-none">
-            P
-            <svg
-              className="text-[#00E5FF] drop-shadow-[0_0_14px_rgba(0,229,255,0.9)] fill-current shrink-0 self-center"
-              viewBox="0 0 80 100"
-              style={{ display: 'inline-block', height: '0.92em', width: '0.7em', transform: 'translateY(-1%)', margin: '0 0.04em' }}
-            >
-              {/* Upward triangle representing letter A */}
-              <polygon points="40,4 78,92 2,92" />
-              {/* Inner cutout to mimic the crossbar of A */}
-              <polygon points="40,4 78,92 2,92" fill="transparent" />
-              <polygon points="24,70 56,70 62,84 18,84" fill="#020813" />
-            </svg>
-            CE
-          </span>
+        <div className="flex items-center select-none pace-logo-wrap">
+          <img 
+            src={logoImg} 
+            alt="PACE Logo" 
+            className="h-[60px] sm:h-[75px] lg:h-[85px] w-auto object-contain"
+          />
         </div>
 
         {/* Subtitle */}
@@ -79,13 +70,13 @@ export default function LandingPage({ onSelectPlant }) {
         <div className="header-divider" />
 
         {/* Tagline */}
-        <p className="text-[#38BDF8] font-bold text-sm sm:text-base tracking-wider uppercase pl-1 mt-3">
-          AI-Powered Platform for Capacity Utilisation Analysis
+        <p className="text-[#38BDF8] font-normal text-sm sm:text-base tracking-wider pl-1 mt-2">
+          Ai-Powered Platform for Capacity Utilisation Analysis
         </p>
       </div>
 
       {/* Middle Section: 3 Info Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-[1360px] w-full" style={{ marginTop: 'clamp(100px, 13vh, 180px)', marginBottom: 'clamp(12px, 2vh, 30px)' }}>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-[1360px] w-full" style={{ marginTop: 'clamp(70px, 18vh, 250px)', marginBottom: 'clamp(12px, 2vh, 30px)' }}>
         {/* Card 1 */}
         <div className="mockup-card mockup-card-blue">
           <div className="card-top-sec">
@@ -145,7 +136,7 @@ export default function LandingPage({ onSelectPlant }) {
 
         {/* Horizontal Row of Plants */}
         <div className="plants-scrollbar overflow-x-auto w-full pb-2">
-          <div className="plants-row-container flex items-end justify-between min-w-[1240px] px-2 gap-4">
+          <div className="plants-row-container flex items-end justify-between w-full px-2 gap-4">
             {DESIGN_PLANTS.map((plant) => (
               <button
                 key={plant.key}
