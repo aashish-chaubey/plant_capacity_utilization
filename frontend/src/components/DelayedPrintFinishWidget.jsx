@@ -100,9 +100,9 @@ export default function DelayedPrintFinishWidget({ details }) {
 }
 
 function DelayCauseDonut({ rows, topCause, delayedPlantDays }) {
-  const positiveRows = rows.filter((row) => row.minutes > 0);
-  const totalMinutes = positiveRows.reduce((sum, row) => sum + row.minutes, 0);
-  const gradient = buildDonutGradient(positiveRows, totalMinutes);
+  const positiveRows = rows.filter((row) => row.count > 0);
+  const total = positiveRows.reduce((sum, row) => sum + row.count, 0);
+  const gradient = buildDonutGradient(positiveRows, total);
 
   return (
     <aside className="rounded-lg border border-slate-100 bg-slate-50 p-3">
@@ -130,7 +130,7 @@ function DelayCauseDonut({ rows, topCause, delayedPlantDays }) {
             </div>
           ) : positiveRows.map((row) => {
             const meta = CAUSE_META[row.cause];
-            const percentage = totalMinutes > 0 ? (row.minutes / totalMinutes) * 100 : 0;
+            const percentage = total > 0 ? (row.count / total) * 100 : 0;
 
             return (
               <div key={row.cause} className="flex items-center justify-between gap-3 text-xs">
@@ -153,15 +153,15 @@ function DelayCauseDonut({ rows, topCause, delayedPlantDays }) {
   );
 }
 
-function buildDonutGradient(rows, totalMinutes) {
-  if (totalMinutes <= 0 || rows.length === 0) {
+function buildDonutGradient(rows, total) {
+  if (total <= 0 || rows.length === 0) {
     return "conic-gradient(#e2e8f0 0deg 360deg)";
   }
 
   let cursor = 0;
   const stops = rows.map((row) => {
     const start = cursor;
-    const end = cursor + (row.minutes / totalMinutes) * 360;
+    const end = cursor + (row.count / total) * 360;
     cursor = end;
     return `${CAUSE_META[row.cause].color} ${start}deg ${end}deg`;
   });
@@ -245,8 +245,8 @@ function buildDelayedFinishAnalysis(details) {
     .map((row) => buildFolderBreach(row, folderBaselines[row.folder]))
     .sort(compareBreachRows);
   const plantBreaches = buildPlantBreaches(folderBreaches);
-  const causeTotals = buildCauseTotals(plantBreaches);
-  const topCause = causeTotals.find((row) => row.minutes > 0) || null;
+  const causeTotals = buildCauseTotals(folderBreaches);
+  const topCause = causeTotals.find((row) => row.count > 0) || null;
   const tableRows = folderBreaches;
   const delayedPlantDays = new Set(plantBreaches.map((row) => `${row.run_date}||${row.plant_name}`)).size;
 
@@ -388,12 +388,18 @@ function calculateCauseScores(row, baseline) {
 }
 
 function buildCauseTotals(plantBreaches) {
-  const totals = plantBreaches.reduce((acc, row) => addCauseScores(acc, row.cause_scores), emptyCauseScores());
-
-  return orderedCauseEntries(totals).sort((a, b) => {
-    if (b.minutes !== a.minutes) return b.minutes - a.minutes;
-    return CAUSE_ORDER.indexOf(a.cause) - CAUSE_ORDER.indexOf(b.cause);
-  });
+  const counts = Object.fromEntries(CAUSE_ORDER.map((c) => [c, 0]));
+  for (const row of plantBreaches) {
+    for (const entry of row.root_causes) {
+      counts[entry.cause] = (counts[entry.cause] || 0) + 1;
+    }
+  }
+  return CAUSE_ORDER
+    .map((cause) => ({ cause, count: counts[cause] }))
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return CAUSE_ORDER.indexOf(a.cause) - CAUSE_ORDER.indexOf(b.cause);
+    });
 }
 
 function getRootCauses(scores) {

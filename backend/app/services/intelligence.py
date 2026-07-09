@@ -149,7 +149,7 @@ def build_chat_response(
             "2. Apply any filters from the plan (folder name, date, complexity, etc.)\n"
             "3. Perform the computation described step by step, quoting exact values\n"
             "4. Self-validate internally before answering: check values are non-negative where expected; "
-            "verify Utilized Time = Runtime (SNP + GNP) + Loss Time + Downtime; "
+            "verify Utilized Time = Runtime (SNP + GNP) + Lost Time + Downtime; "
             "spot-check that runtime + loss + downtime + wait + spare ≈ available_capacity. "
             "Do not reveal private reasoning; only return the answer.\n"
             "5. Format your response as specified in output_format\n\n"
@@ -204,15 +204,15 @@ def build_chat_response(
         "Filter rows by efficiency_pct threshold, count matching rows, or group by month/weekday from run_date.\n"
         "- 'complex runtime': sum entries where is_complex=true (C4 + C9–C15).\n"
         "- 'speed' / 'average speed' with no qualifier: overall average_speed_cph. Qualify by type only when asked.\n"
-        "- 'loss time' / 'losses': total lost_time (changeover + late-start + reflong). Waiting time is always separate.\n"
-        "- 'unscheduled time' means Unplanned Time, not Loss Time. Unplanned Time is capacity where the folder/tower was not scheduled or available for production.\n"
+        "- 'lost time' / 'losses': total lost_time (changeover + late-start + reflong). Waiting time is always separate.\n"
+        "- 'unscheduled time' means Unplanned Time, not Lost Time. Unplanned Time is capacity where the folder/tower was not scheduled or available for production.\n"
         "- 'spare time' / 'spare capacity': always buffer_time (= spare_time_min in exact_dashboard.folders), never unplanned_time.\n"
         "- 'average spare time per folder' or 'spare time for each folder': use exact_dashboard.folders[].spare_time_min / active_nights. "
         "List every folder with its average spare time per active night in minutes.\n"
         "- 'utilized time' / 'utilised time' / 'utilization' with no qualifier: "
-        "Utilized Time = Runtime (SNP + GNP) + Loss Time + Downtime. "
+        "Utilized Time = Runtime (SNP + GNP) + Lost Time + Downtime. "
         "Waiting time, spare time, and unplanned time are excluded.\n"
-        "- 'downtime': mechanical stoppage time, not loss time and not waiting time.\n"
+        "- 'downtime': mechanical stoppage time, not lost time and not waiting time.\n"
         "- Tower questions: always check towers, tower_runtime_mix, tower_availability, "
         "tower_downtime_reason_attribution, and editions_by_tower before saying data is unavailable. "
         "For reason-specific tower questions such as web break, use tower_downtime_reason_attribution.\n"
@@ -241,13 +241,13 @@ def build_chat_response(
         "OPERATING DEFINITIONS:\n"
         "- Wait Time: idle time at the start of the 00:00 window where the press cannot operate because editorial LPR has not been issued. "
         "Wait ends when LPR is issued. If an earlier edition finishes before LPR for the next edition, the PF-to-LPR gap also counts as Wait.\n"
-        "- Loss Time: preparation time after editorial release and before printing. Components are Makeready/LPR-to-Press-Start, Changeover/PF-to-Press-Start when physical change is required, and Reflong changeover losses.\n"
+        "- Lost Time: preparation time after editorial release and before printing. Components are Makeready/LPR-to-Press-Start, Changeover/PF-to-Press-Start when physical change is required, and Reflong changeover losses.\n"
         "- Downtime: unplanned stoppages during an active run.\n"
         "- Run Time: net productive print time. For editions already printing before midnight, count only the portion from midnight to Print Finish.\n"
         "- Spare Time: unused capacity inside the reference window after all other components are accounted for. "
         "Formula: Spare Time = 240 - (Wait + Loss + Downtime + Run). It cannot be negative.\n"
         "- Unplanned Time: periods where the folder or tower was not scheduled or available for production.\n"
-        "- Utilized Time / Utilisation: Runtime (SNP + GNP) + Loss Time + Downtime. "
+        "- Utilized Time / Utilisation: Runtime (SNP + GNP) + Lost Time + Downtime. "
         "Do not include Wait Time, Spare Time, or Unplanned Time.\n"
         "- Spare Capacity: (Spare Time / (Total Available Time - Unplanned Time)) * 100.\n"
         "- Speed Efficiency / Efficiency %: measures how fast the machine actually ran relative to its committed speed. "
@@ -295,10 +295,10 @@ def build_chat_response(
 
         "Schema key:\n"
         "- resource: 'Machine / Folder' display name\n"
-        "- utilization_pct / utilization_percentage: (Runtime (SNP + GNP) + Loss Time + Downtime) ÷ total possible capacity (incl. unplanned nights)\n"
-        "- active_day_utilization_pct: (Runtime (SNP + GNP) + Loss Time + Downtime) ÷ capacity only on nights the folder was active\n"
+        "- utilization_pct / utilization_percentage: (Runtime (SNP + GNP) + Lost Time + Downtime) ÷ total possible capacity (incl. unplanned nights)\n"
+        "- active_day_utilization_pct: (Runtime (SNP + GNP) + Lost Time + Downtime) ÷ capacity only on nights the folder was active\n"
         "- runtime_minutes / runtime_min: actual print runtime (all complexity types combined)\n"
-        "- lost_time_min / lost_time_minutes: Loss Time = changeover + late-start + reflong ONLY. "
+        "- lost_time_min / lost_time_minutes: Lost Time = changeover + late-start + reflong ONLY. "
         "WAITING TIME IS NOT INCLUDED IN LOSS TIME.\n"
         "- waiting_time_min / waiting_time_minutes: wait for editions; SEPARATE from loss_time, NEVER add to loss_time\n"
         "- buffer_time_min / buffer_time_minutes: Spare Time — leftover capacity WITHIN an active night only\n"
@@ -340,7 +340,7 @@ def build_chat_response(
         "late_start_time_min, reflong_downtime_min, spare_time_min, active_nights, utilization_pct, "
         "downtime_run_count, loss_time_run_count, waiting_time_run_count, uv_tower, active_dates, folders, "
         "editions, complexity_codes. USE THIS for any per-tower metric totals or averages "
-        "(e.g. 'average loss time per tower' = loss_time_min / active_nights).\n"
+        "(e.g. 'average lost time per tower' = loss_time_min / active_nights).\n"
         "- tower_days: per-tower PER-DATE rows. Fields: run_date, weekday (Monday-Sunday, precomputed — never "
         "compute weekday yourself from run_date), month (YYYY-MM, precomputed), plant, machine, tower, "
         "tower_name, folder, uv_tower, runtime_min, downtime_min, loss_time_min, waiting_time_min, "
@@ -365,7 +365,7 @@ def build_chat_response(
         "product_type, runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count, towers. "
         "Use this for runtime share/percentage questions involving SNP/GNP products on GNP/UV or non-UV towers.\n"
         "- gnp_snp_folder_analysis: precomputed folder-night comparisons between base GNP (C5-C15) and base SNP (C1-C4). "
-        "Use this for questions comparing GNP vs SNP editions on spare time, loss time, wait time, LPR-to-print-start, reflong, downtime, and delayed print finish. "
+        "Use this for questions comparing GNP vs SNP editions on spare time, lost time, wait time, LPR-to-print-start, reflong, downtime, and delayed print finish. "
         "Tables: comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, delayed_finish_complexity, web_break_gnp_snp_tower_comparison.\n"
         "- tower_downtime_reason_attribution: folder-level downtime reason events attributed to towers that ran the same plant/machine/folder in the selected period. "
         "Use this for questions like web break frequency by individual tower. State that reason attribution is folder-to-tower attribution when giving reason-specific tower counts.\n"
@@ -374,9 +374,10 @@ def build_chat_response(
         "- book_details: per-print-job rows from the master view (Book Wise Details joined with General and Down Time). "
         "Fields: IssueID, Report Date, Run Date, Edition, Products (from General), Machine, Folder, Plant Name, "
         "Total Run Time (mnts), Total Downtime, towers_list (list of tower names), towers_str (flat string), "
+        "total_pages (number of pages / pagination for that edition, from the General sheet's 'Sum of Pages' column), "
         "downtime_total_min, downtime_count, downtime_departments. "
         "Use for edition-level queries: which towers an edition used, what product ran on which folder, "
-        "or how much downtime a specific edition had.\n"
+        "how much downtime a specific edition had, or any pagination / page-count questions.\n"
         "- exact_dashboard.daily: per-date rows with run_date, weekday (Monday-Sunday, precomputed), "
         "month (YYYY-MM, ALREADY PRECOMPUTED — group by this field directly for month-on-month/monthly trend "
         "questions; never refuse for lack of a month rollup and never derive it yourself), runtime_min, "
@@ -396,7 +397,7 @@ def build_chat_response(
         "month (YYYY-MM, ALREADY PRECOMPUTED), runtime_min, lost_time_min (= loss_time_min), waiting_time_min, "
         "available_capacity_min, loss_pct, dominant_driver, loss_components (a dict keyed by component name — "
         "changeover/late-start/reflong — with minutes for that date), top_folders_by_loss. "
-        "Use this for any question about the COMPONENTS of loss time (changeover vs late-start vs reflong) over "
+        "Use this for any question about the COMPONENTS of lost time (changeover vs late-start vs reflong) over "
         "time, including month-on-month or weekday-wise component trends — group rows by month or weekday and "
         "sum each key inside loss_components.\n"
         "- exact_dashboard.folders: per-folder aggregated rows across the full period. Fields: resource (folder name), "
@@ -412,7 +413,7 @@ def build_chat_response(
         "(4) Unqualified metric names → aggregate totals first. "
         "(5) When comparing plants, machines, towers, folders, editions, or categories, always name the metric the "
         "comparison is based on. "
-        "(6) For 'why' questions, separate observation from cause: an observation (e.g. 'loss time was higher on "
+        "(6) For 'why' questions, separate observation from cause: an observation (e.g. 'lost time was higher on "
         "this folder') can be drawn directly from the data; only state a root cause if the data explicitly shows "
         "it (e.g. a specific downtime reason). If several explanations are possible, say what the data suggests "
         "without presenting speculation as settled fact.\n\n"
@@ -500,7 +501,7 @@ exact_dashboard.daily — per-date plant-level totals (use for daily trends, wee
   last_folder (which edition/folder produced that last finish)
 
 loss_time.all_days — per-date plant-level loss breakdown (use for month-on-month or weekday-wise
-  trend questions about the COMPONENTS of loss time: changeover, late-start, reflong)
+  trend questions about the COMPONENTS of lost time: changeover, late-start, reflong)
   Fields: run_date, weekday (ALREADY PRECOMPUTED), month (YYYY-MM, ALREADY PRECOMPUTED), runtime_min,
   lost_time_min (= loss_time_min), waiting_time_min, available_capacity_min, loss_pct, dominant_driver,
   loss_components (dict keyed by component name with minutes for that date), top_folders_by_loss
@@ -651,7 +652,7 @@ def _call_planner(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
         "- CRITICAL: every field named in filters/metrics MUST actually exist on primary_source's field "
         "list above — an unresolvable numeric filter field aborts the whole answer rather than silently "
         "matching every row, so picking the wrong table is worse than a normal mistake. For a plant-level "
-        "night filter on runtime/loss time/downtime/wait time/spare time/utilization/spare capacity, the "
+        "night filter on runtime/lost time/downtime/wait time/spare time/utilization/spare capacity, the "
         "field lives on exact_dashboard.daily (plant-wide) or exact_dashboard.folder_days (per folder) — "
         "use one of those as primary_source. loss_time.all_days only has run_date, runtime_min, "
         "lost_time_min, waiting_time_min, loss_pct, dominant_driver, and loss_components — it has NO "
@@ -659,7 +660,7 @@ def _call_planner(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
         "loss_components breakdown regardless of which table you pick as primary_source, so you do not "
         "need to select it just because the question says 'components'.\n"
         "- A metric mentioned with NO number at all — \"did we have downtime\", \"how many nights had "
-        "downtime\", \"any downtime\", \"experienced loss time\", \"with delays\" — means that metric was "
+        "downtime\", \"any downtime\", \"experienced lost time\", \"with delays\" — means that metric was "
         "PRESENT/non-zero, not literally any value. Use {\"op\": \">\", \"value\": 0} on that field. Do not "
         "omit the filter just because no explicit number was stated in the question."
     )
@@ -693,7 +694,7 @@ gnp_snp_folder_analysis     — precomputed GNP vs SNP folder-night comparisons.
 daily_efficiency            — per-date plant-wide efficiency summary (one row per production night); fields: run_date, total_po, total_runtime_min, total_dt_min, actual_speed_cph, committed_speed_cph, efficiency_pct. USE THIS for any question about efficiency by date, days above/below an efficiency threshold, or efficiency trends over time.
 downtime_by_reason          — top reasons ranked by event count; fields: reason, count, total_minutes
 complexity_by_code          — runtime by C1-C15 code; fields: code, runtime_min, print_order
-book_details                — per print job; fields: IssueID, Edition, Machine, Folder, towers_list, downtime_total_min"""
+book_details                — per print job; fields: IssueID, Edition, Machine, Folder, towers_list, total_pages (pagination / number of pages per edition), downtime_total_min"""
 
 _QU_DECOMPOSER_SYSTEM = (
     "You are a query-understanding agent for a newspaper print-plant analytics dashboard.\n"
@@ -737,7 +738,7 @@ _QU_DECOMPOSER_SYSTEM = (
     "R4 COMPOUND QUESTION: Two separate things asked (e.g. 'how many nights AND what are the key components') "
     "→ sub_questions with one entry per distinct ask. Simple single question→sub_questions:[].\n"
     "R5 IMPLICIT CONDITIONS: 'had downtime'→{field:downtime_min,op:>,value:0}. "
-    "'was delayed'→{field:overrun_minutes,op:>,value:0}. 'had loss time'→{field:loss_time_min,op:>,value:0}.\n"
+    "'was delayed'→{field:overrun_minutes,op:>,value:0}. 'had lost time'→{field:loss_time_min,op:>,value:0}.\n"
     "R6 TABLE CHOICE: loss_time.all_days has NO downtime_min or spare_time_min — never filter those there. "
     "For downtime filter use exact_dashboard.daily or exact_dashboard.folder_days or towers. "
     "For delayed-finish overrun filters use delayed_pf.\n"
@@ -748,7 +749,7 @@ _QU_DECOMPOSER_SYSTEM = (
     "For even more granular segment-level data use tower_runtime_segments with the same fields.\n"
     "R7 COUNT DEDUP: When intent='count' on a source with multiple rows per night (delayed_pf, folder_days), "
     "count distinct run_date values — note this in the first sub_question description.\n"
-    "R8 METRIC FIELDS: Use exact field names from the source listed above (e.g. 'loss_time_min', not 'loss time'). "
+    "R8 METRIC FIELDS: Use exact field names from the source listed above (e.g. 'loss_time_min', not 'lost time'). "
     "Aggregation defaults to 'sum' for totals, 'avg' for per-night averages.\n"
     "R9 SORT: Include sort_by only when user asks for ranking or top/bottom N. Otherwise omit or set to null.\n"
     "R10 TREND/PREDICTION: If intent is 'trend' or 'prediction', still output a plan but note it in intent — "
@@ -2229,7 +2230,7 @@ def _build_pie_chart(
     summary = exact_dashboard.get("summary") or {}
     slices = [
         ("Run Time", summary.get("total_runtime_min")),
-        ("Loss Time", summary.get("total_loss_time_min")),
+        ("Lost Time", summary.get("total_loss_time_min")),
         ("Downtime", summary.get("total_downtime_min")),
         ("Wait Time", summary.get("total_waiting_time_min")),
         ("Spare Time", summary.get("total_spare_time_min")),
@@ -2291,6 +2292,14 @@ def _build_chart_from_plan(
     if filtered is None:
         filtered = rows
     rows = filtered or rows
+    # QU plans use "conditions"/"time_scope"/"entities" instead of the old "filters" dict
+    conditions = plan.get("conditions") or []
+    if conditions:
+        qu_filtered = _apply_qu_conditions(rows, conditions, plan.get("condition_logic", "AND"))
+        if qu_filtered is not None:
+            rows = qu_filtered
+    rows = _apply_qu_time_scope(rows, plan.get("time_scope") or {})
+    rows = _apply_qu_entity_filters(rows, plan.get("entities") or [])
 
     # Prefer the metric derived from question+history over the planner's first field —
     # the planner sees only the current question, so "plot for weekends" with prior "spare
@@ -2321,6 +2330,10 @@ def _build_chart_from_plan(
         )
         if not date_rows:
             date_rows = sorted(rows, key=lambda r: _clean_text(r.get(date_field)))
+        limit = plan.get("limit")
+        if limit:
+            sort_order = _clean_text((plan.get("sort_by") or {}).get("order", "asc")).casefold()
+            date_rows = date_rows[-limit:] if sort_order == "desc" else date_rows[:limit]
         points = [
             {"label": _clean_text(r.get(date_field)), "value": _clean_number(_number(r.get(primary_metric)))}
             for r in date_rows
@@ -2529,13 +2542,13 @@ def _chart_for_answer(
             distribution_chart = _tower_usage_distribution_chart(context)
             if distribution_chart:
                 return distribution_chart
+        answer_chart = _build_chart_from_answer(answer_text, q, history)
+        if answer_chart:
+            return answer_chart
         if plan:
             plan_chart = _build_chart_from_plan(plan, context, q, history)
             if plan_chart:
                 return plan_chart
-        answer_chart = _build_chart_from_answer(answer_text, q, history)
-        if answer_chart:
-            return answer_chart
         return _build_chart_payload(message, context, history)
     except Exception:
         return None
@@ -2631,11 +2644,11 @@ _COMPARATOR_FUNCS = {
 _COMPARATOR_LABELS = {">": "greater than", "<": "less than", ">=": "at least", "<=": "at most"}
 
 # Maps question phrasing to the field name carried on delayed_pf / daily / folder rows, so a
-# nested filter clause ("...where loss time is greater than 50 minutes") can be applied in Python
+# nested filter clause ("...where lost time is greater than 50 minutes") can be applied in Python
 # instead of asking the LLM to apply a second condition on top of a count — the same failure
 # class as the day-count dedup bug, just with an added filter the model silently dropped.
 _FILTER_METRIC_FIELDS = [
-    (["loss time", "lost time"], "loss_time_min", "Loss Time"),
+    (["lost time", "lost time"], "loss_time_min", "Lost Time"),
     (["overrun", "minutes late", "minutes past", "past cutoff"], "overrun_minutes", "Overrun"),
     (["downtime", "down time"], "downtime_min", "Downtime"),
     (["runtime", "run time"], "runtime_min", "Run Time"),
@@ -2679,7 +2692,7 @@ def _answer_delayed_pf_count_question(question: str, context: dict[str, Any]) ->
     )
     rows = filtered or rows
 
-    # Apply a nested numeric clause if the question has one, e.g. "...where loss time is greater
+    # Apply a nested numeric clause if the question has one, e.g. "...where lost time is greater
     # than 50 minutes" — without this, a compound question silently degraded to the unqualified
     # day count (the metric filter the user asked for was just dropped).
     filter_note = ""
@@ -2831,7 +2844,7 @@ def _answer_night_type_time_comparison_question(question: str, context: dict[str
 
     metric_specs = _base_category_metric_specs(question)
     if not metric_specs:
-        metric_specs = [("loss_time_min", "Loss Time")]
+        metric_specs = [("loss_time_min", "Lost Time")]
 
     buckets = {
         "uv": _new_night_type_bucket("UV / GNP night"),
@@ -2927,7 +2940,7 @@ def _answer_base_category_comparison_question(question: str, context: dict[str, 
 
     metric_specs = _base_category_metric_specs(question)
     if not metric_specs:
-        metric_specs = [("loss_time_min", "Loss Time")]
+        metric_specs = [("loss_time_min", "Lost Time")]
 
     buckets = {
         "SNP": _new_base_category_bucket("SNP / standard", "C1-C4, including SNP Complex"),
@@ -2981,7 +2994,7 @@ def _answer_base_category_comparison_question(question: str, context: dict[str, 
     lines = [
         "Using current dashboard filters and printing-window metrics.",
         "SNP/standard includes C1-C4; GNP/glossy includes C5-C15. Complex variants are included by default.",
-        "If a folder-day contains both categories, time is allocated by runtime share. Wait, spare, and unplanned time are excluded from loss time.",
+        "If a folder-day contains both categories, time is allocated by runtime share. Wait, spare, and unplanned time are excluded from lost time.",
         "",
     ]
 
@@ -3050,7 +3063,7 @@ def _base_category_metric_specs(question: str) -> list[tuple[str, str]]:
     has_loss = "loss" in question or "lost" in question
     has_changeover = "changeover" in question or "change over" in question
     if has_loss or has_changeover:
-        specs.append(("loss_time_min", "Loss Time"))
+        specs.append(("loss_time_min", "Lost Time"))
     if has_changeover:
         specs.append(("change_over_time_min", "Changeover Time"))
     if "downtime" in question or "down time" in question:
@@ -3202,12 +3215,12 @@ def _concentration_metric_spec(question: str) -> tuple[str, str, str] | None:
         return (
             "unplanned_time_min",
             "Unplanned Time",
-            "Unscheduled time is treated as Unplanned Time, not Loss Time.",
+            "Unscheduled time is treated as Unplanned Time, not Lost Time.",
         )
     if "downtime" in question or "down time" in question:
         return ("downtime_min", "Downtime", "Downtime is unplanned stoppage during active production.")
     if "wait" in question:
-        return ("waiting_time_min", "Wait Time", "Wait Time is separate from Loss Time.")
+        return ("waiting_time_min", "Wait Time", "Wait Time is separate from Lost Time.")
     if "spare" in question:
         return ("spare_time_min", "Spare Time", "Spare Time is remaining available capacity.")
     if "runtime" in question or "run time" in question:
@@ -3221,8 +3234,8 @@ def _concentration_metric_spec(question: str) -> tuple[str, str, str] | None:
     if "loss" in question or "lost" in question:
         return (
             "loss_time_min",
-            "Loss Time",
-            "Loss Time is changeover + LPR-to-start + reflong; it excludes Wait Time and Unplanned Time.",
+            "Lost Time",
+            "Lost Time is changeover + LPR-to-start + reflong; it excludes Wait Time and Unplanned Time.",
         )
     return None
 
@@ -3391,7 +3404,7 @@ def _answer_gnp_snp_folder_question(question: str, context: dict[str, Any]) -> s
         or "average" in question
         or "correlation" in question
         or "waiting time" in question
-        or "loss time" in question
+        or "lost time" in question
         or "downtime" in question
         or "reflong" in question
         or "lpr" in question
@@ -3700,7 +3713,7 @@ def _apply_plan_filters(rows: list[dict[str, Any]], filters: Any) -> list[dict[s
             if is_numeric_filter:
                 return None
             continue
-        # Numeric comparator filter, e.g. {"op": ">", "value": 50} for "loss time greater than 50
+        # Numeric comparator filter, e.g. {"op": ">", "value": 50} for "lost time greater than 50
         # minutes" — the planner schema teaches the model to emit this shape for threshold
         # questions instead of the plain equality match below, which can't express ">"/"<" at all.
         if is_numeric_filter:
@@ -3782,8 +3795,8 @@ def _mentioned_metric_fields(
         ("runtime_minutes", ["runtime", "run time", "run"]),
         ("downtime_min", ["downtime", "down time"]),
         ("allocated_downtime_min", ["downtime", "down time"]),
-        ("loss_time_min", ["loss time", "lost time", "loss"]),
-        ("lost_time_min", ["loss time", "lost time", "loss"]),
+        ("loss_time_min", ["lost time", "lost time", "loss"]),
+        ("lost_time_min", ["lost time", "lost time", "loss"]),
         ("waiting_time_min", ["wait time", "waiting time", "wait"]),
         ("spare_time_min", ["spare time", "spare"]),
         ("unplanned_time_min", ["unplanned time", "unplanned"]),
@@ -3859,7 +3872,7 @@ def _plan_count_unit_field(question: str, rows: list[dict[str, Any]]) -> str:
     # X" must dedupe on whatever unit X names, not just dates, or a unit with several matching
     # rows (e.g. a folder with multiple delayed nights) gets over-counted.
     # "times" means occasions ("what times have we worked with...") — matched as a whole word so
-    # it doesn't fire on "loss time"/"run time"/etc.
+    # it doesn't fire on "lost time"/"run time"/etc.
     if re.search(r"\btimes\b", question):
         resolved = _resolve_row_field(rows, "run_date")
         if resolved:
@@ -3878,7 +3891,7 @@ def _plan_components_breakdown(question: str, rows: list[dict[str, Any]], contex
 
     top_level_fields = [
         ("runtime_min", "Run Time"),
-        ("loss_time_min", "Loss Time"),
+        ("loss_time_min", "Lost Time"),
         ("downtime_min", "Downtime"),
         ("waiting_time_min", "Wait Time"),
         ("spare_time_min", "Spare Time"),
@@ -3929,7 +3942,7 @@ def _plan_components_breakdown(question: str, rows: list[dict[str, Any]], contex
         if component_totals:
             component_labels = dict(LOSS_COMPONENTS)
             lines.append("")
-            lines.append("Loss Time sub-components:")
+            lines.append("Lost Time sub-components:")
             for key, minutes in sorted(component_totals.items(), key=lambda kv: -kv[1]):
                 lines.append(f"- **{component_labels.get(key, key)}**: {minutes:g} min")
             has_content = True
@@ -3953,8 +3966,8 @@ def _plan_metric_fields(plan: dict[str, Any], rows: list[dict[str, Any]], messag
         ("runtime_minutes", ["runtime", "run time", "run"]),
         ("downtime_min", ["downtime", "down time"]),
         ("allocated_downtime_min", ["downtime", "down time"]),
-        ("loss_time_min", ["loss time", "lost time", "loss"]),
-        ("lost_time_min", ["loss time", "lost time", "loss"]),
+        ("loss_time_min", ["lost time", "lost time", "loss"]),
+        ("lost_time_min", ["lost time", "lost time", "loss"]),
         ("waiting_time_min", ["wait time", "waiting time", "wait"]),
         ("spare_time_min", ["spare time", "spare"]),
         ("utilization_pct", ["utilization", "utilisation"]),
@@ -4364,7 +4377,7 @@ def _answer_downtime_reason_question(question: str, context: dict[str, Any]) -> 
 
 def _asks_summary_metric(question: str) -> bool:
     metric_terms = [
-        "runtime", "run time", "downtime", "down time", "loss time", "lost time", "wait time",
+        "runtime", "run time", "downtime", "down time", "lost time", "lost time", "wait time",
         "waiting time", "spare", "unplanned", "utilized", "utilised", "utilization", "utilisation", "available", "mot",
     ]
     # A flat plant-wide total is the WRONG shape of answer for any question that's actually asking
@@ -4395,8 +4408,8 @@ def _answer_summary_metric_question(question: str, context: dict[str, Any]) -> s
         parts.append(f"Run Time: {_format_chat_minutes(summary.get('total_runtime_min'))}")
     if "downtime" in question or "down time" in question:
         parts.append(f"Downtime: {_format_chat_minutes(summary.get('total_downtime_min'))}")
-    if "loss time" in question or "lost time" in question:
-        parts.append(f"Loss Time: {_format_chat_minutes(summary.get('total_loss_time_min'))}")
+    if "lost time" in question or "lost time" in question:
+        parts.append(f"Lost Time: {_format_chat_minutes(summary.get('total_loss_time_min'))}")
     if "wait time" in question or "waiting time" in question or re.search(r"\bwait\b", question):
         parts.append(f"Wait Time: {_format_chat_minutes(summary.get('total_waiting_time_min'))}")
     if "spare capacity" in question:
@@ -4414,7 +4427,7 @@ def _answer_summary_metric_question(question: str, context: dict[str, Any]) -> s
         )
         parts.append(
             f"Utilized Time: {_format_chat_minutes(utilized_time)} "
-            "(Runtime (SNP + GNP) + Loss Time + Downtime)"
+            "(Runtime (SNP + GNP) + Lost Time + Downtime)"
         )
     elif "utilization" in question or "utilisation" in question:
         parts.append(f"Utilisation: {summary.get('average_utilization_pct')}%")
@@ -4483,8 +4496,8 @@ def _daily_average_metric_spec(question: str) -> dict[str, Any] | None:
         return {"label": "Run Time", "daily_key": "runtime_min", "summary_key": "total_runtime_min", "unit": "min"}
     if "downtime" in question or "down time" in question:
         return {"label": "Downtime", "daily_key": "downtime_min", "summary_key": "total_downtime_min", "unit": "min"}
-    if "loss time" in question or "lost time" in question:
-        return {"label": "Loss Time", "daily_key": "loss_time_min", "summary_key": "total_loss_time_min", "unit": "min"}
+    if "lost time" in question or "lost time" in question:
+        return {"label": "Lost Time", "daily_key": "loss_time_min", "summary_key": "total_loss_time_min", "unit": "min"}
     if "wait time" in question or "waiting time" in question or re.search(r"\bwait\b", question):
         return {"label": "Wait Time", "daily_key": "waiting_time_min", "summary_key": "total_waiting_time_min", "unit": "min"}
     if "spare" in question:
@@ -4817,7 +4830,7 @@ def _answer_utilization_threshold_question(question: str, context: dict[str, Any
 
     component_totals: dict[str, float] = {}
     table_lines = [
-        "| Date | Utilization % | Run Time | Loss Time | Downtime | Wait Time | Spare Time |",
+        "| Date | Utilization % | Run Time | Lost Time | Downtime | Wait Time | Spare Time |",
         "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in matched:
@@ -4836,7 +4849,7 @@ def _answer_utilization_threshold_question(question: str, context: dict[str, Any
     if component_totals:
         component_labels = dict(LOSS_COMPONENTS)
         lines.append("")
-        lines.append("Loss Time components across these nights:")
+        lines.append("Lost Time components across these nights:")
         for key, minutes in sorted(component_totals.items(), key=lambda kv: -kv[1]):
             lines.append(f"- **{component_labels.get(key, key)}**: {minutes:g} min")
 
@@ -6389,7 +6402,7 @@ def _build_tower_runtime_mix(tower_day_rows: list[dict[str, Any]]) -> list[dict[
 def _largest_delayed_pf_components(row: dict[str, Any]) -> list[dict[str, Any]]:
     components = [
         ("runtime", "Run Time", _number(row.get("runtime"))),
-        ("loss_time", "Loss Time", _loss_time_minutes(row)),
+        ("loss_time", "Lost Time", _loss_time_minutes(row)),
         ("waiting_time", "Wait Time", _number(row.get("waiting_time"))),
         ("downtime", "Downtime", _number(row.get("downtime"))),
         ("spare_time", "Spare Time", _number(row.get("buffer_time"))),
@@ -6922,7 +6935,7 @@ def _build_llm_summary(intelligence: dict[str, Any]) -> tuple[dict[str, Any], di
                 "and GNP Complex is the complex variant within GNP. Focus only on interesting, non-obvious executive insights: "
                 "complexity impact on machine/folder speed, high-level folder utilization comparison, and meaningful loss-time drivers. "
                 "Avoid redundant threshold-style statements. Return concise JSON with keys: headline, key_summary_points, recommended_actions. "
-                "Treat spare time and unplanned time as entirely separate facts: spare (buffer_time) is leftover capacity on active nights; unplanned is capacity on nights with no scheduled activity. NEVER combine them. Waiting time is separate from loss time — do not include waiting in loss time figures. "
+                "Treat spare time and unplanned time as entirely separate facts: spare (buffer_time) is leftover capacity on active nights; unplanned is capacity on nights with no scheduled activity. NEVER combine them. Waiting time is separate from lost time — do not include waiting in lost time figures. "
                 "key_summary_points and recommended_actions must be arrays of short, concrete strings."
             ),
         },
@@ -6955,7 +6968,7 @@ def _fallback_summary(intelligence: dict[str, Any]) -> dict[str, Any]:
     headline = (
         f"Average speed is {summary.get('average_speed_cph', 0)} cph, "
         f"folder utilization averages {summary.get('average_folder_utilization_percentage', 0)}%, "
-        f"and loss time is {summary.get('total_loss_time_minutes', 0)} minutes."
+        f"and lost time is {summary.get('total_loss_time_minutes', 0)} minutes."
     )
 
     actions = [

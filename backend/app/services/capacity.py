@@ -64,6 +64,7 @@ _BOOK_DETAIL_LEAN_COLS = [
     COMMITTED_SPEED_COLUMN,
     "towers_list",
     "towers_str",
+    "total_pages",
     "downtime_total_min",
     "downtime_count",
     "downtime_departments",
@@ -162,6 +163,10 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
         axis=1,
     )
 
+    # Exclude TRIAL editions (case-insensitive match on Edition Name)
+    trial_mask = df["Edition Name"].str.upper().str.startswith("TRIAL", na=False)
+    df = df[~trial_mask].reset_index(drop=True)
+
     return df
 
 
@@ -210,7 +215,7 @@ def _join_book_general_downtime(
         return pd.DataFrame()
 
     # --- General slim: one row per IssueID with towers pre-split (vectorized) ---
-    _empty_general_slim = pd.DataFrame(columns=["IssueID", "Products", "towers_list", "towers_str"])
+    _empty_general_slim = pd.DataFrame(columns=["IssueID", "Products", "towers_list", "towers_str", "total_pages"])
     if general_df.empty:
         general_slim = _empty_general_slim
     else:
@@ -218,6 +223,7 @@ def _join_book_general_downtime(
             "IssueID": general_df["IssueID"].apply(_clean_text) if "IssueID" in general_df.columns else "",
             "Products": general_df["Products"].apply(_clean_text) if "Products" in general_df.columns else "",
             "towers_list": general_df["Towers used"].apply(_split_towers) if "Towers used" in general_df.columns else pd.Series([[] for _ in range(len(general_df))]),
+            "total_pages": general_df["Sum of Pages"].apply(_parse_count_value) if "Sum of Pages" in general_df.columns else pd.Series(0, index=general_df.index),
         })
         _gwork = _gwork[_gwork["IssueID"].ne("")]
         if _gwork.empty:
@@ -257,7 +263,7 @@ def _join_book_general_downtime(
     master["downtime_events"] = master["downtime_events"].apply(
         lambda v: v if isinstance(v, list) else []
     )
-    for col, default in [("Products", ""), ("towers_str", ""), ("downtime_departments", "")]:
+    for col, default in [("Products", ""), ("towers_str", ""), ("downtime_departments", ""), ("total_pages", 0)]:
         if col in master.columns:
             master[col] = master[col].fillna(default)
     for col in ("downtime_total_min", "downtime_count"):
@@ -1492,7 +1498,7 @@ def _aggregate_down_time_by_capacity_unit_filtered(
 
     Rows where the IssueID is a reflong issue (Reflong == 'Yes' in Book Wise Details)
     and Department == 'Reflong - Changeover' are counted as reflong_related_downtime
-    (moved to loss time) rather than regular downtime.
+    (moved to lost time) rather than regular downtime.
     """
     keys = [REPORT_DATE_COLUMN, "Plant Name", "Machine", "Folder"]
 
