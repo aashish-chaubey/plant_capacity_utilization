@@ -1247,7 +1247,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                         width={barWidth}
                         height={segmentHeight}
                         fill={fill}
-                        stroke={segment.key === "idle_time" ? "#cbd5e1" : "rgba(255,255,255,0.75)"}
+                        stroke="rgba(255,255,255,0.75)"
                         strokeWidth="0.6"
                       >
                         <title>
@@ -1768,7 +1768,7 @@ function PatternedUtilizationBar(props) {
     <path
       d={path}
       fill={`url(#${patternId})`}
-      stroke="#cbd5e1"
+      stroke="#ffffff"
       strokeWidth="1.25"
       vectorEffect="non-scaling-stroke"
     />
