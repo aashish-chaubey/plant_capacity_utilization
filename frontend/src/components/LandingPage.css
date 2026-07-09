@@ -1,0 +1,305 @@
+/* LandingPage.css */
+
+.landing-page-container {
+    min-height: 100vh;
+    background-color: #020813;
+    display: flex;
+    flex-direction: column;
+    color: #ffffff;
+    font-family: 'Inter', sans-serif;
+    overflow-x: hidden;
+    position: relative;
+}
+
+/* Machine background image — positioned top-right, native size capped, scales down proportionally */
+.machine-bg-img {
+    position: absolute;
+    top: 0;
+    right: 0;
+    /* Scale down on small screens, never bigger than 60% of screen width or native 1075px */
+    width: min(60vw, 1075px);
+    max-width: 60vw;
+    height: auto;
+    /* Preserve aspect ratio — no stretch */
+    object-fit: contain;
+    object-position: top right;
+    /* Horizontal: fully transparent at 2%, fully opaque at 20% of image width  */
+    /* Vertical:   fully opaque until 70%, fully transparent at 90% of image height */
+    -webkit-mask-image:
+        linear-gradient(to right,  transparent 2%, black 20%),
+        linear-gradient(to bottom, black 70%, transparent 90%);
+    -webkit-mask-composite: destination-in;
+    mask-image:
+        linear-gradient(to right,  transparent 2%, black 20%),
+        linear-gradient(to bottom, black 70%, transparent 90%);
+    mask-composite: intersect;
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+}
+
+/* All direct content above the background image */
+.landing-page-container > *:not(.machine-bg-img) {
+    position: relative;
+    z-index: 1;
+}
+
+/* Glowing Divider Line */
+.header-divider {
+    height: 1.5px;
+    background: linear-gradient(to right,
+            rgba(56, 189, 248, 0.9) 0%,
+            rgba(56, 189, 248, 0.9) 60%,
+            rgba(56, 189, 248, 0.1) 100%);
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+    width: 55%;
+    max-width: 700px;
+    margin-top: 1.25rem;
+    margin-bottom: 1.25rem;
+}
+
+/* Custom Card Styles matching the snapshot */
+.mockup-card {
+    height: 140px;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    /* thin white border */
+    border-radius: 12px;
+    box-shadow: none !important;
+    /* no box shadow */
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    overflow: hidden;
+}
+
+.mockup-card:hover {
+    transform: translateY(-2px);
+}
+
+.mockup-card-blue {
+    background-color: #030d22;
+}
+
+.mockup-card-green {
+    background-color: #02140a;
+}
+
+.mockup-card-purple {
+    background-color: #0f031d;
+}
+
+/* 35% height top section */
+.card-top-sec {
+    height: 35%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-top: 0.25rem;
+}
+
+/* 65% height bottom section */
+.card-bottom-sec {
+    height: 65%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-bottom: 0.25rem;
+    text-align: center;
+}
+
+/* Separator lines */
+.separator-blue {
+    height: 1px;
+    width: 50%;
+    margin: 0 auto;
+    background: linear-gradient(to right,
+            transparent 0%,
+            rgba(56, 189, 248, 0.8) 30%,
+            rgba(56, 189, 248, 0.8) 70%,
+            transparent 100%);
+}
+
+.separator-green {
+    height: 1px;
+    width: 50%;
+    margin: 0 auto;
+    background: linear-gradient(to right,
+            transparent 0%,
+            rgba(0, 255, 135, 0.8) 30%,
+            rgba(0, 255, 135, 0.8) 70%,
+            transparent 100%);
+}
+
+.separator-purple {
+    height: 1px;
+    width: 50%;
+    margin: 0 auto;
+    background: linear-gradient(to right,
+            transparent 0%,
+            rgba(210, 0, 255, 0.8) 30%,
+            rgba(210, 0, 255, 0.8) 70%,
+            transparent 100%);
+}
+
+/* Scrollbar customizations for responsive bottom banner */
+.plants-scrollbar::-webkit-scrollbar {
+    height: 5px;
+}
+
+.plants-scrollbar::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.03);
+    border-radius: 10px;
+}
+
+.plants-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.3);
+    border-radius: 10px;
+}
+
+.plants-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.5);
+}
+
+/* Micro-animations for plants list icons */
+.plant-image-wrapper {
+    height: 5rem;
+    /* 80px default on mobile */
+    width: 5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.plant-item-btn {
+    position: relative;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    background-color: transparent !important;
+    /* no background changes */
+    padding-bottom: 0.75rem;
+}
+
+.plant-item-btn img {
+    transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s ease;
+}
+
+/* Dynamic stylish bottom line instead of background changes */
+.plant-item-btn::after {
+    content: '';
+    position: absolute;
+    bottom: 2px;
+    left: 50%;
+    width: 0;
+    height: 3px;
+    background: linear-gradient(to right, #00d2ff, #2563eb);
+    border-radius: 2px;
+    transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1), left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.plant-item-btn:hover::after {
+    width: 50%;
+    left: 25%;
+}
+
+.plant-item-btn:hover img {
+    transform: translateY(-6px) scale(1.06);
+}
+
+.plant-item-btn:active {
+    transform: scale(0.96);
+}
+
+@media (min-width: 1200px) {
+    .landing-page-container {
+        height: 100vh;
+        max-height: 100vh;
+        overflow: hidden;
+        padding-top: 0.75rem;
+        padding-bottom: 0.5rem;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+    }
+
+    /* Suppress header top margin on larger screens */
+    .landing-page-container > div:first-of-type {
+        margin-top: 0 !important;
+    }
+
+    /* Cards grid margins are handled by clamp() inline style in JSX */
+
+    .mockup-card {
+        height: 110px !important;
+    }
+
+    /* Force plants scrollbar to not scroll and fit w-full */
+    .plants-scrollbar {
+        overflow-x: hidden !important;
+        padding-bottom: 0 !important;
+    }
+
+    /* Reset min-width for the plants row to fit within the viewport */
+    .plants-row-container {
+        min-width: 0 !important;
+        width: 100% !important;
+        gap: 0.25rem !important;
+    }
+
+    /* Scale monuments for exact fit on screen widths between 1200px and 1439px */
+    .plant-image-wrapper {
+        height: 4.5rem !important;
+        /* 72px */
+        width: 4.5rem !important;
+        /* 72px */
+    }
+
+    .plant-item-btn {
+        padding-top: 0.25rem !important;
+        padding-bottom: 0.5rem !important;
+        padding-left: 0px !important;
+        padding-right: 0px !important;
+    }
+
+    /* Bottom banner margins and padding */
+    .bottom-selection-banner {
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+        padding: 0.75rem 1rem !important;
+    }
+
+    .bottom-selection-banner hr {
+        margin-bottom: 0.75rem !important;
+    }
+}
+
+/* For screens 1440px and larger, we can restore the larger icons and spacing */
+@media (min-width: 1440px) {
+    .landing-page-container {
+        padding-left: 2.5rem !important;
+        padding-right: 2.5rem !important;
+    }
+
+    .mockup-card {
+        height: 140px !important;
+    }
+
+    .plants-row-container {
+        gap: 0.5rem !important;
+    }
+
+    .plant-image-wrapper {
+        height: 6rem !important;
+        /* 96px */
+        width: 6rem !important;
+        /* 96px */
+    }
+
+    .plant-item-btn {
+        padding-top: 0.5rem !important;
+        padding-bottom: 0.75rem !important;
+        padding-left: 2px !important;
+        padding-right: 2px !important;
+    }
+
+    .bottom-selection-banner {
+        padding: 1.25rem 1.5rem !important;
+    }
+}

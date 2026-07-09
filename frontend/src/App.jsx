@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import Dashboard from "./components/Dashboard.jsx";
 import EvalLogPage from "./components/EvalLogPage.jsx";
+import LandingPage from "./components/LandingPage.jsx";
 
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const FISCAL_YEAR_START_MONTH = 4;
@@ -700,10 +701,7 @@ function DashboardApp() {
         )}
 
         {showPlantSelection && (
-          <LandingPlantSelection
-            datasetMeta={datasetMeta}
-            fileName={fileName}
-            plantOptions={plantOptions}
+          <LandingPage
             onSelectPlant={handlePlantChange}
           />
         )}
@@ -737,164 +735,7 @@ function DashboardApp() {
   );
 }
 
-function LandingPlantSelection({ datasetMeta, fileName, plantOptions, onSelectPlant }) {
-  const dateRange = datasetMeta?.loaded_date_range?.start && datasetMeta?.loaded_date_range?.end
-    ? formatDateRangeLabel(datasetMeta.loaded_date_range.start, datasetMeta.loaded_date_range.end)
-    : "";
 
-  return (
-    <section className="relative min-h-screen overflow-hidden bg-[#eef6ff] text-slate-950">
-      <div className="absolute inset-x-0 bottom-0 h-56 opacity-70" aria-hidden="true">
-        <div className="h-full w-full bg-[linear-gradient(165deg,transparent_0_38%,rgba(37,99,235,0.10)_38.4%,transparent_39%,transparent_45%,rgba(37,99,235,0.08)_45.4%,transparent_46%,transparent_52%,rgba(14,165,233,0.08)_52.4%,transparent_53%)]" />
-      </div>
-
-      <div className="relative mx-auto flex min-h-screen w-full max-w-[1320px] flex-col px-5 py-5 sm:px-8">
-        <nav className="flex items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-[0_12px_28px_rgba(37,99,235,0.25)]">
-              <BarChart2 className="h-6 w-6" aria-hidden="true" />
-            </div>
-            <div className="min-w-0">
-              <p className="truncate text-base font-extrabold text-slate-950">Plant Capacity Utilization</p>
-              <p className="truncate text-xs font-semibold text-blue-600">Tower-level capacity intelligence</p>
-            </div>
-          </div>
-
-          {fileName && (
-            <span className="hidden max-w-[280px] items-center gap-1.5 rounded-full border border-blue-100 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-500 shadow-sm sm:flex">
-              <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-blue-600" aria-hidden="true" />
-              <span className="truncate">{fileName}</span>
-            </span>
-          )}
-        </nav>
-
-        <div className="grid flex-1 items-center gap-8 py-8 lg:grid-cols-[1.08fr_0.92fr] xl:gap-10 lg:py-6">
-          <div className="max-w-[660px]">
-            <h1 className="text-[42px] font-black leading-[1.05] text-slate-950 sm:text-[56px] lg:text-[62px]">
-              Select Your Plant. <span className="text-blue-600">Start Analysis.</span>
-            </h1>
-            <p className="mt-5 max-w-lg text-base font-medium leading-8 text-slate-700 sm:text-lg">
-              Shared production data is ready. Choose the plant you want to work with.
-            </p>
-
-            <div className="mt-7 flex flex-wrap gap-2.5">
-              <span className="rounded-full border border-blue-100 bg-white/80 px-3 py-1.5 text-xs font-bold text-blue-700 shadow-sm">
-                {plantOptions.length} plants
-              </span>
-              {dateRange && (
-                <span className="rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-bold text-slate-600 shadow-sm">
-                  {dateRange}
-                </span>
-              )}
-            </div>
-
-            <div className="mt-9 max-w-[640px] rounded-xl border border-blue-100 bg-white/88 p-4 shadow-[0_18px_46px_rgba(37,99,235,0.12)] backdrop-blur">
-              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-                {plantOptions.map((option, index) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    onClick={() => onSelectPlant(option.value)}
-                    className="group flex min-h-[64px] items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-blue-300 hover:bg-blue-50 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-200"
-                  >
-                    <span
-                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-black text-white shadow-sm"
-                      style={{ backgroundColor: landingPlantColor(index) }}
-                      aria-hidden="true"
-                    >
-                      {plantInitials(option.label)}
-                    </span>
-                    <span className="min-w-0 whitespace-nowrap text-sm font-extrabold text-slate-900 group-hover:text-blue-700">
-                      {option.label}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <LandingCapacityPreview />
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function LandingCapacityPreview() {
-  const bars = [
-    { day: "01", run: 50, loss: 18, spare: 22, idle: 10 },
-    { day: "05", run: 62, loss: 14, spare: 16, idle: 8 },
-    { day: "09", run: 47, loss: 20, spare: 24, idle: 9 },
-    { day: "13", run: 58, loss: 16, spare: 18, idle: 8 },
-    { day: "17", run: 68, loss: 12, spare: 14, idle: 6 },
-    { day: "21", run: 54, loss: 17, spare: 20, idle: 9 },
-  ];
-
-  return (
-    <div className="relative mx-auto w-full max-w-[590px]">
-      <div className="absolute left-0 top-6 hidden h-[500px] w-16 rounded-2xl bg-slate-950 shadow-[0_22px_60px_rgba(15,23,42,0.30)] lg:block">
-        <div className="flex h-full flex-col items-center gap-5 py-8 text-slate-500">
-          {[0, 1, 2, 3, 4].map((item) => (
-            <span
-              key={item}
-              className={`flex h-8 w-8 items-center justify-center rounded-lg ${item === 0 ? "bg-blue-600" : "bg-slate-900"}`}
-            >
-              <span className={`h-3 w-3 rounded ${item === 0 ? "bg-white" : "bg-slate-600"}`} />
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <div className="relative rounded-2xl border border-white/80 bg-white p-4 shadow-[0_28px_70px_rgba(30,64,175,0.18)] lg:ml-11">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <p className="text-sm font-extrabold text-slate-950">Overview</p>
-            <p className="text-xs font-medium text-slate-400">Plant capacity snapshot</p>
-          </div>
-          <div className="flex h-8 items-center gap-1 rounded-full border border-slate-100 bg-slate-50 px-2">
-            <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
-            <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-            <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[
-            ["Runtime", "52%", "text-blue-600"],
-            ["Loss", "17%", "text-amber-500"],
-            ["Spare", "21%", "text-sky-500"],
-            ["Unused", "10%", "text-slate-500"],
-          ].map(([label, value, color]) => (
-            <div key={label} className="rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
-              <p className="text-[11px] font-bold text-slate-400">{label}</p>
-              <p className={`mt-2 text-2xl font-black ${color}`}>{value}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-3 rounded-lg border border-slate-100 bg-white p-3 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-extrabold text-slate-700">Daily Capacity Split</p>
-            <span className="text-[11px] font-bold text-blue-600">100%</span>
-          </div>
-          <div className="mt-4 flex h-48 items-end gap-3">
-            {bars.map((bar) => (
-              <div key={bar.day} className="flex h-full flex-1 flex-col justify-end gap-1">
-                <div className="flex h-[168px] flex-col-reverse overflow-hidden rounded-t-md bg-slate-100">
-                  <div className="bg-[#B2CFB2]" style={{ height: `${bar.run}%` }} />
-                  <div className="bg-[#F3C97B]" style={{ height: `${bar.loss}%` }} />
-                  <div className="bg-[#C5E1FF]" style={{ height: `${bar.spare}%` }} />
-                  <div className="bg-[repeating-linear-gradient(135deg,#E5E7EB_0_5px,#B4BBC7_5px_6px,#E5E7EB_6px_11px)]" style={{ height: `${bar.idle}%` }} />
-                </div>
-                <span className="text-center text-[10px] font-bold text-slate-400">{bar.day}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function MetricDefinitionsModal({ onClose }) {
   return (
