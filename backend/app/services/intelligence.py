@@ -157,6 +157,9 @@ def build_chat_response(
 
     llm_context = _compact_chat_context_for_llm(context, message, qu_plan=qu_plan)
     context_json = json.dumps(llm_context, separators=(",", ":"), ensure_ascii=True)
+    if len(context_json) > 650_000:
+        llm_context = _minimal_chat_context_for_llm(context, qu_plan=qu_plan)
+        context_json = json.dumps(llm_context, separators=(",", ":"), ensure_ascii=True)
 
     system_content = (
         f"{plan_section}"
@@ -1739,11 +1742,11 @@ def _compact_chat_context_for_llm(
     def _lim(key: str, full: int, stub: int) -> int:
         """Return full if source is required, stub if not.
         When no plan is available (force_full_llm=True or decomposer skipped),
-        use a generous baseline so the LLM always has breadth."""
+        use a conservative baseline so large workbooks stay under model limits."""
         if _req(key):
             return full
         if not required:
-            return min(full, 300)  # generous default when no plan
+            return min(full, 60)
         return stub
 
     # tower_runtime_segments is a large table — only include when explicitly required
@@ -1752,7 +1755,7 @@ def _compact_chat_context_for_llm(
         _tower_runtime_segment_context_rows(
             context.get("tower_days_all") or context.get("tower_days") or [],
             "",
-            limit=2500,
+            limit=600,
         )
         if wants_tower_runtime_segments
         else []
@@ -1770,7 +1773,7 @@ def _compact_chat_context_for_llm(
             "folders": _compact_rows(exact.get("folders") or [], limit=200),
             "folder_days": _compact_rows(
                 exact.get("folder_days") or [],
-                limit=_lim("exact_dashboard.folder_days", 500, 5),
+                limit=_lim("exact_dashboard.folder_days", 120, 5),
             ),
             "complexity_downtime_by_code": _compact_rows(exact.get("complexity_downtime_by_code") or [], limit=30),
         },
@@ -1804,7 +1807,7 @@ def _compact_chat_context_for_llm(
         "tower_runtime_mix": _compact_rows(context.get("tower_runtime_mix") or [], limit=80),
         "tower_days": _compact_rows(
             context.get("tower_days_all") or context.get("tower_days") or [],
-            limit=_lim("tower_days", 500, 5),
+            limit=_lim("tower_days", 150, 5),
         ),
         "tower_usage_distribution": _compact_rows(context.get("tower_usage_distribution") or [], limit=80),
         "tower_weekday_summary": _compact_rows(
@@ -1836,15 +1839,15 @@ def _compact_chat_context_for_llm(
             ),
             "gnp_loss_breakdown_by_folder": _compact_rows(
                 gnp_snp_analysis.get("gnp_loss_breakdown_by_folder") or [],
-                limit=_lim("gnp_snp_folder_analysis.gnp_loss_breakdown_by_folder", 500, 5),
+                limit=_lim("gnp_snp_folder_analysis.gnp_loss_breakdown_by_folder", 120, 5),
             ),
             "nights_with_min_3_gnp_folders": _compact_rows(
                 gnp_snp_analysis.get("nights_with_min_3_gnp_folders") or [],
-                limit=_lim("gnp_snp_folder_analysis.nights_with_min_3_gnp_folders", 500, 5),
+                limit=_lim("gnp_snp_folder_analysis.nights_with_min_3_gnp_folders", 120, 5),
             ),
             "delayed_finish_complexity": _compact_rows(
                 gnp_snp_analysis.get("delayed_finish_complexity") or [],
-                limit=_lim("gnp_snp_folder_analysis.delayed_finish_complexity", 500, 5),
+                limit=_lim("gnp_snp_folder_analysis.delayed_finish_complexity", 120, 5),
             ),
             "web_break_gnp_snp_tower_comparison": _compact_rows(
                 gnp_snp_analysis.get("web_break_gnp_snp_tower_comparison") or [],
@@ -1854,7 +1857,7 @@ def _compact_chat_context_for_llm(
         },
         "delayed_pf": _compact_rows(
             context.get("delayed_pf") or [],
-            limit=_lim("delayed_pf", 500, 5),
+            limit=_lim("delayed_pf", 150, 5),
         ),
         "uv_nights": {
             "definition": (context.get("uv_nights") or {}).get("definition"),
@@ -1862,7 +1865,7 @@ def _compact_chat_context_for_llm(
             "snp_nights": (context.get("uv_nights") or {}).get("snp_nights") or [],
             "nights": _compact_rows(
                 (context.get("uv_nights") or {}).get("nights") or [],
-                limit=_lim("uv_nights", 500, 5),
+                limit=_lim("uv_nights", 120, 5),
             ),
         },
         "downtime_by_reason": {
@@ -1883,8 +1886,34 @@ def _compact_chat_context_for_llm(
         ),
         "book_details": _compact_rows(
             context.get("book_details") or [],
-            limit=_lim("book_details", 300, 5),
+            limit=_lim("book_details", 80, 5),
         ),
+    }
+
+
+def _minimal_chat_context_for_llm(
+    context: dict[str, Any],
+    qu_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Last-resort compact context for large workbooks that exceed model input limits."""
+    exact = context.get("exact_dashboard") or {}
+    primary_source = _clean_text((qu_plan or {}).get("primary_source") or "")
+    source_rows = _rows_for_plan_source(primary_source, context) if primary_source else []
+    return {
+        "scope": context.get("scope") or {},
+        "summary": context.get("summary") or {},
+        "context_note": "Large workbook context was reduced to stay under the model input limit.",
+        "primary_source": primary_source,
+        "primary_source_rows": _compact_rows(source_rows, limit=80),
+        "exact_dashboard": {
+            "summary": (exact.get("summary") or {}),
+            "daily": _compact_rows(exact.get("daily") or [], limit=120),
+            "folders": _compact_rows(exact.get("folders") or [], limit=80),
+            "folder_days": _compact_rows(exact.get("folder_days") or [], limit=30),
+        },
+        "downtime_by_reason": {
+            "top_reasons": _compact_rows(((context.get("downtime_by_reason") or {}).get("top_reasons") or []), limit=30),
+        },
     }
 
 
@@ -1911,9 +1940,9 @@ def _compact_row(row: dict[str, Any], include_keys: set[str] | None = None) -> d
         if key in omitted_keys and key not in include_keys:
             continue
         if isinstance(value, list):
-            compact[key] = [_compact_list_value(item, include_keys=include_keys) for item in value[:30]]
-            if len(value) > 30:
-                compact[f"{key}_omitted_count"] = len(value) - 30
+            compact[key] = [_compact_list_value(item, include_keys=include_keys) for item in value[:10]]
+            if len(value) > 10:
+                compact[f"{key}_omitted_count"] = len(value) - 10
         elif isinstance(value, dict):
             compact[key] = {
                 child_key: _compact_list_value(child_value, include_keys=include_keys)
@@ -1929,7 +1958,7 @@ def _compact_list_value(value: Any, include_keys: set[str] | None = None) -> Any
     if isinstance(value, dict):
         return _compact_row(value, include_keys=include_keys)
     if isinstance(value, list):
-        return value[:20]
+        return value[:10]
     return value
 
 
@@ -7362,13 +7391,9 @@ def _call_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, 
 
     payloads = [
         {**base, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
-        {**base, "max_tokens": 1800, "response_format": {"type": "json_object"}},
         {**base, "max_completion_tokens": 1800},
-        {**base, "max_tokens": 1800},
         {**base, "temperature": 0.2, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
-        {**base, "temperature": 0.2, "max_tokens": 1800, "response_format": {"type": "json_object"}},
         {**base, "temperature": 0.2, "max_completion_tokens": 1800},
-        {**base, "temperature": 0.2, "max_tokens": 1800},
     ]
     auth_modes = ["api-key", "bearer"]
     last_error: Exception | None = None
@@ -7572,12 +7597,10 @@ def _chat_completion_payloads(
             "max_completion_tokens": max_tokens,
         })
 
-    # Try minimal payloads first. GPT-5.x deployments often reject temperature,
-    # while older chat deployments may still need max_tokens instead of max_completion_tokens.
+    # Try minimal payloads first. Newer GPT/o-series deployments reject max_tokens,
+    # so use max_completion_tokens consistently.
     _append_unique_payload(payloads, {**base_payload, "max_completion_tokens": max_tokens})
-    _append_unique_payload(payloads, {**base_payload, "max_tokens": max_tokens})
     _append_unique_payload(payloads, {**base_payload, "temperature": 0.2, "max_completion_tokens": max_tokens})
-    _append_unique_payload(payloads, {**base_payload, "temperature": 0.2, "max_tokens": max_tokens})
     return payloads
 
 

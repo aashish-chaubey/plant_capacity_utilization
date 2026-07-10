@@ -3106,14 +3106,40 @@ def scope_capacity_result(
             return False
         return True
 
+    def _reason_in_scope(row: dict[str, Any]) -> bool:
+        """Keep downtime reason rows aligned with the dashboard chat scope."""
+        row_plant = _clean_text(row.get("Plant Name") or row.get("plant_name") or row.get("plant"))
+        if plant and row_plant and row_plant != plant:
+            return False
+
+        if folder_set:
+            row_machine = _clean_text(row.get("Machine") or row.get("machine"))
+            row_folder = _clean_text(row.get("Folder") or row.get("folder"))
+            row_folder_keys = {row_folder}
+            if row_machine and row_folder:
+                row_folder_keys.add(_clean_text(f"{row_machine}\n{row_folder}"))
+                row_folder_keys.add(_clean_text(f"{row_machine} / {row_folder}"))
+            if not (row_folder_keys & folder_set):
+                return False
+
+        run_date = _clean_text(
+            row.get("Report Date")
+            or row.get("Run Date")
+            or row.get("run_date")
+            or row.get("date")
+        )
+        if timeframe_start and run_date and run_date < timeframe_start:
+            return False
+        if timeframe_end and run_date and run_date > timeframe_end:
+            return False
+        return True
+
     return {
         "summary": calculate_summary_metrics(daily_df),
         "daily": _daily_records(daily_df),
         "details": _detail_records(scoped_folder_day_df),
         "tower_details": _tower_detail_records(scoped_tower_day_df) if scoped_tower_day_df is not None else [],
-        # Intentionally not filtered: matches today's frontend behavior, which never
-        # scopes downtime_reasons by plant/folder/date before sending it to chat.
-        "downtime_reasons": downtime_reasons or [],
+        "downtime_reasons": [row for row in (downtime_reasons or []) if _reason_in_scope(row)],
         "book_details": [row for row in (book_details or []) if _row_in_scope(row)],
     }
 
