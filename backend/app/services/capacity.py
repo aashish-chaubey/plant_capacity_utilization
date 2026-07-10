@@ -163,8 +163,11 @@ def parse_book_wise_details(workbook: pd.ExcelFile) -> pd.DataFrame:
         axis=1,
     )
 
-    # Exclude TRIAL editions (case-insensitive match on Edition Name)
-    trial_mask = df["Edition Name"].str.upper().str.startswith("TRIAL", na=False)
+    # Exclude TRIAL editions — check both Edition (primary display name) and Edition Name
+    trial_mask = (
+        df["Edition"].str.upper().str.startswith("TRIAL", na=False) |
+        df["Edition Name"].str.upper().str.startswith("TRIAL", na=False)
+    )
     df = df[~trial_mask].reset_index(drop=True)
 
     return df

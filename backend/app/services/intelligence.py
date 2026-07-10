@@ -156,27 +156,34 @@ def build_chat_response(
         )
 
     llm_context = _compact_chat_context_for_llm(context, message, qu_plan=qu_plan)
-    context_json = json.dumps(llm_context, separators=(",", ":"), ensure_ascii=True)
-    if len(context_json) > 650_000:
+    context_text = _chat_context_to_toon(llm_context)
+    if len(context_text) > 650_000:
         llm_context = _minimal_chat_context_for_llm(context, qu_plan=qu_plan)
-        context_json = json.dumps(llm_context, separators=(",", ":"), ensure_ascii=True)
+        context_text = _chat_context_to_toon(llm_context)
 
     system_content = (
         f"{plan_section}"
         "You are a concise analytics assistant for a print plant production dashboard. "
-        "For numerical or data-specific questions, answer ONLY from the JSON context supplied — never invent values. "
+        "For numerical or data-specific questions, answer ONLY from the TOON dashboard context supplied — never invent values. "
         "For conceptual, definitional, or formula questions (e.g. 'what does X mean', 'what is the formula for Y', 'how is Z calculated', 'explain X'), answer from your domain knowledge — do not say the data is absent. "
-        "Use the curated computed JSON tables supplied here "
+        "Use the curated computed tables supplied here "
         "(exact_dashboard.folders, exact_dashboard.daily, towers, tower_runtime_segments, tower_runtime_mix, tower_availability, downtime_by_reason, "
         "delayed_pf, editions_* tables, book_details) before using summary aggregates. "
         "Prefer exact_dashboard values over derived summaries whenever a numeric answer is available. "
         "Before responding, internally identify the metric, filters, numerator, denominator, and formula. "
-        "Validate the arithmetic against the JSON, then provide only the final concise answer. "
+        "Validate the arithmetic against the supplied context, then provide only the final concise answer. "
         "Be brief and direct — no preamble, no filler. "
         "Always report duration values in minutes. Do not convert durations into hours or h:mm. "
         "Clock times such as 03:00 or 04:00 may remain clock times. "
         "If a specific numerical answer is genuinely absent from the data, say: Not available in the current data. "
         "Never say that for conceptual, formula, or terminology questions — answer those from your knowledge.\n\n"
+
+        "TOON CONTEXT FORMAT:\n"
+        "- The dashboard data below is TOON-style structured text, not JSON.\n"
+        "- Nested sections use indentation. A line like key: value is a scalar field.\n"
+        "- A block like rows[3]{a,b,c}: means 3 table rows; each following indented CSV row maps to columns a,b,c in order.\n"
+        "- Quoted cells are strings. null, true, false, and numbers keep their normal meanings. JSON snippets inside a cell are a single cell value.\n"
+        "- You can filter, group, count, sum, average, rank, and compare these rows exactly as tabular data.\n\n"
 
         "OUTPUT FORMATTING (the response is rendered as Markdown, so use it deliberately):\n"
         "- Any answer with 2+ rows of comparable data (rankings, breakdowns by folder/tower/date/reason, "
@@ -420,7 +427,7 @@ def build_chat_response(
         "this folder') can be drawn directly from the data; only state a root cause if the data explicitly shows "
         "it (e.g. a specific downtime reason). If several explanations are possible, say what the data suggests "
         "without presenting speculation as settled fact.\n\n"
-        f"Dashboard context:\n{context_json}"
+        f"Dashboard context (TOON):\n{context_text}"
     )
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
@@ -1915,6 +1922,139 @@ def _minimal_chat_context_for_llm(
             "top_reasons": _compact_rows(((context.get("downtime_by_reason") or {}).get("top_reasons") or []), limit=30),
         },
     }
+
+
+def _chat_context_to_toon(context: dict[str, Any]) -> str:
+    lines: list[str] = []
+    _write_toon_object(context, lines, indent=0)
+    return "\n".join(lines)
+
+
+def _write_toon_object(value: dict[str, Any], lines: list[str], indent: int) -> None:
+    for key, child in value.items():
+        _write_toon_value(str(key), child, lines, indent)
+
+
+def _write_toon_value(key: str, value: Any, lines: list[str], indent: int) -> None:
+    prefix = "  " * indent
+    if isinstance(value, dict):
+        if not value:
+            lines.append(f"{prefix}{key}: {{}}")
+            return
+        lines.append(f"{prefix}{key}:")
+        _write_toon_object(value, lines, indent + 1)
+        return
+
+    if isinstance(value, list):
+        _write_toon_list(key, value, lines, indent)
+        return
+
+    lines.append(f"{prefix}{key}: {_toon_scalar(value)}")
+
+
+def _write_toon_list(key: str, values: list[Any], lines: list[str], indent: int) -> None:
+    prefix = "  " * indent
+    if not values:
+        lines.append(f"{prefix}{key}[0]:")
+        return
+
+    dict_rows = [row for row in values if isinstance(row, dict)]
+    if len(dict_rows) == len(values):
+        headers = _toon_headers(dict_rows)
+        lines.append(f"{prefix}{key}[{len(values)}]{{{','.join(headers)}}}:")
+        row_prefix = "  " * (indent + 1)
+        for row in dict_rows:
+            lines.append(f"{row_prefix}{_toon_csv_row([_toon_cell(row.get(header)) for header in headers])}")
+        return
+
+    if all(not isinstance(item, (dict, list)) for item in values):
+        lines.append(f"{prefix}{key}[{len(values)}]: {_toon_csv_row([_toon_cell(item) for item in values])}")
+        return
+
+    lines.append(f"{prefix}{key}[{len(values)}]:")
+    item_prefix = "  " * (indent + 1)
+    for item in values:
+        if isinstance(item, dict):
+            lines.append(f"{item_prefix}-:")
+            _write_toon_object(item, lines, indent + 2)
+        elif isinstance(item, list):
+            _write_toon_list("-", item, lines, indent + 1)
+        else:
+            lines.append(f"{item_prefix}-: {_toon_scalar(item)}")
+
+
+def _toon_headers(rows: list[dict[str, Any]]) -> list[str]:
+    headers: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row.keys():
+            header = str(key)
+            if header not in seen:
+                headers.append(header)
+                seen.add(header)
+    return headers
+
+
+def _toon_csv_row(cells: list[str]) -> str:
+    return ",".join(cells)
+
+
+def _toon_cell(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return _toon_number(value)
+    if isinstance(value, (dict, list)):
+        return _toon_csv_escape(json.dumps(value, separators=(",", ":"), ensure_ascii=True, default=str))
+    return _toon_csv_escape(str(value))
+
+
+def _toon_scalar(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return _toon_number(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, separators=(",", ":"), ensure_ascii=True, default=str)
+    text = str(value)
+    if _toon_needs_quotes(text):
+        return json.dumps(text, ensure_ascii=True)
+    return text
+
+
+def _toon_number(value: int | float) -> str:
+    if isinstance(value, float) and not isfinite(value):
+        return "null"
+    return json.dumps(value, ensure_ascii=True)
+
+
+def _toon_csv_escape(text: str) -> str:
+    if _toon_needs_csv_quotes(text):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def _toon_needs_quotes(text: str) -> bool:
+    if text == "" or text != text.strip():
+        return True
+    lowered = text.casefold()
+    if lowered in {"null", "true", "false"}:
+        return True
+    return any(ch in text for ch in [":", ",", "{", "}", "[", "]", '"', "\n", "\r"]) or any(
+        ord(ch) > 127 for ch in text
+    )
+
+
+def _toon_needs_csv_quotes(text: str) -> bool:
+    if text == "" or text != text.strip():
+        return True
+    if text.casefold() in {"null", "true", "false"}:
+        return True
+    return any(ch in text for ch in [",", '"', "\n", "\r"]) or any(ord(ch) > 127 for ch in text)
 
 
 def _compact_rows(
