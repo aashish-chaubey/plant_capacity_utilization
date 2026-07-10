@@ -1,0 +1,303 @@
+{
+    "Ahmedabad": {
+        "Cityline-1": {
+            "F1": {
+                "SNP": 27000,
+                "SNP+Complexity": 26000,
+                "GNP": 25000,
+                "GNP+Complexity": 24000
+            }
+        },
+        "Hiline": {
+            "HL-Folder1": {
+                "SNP": 28500,
+                "SNP+Complexity": 28000,
+                "GNP": 26000,
+                "GNP+Complexity": 25000
+            }
+        }
+    },
+    "Airoli": {
+        "Colorman-A": {
+            "Press1": {
+                "SNP": 76000,
+                "SNP+Complexity": 70000,
+                "GNP": 70000,
+                "GNP+Complexity": 64000
+            }
+        },
+        "Colorman-B": {
+            "Press3": {
+                "SNP": 76000,
+                "SNP+Complexity": 70000,
+                "GNP": 70000,
+                "GNP+Complexity": 64000
+            },
+            "Press4": {
+                "SNP": 76000,
+                "SNP+Complexity": 70000,
+                "GNP": 70000,
+                "GNP+Complexity": 64000
+            }
+        },
+        "Cromoman-C": {
+            "Press5": {
+                "SNP": 68000,
+                "SNP+Complexity": 65000,
+                "GNP": 56000,
+                "GNP+Complexity": 50000
+            }
+        }
+    },
+    "Bangalore": {
+        "Regioman-A": {
+            "FolderA": {
+                "SNP": 68000,
+                "SNP+Complexity": 65000,
+                "GNP": 60000,
+                "GNP+Complexity": 55000
+            },
+            "FolderB": {
+                "SNP": 65000,
+                "SNP+Complexity": 60000,
+                "GNP": 55000,
+                "GNP+Complexity": 50000
+            }
+        },
+        "Regioman-B": {
+            "FolderC": {
+                "SNP": 70000,
+                "SNP+Complexity": 65000,
+                "GNP": 60000,
+                "GNP+Complexity": 55000
+            },
+            "FolderD": {
+                "SNP": 72000,
+                "SNP+Complexity": 70000,
+                "GNP": 65000,
+                "GNP+Complexity": 60000
+            }
+        }
+    },
+    "Baroda": {
+        "Hiline": {
+            "Folder-1": {
+                "SNP": 25000,
+                "SNP+Complexity": 23000
+            }
+        }
+    },
+    "Chennai": {
+        "Regioman": {
+            "Folder1": {
+                "SNP": 65000,
+                "SNP+Complexity": 60000,
+                "GNP": 55000,
+                "GNP+Complexity": 50000
+            },
+            "Folder2": {
+                "SNP": 65000,
+                "SNP+Complexity": 60000,
+                "GNP": 55000,
+                "GNP+Complexity": 50000
+            }
+        }
+    },
+    "Hyderabad": {
+        "Hiline-1": {
+            "Folder1": {
+                "SNP": 35000,
+                "SNP+Complexity": 33000,
+                "GNP": 33000,
+                "GNP+Complexity": 30000
+            },
+            "Folder2": {
+                "SNP": 35000,
+                "SNP+Complexity": 33000,
+                "GNP": 33000,
+                "GNP+Complexity": 30000
+            }
+        },
+        "Hiline-2": {
+            "Folder3": {
+                "SNP": 26000,
+                "SNP+Complexity": 24000,
+                "GNP": 24000,
+                "GNP+Complexity": 24000
+            },
+            "Folder4": {
+                "SNP": 26000,
+                "SNP+Complexity": 24000,
+                "GNP": 24000,
+                "GNP+Complexity": 24000
+            }
+        }
+    },
+    "Kandivali": {
+        "Colorman-B": {
+            "COLORB": {
+                "SNP": 76000,
+                "SNP+Complexity": 70000,
+                "GNP": 70000,
+                "GNP+Complexity": 64000
+            },
+            "COLORC": {
+                "SNP": 72000,
+                "SNP+Complexity": 66000
+            }
+        },
+        "Colorman-D": {
+            "COLORD": {
+                "SNP": 76000,
+                "SNP+Complexity": 70000,
+                "GNP": 70000,
+                "GNP+Complexity": 64000
+            },
+            "COLORE": {
+                "SNP": 72000,
+                "SNP+Complexity": 66000
+            }
+        },
+        "Geoman-A": {
+            "GEOMANA": {
+                "SNP": 66000,
+                "SNP+Complexity": 60000
+            }
+        }
+    },
+    "Kolkata": {
+        "Cromoman": {
+            "FolderC": {
+                "SNP": 58800,
+                "SNP+Complexity": 55000,
+                "GNP": 43400,
+                "GNP+Complexity": 40000
+            },
+            "FolderD": {
+                "SNP": 58800,
+                "SNP+Complexity": 55000,
+                "GNP": 43400,
+                "GNP+Complexity": 40000
+            }
+        },
+        "Regioman": {
+            "FolderA": {
+                "SNP": 70400,
+                "SNP+Complexity": 67200,
+                "GNP": 61500,
+                "GNP+Complexity": 55400
+            }
+        }
+    },
+    "Lucknow": {
+        "Hiline-1": {
+            "Folder1": {
+                "SNP": 32000,
+                "SNP+Complexity": 30000,
+                "GNP": 28000,
+                "GNP+Complexity": 27000
+            },
+            "Folder2": {
+                "SNP": 32000,
+                "SNP+Complexity": 30000,
+                "GNP": 28000,
+                "GNP+Complexity": 27000
+            }
+        },
+        "Hiline-2": {
+            "Folder3": {
+                "SNP": 30000,
+                "SNP+Complexity": 28000,
+                "GNP": 26000,
+                "GNP+Complexity": 24000
+            },
+            "Folder4": {
+                "SNP": 30000,
+                "SNP+Complexity": 28000,
+                "GNP": 26000,
+                "GNP+Complexity": 24000
+            }
+        }
+    },
+    "Manesar": {
+        "TKS1": {
+            "Folder-1": {
+                "SNP": 55000,
+                "SNP+Complexity": 53000,
+                "GNP": 50000,
+                "GNP+Complexity": 48000
+            }
+        }
+    },
+    "Nagpur": {
+        "Hiline": {
+            "JF-1": {
+                "SNP": 28000,
+                "SNP+Complexity": 26500
+            },
+            "JF-2": {
+                "SNP": 28000,
+                "SNP+Complexity": 26500
+            }
+        }
+    },
+    "Pune": {
+        "Regioman": {
+            "Folder3": {
+                "SNP": 74000,
+                "SNP+Complexity": 70000,
+                "GNP": 64000,
+                "GNP+Complexity": 58000
+            },
+            "Folder4": {
+                "SNP": 74000,
+                "SNP+Complexity": 70000,
+                "GNP": 64000,
+                "GNP+Complexity": 58000
+            }
+        }
+    },
+    "Sahibabad": {
+        "Colorman-C": {
+            "COLORD": {
+                "SNP": 78000,
+                "SNP+Complexity": 70000,
+                "GNP": 70000,
+                "GNP+Complexity": 62000
+            },
+            "COLORE": {
+                "SNP": 78000,
+                "SNP+Complexity": 70000
+            }
+        },
+        "Colorman-D": {
+            "COLORF": {
+                "SNP": 78000,
+                "SNP+Complexity": 70000,
+                "GNP": 68000,
+                "GNP+Complexity": 60000
+            },
+            "COLORG": {
+                "SNP": 78000,
+                "SNP+Complexity": 70000,
+                "GNP": 70000,
+                "GNP+Complexity": 62000
+            }
+        },
+        "Geoman-B": {
+            "GEOMANB": {
+                "SNP": 66000,
+                "SNP+Complexity": 60000,
+                "GNP": 66000,
+                "GNP+Complexity": 58000
+            }
+        }
+    },
+    "Trivandrum": {
+        "Cityline": {
+            "Folder1": {
+                "SNP+Complexity": 23000
+            }
+        }
+    }
+}

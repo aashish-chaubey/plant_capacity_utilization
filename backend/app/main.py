@@ -30,7 +30,7 @@ _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _SERVER_DATA_CACHE_PATH = _BACKEND_DIR / ".cache" / "server_data_cache.pkl"
-_SERVER_DATA_CACHE_VERSION = 3
+_SERVER_DATA_CACHE_VERSION = 4
 _SERVER_DATA_JOB_ID = "server-data"
 _WORKBOOK_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
 _SERVER_DATA_CONFIG_FILENAMES = (
@@ -39,6 +39,7 @@ _SERVER_DATA_CONFIG_FILENAMES = (
     "twin_folder.json",
     "twin_folders.json",
     "uv_towers.json",
+    "running_speed_lookup.json",
 )
 
 app = FastAPI(title="Plant Capacity Utilization API", version="0.1.0")

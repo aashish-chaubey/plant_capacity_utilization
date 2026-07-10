@@ -1768,6 +1768,33 @@ def _compact_chat_context_for_llm(
         else []
     )
 
+    # Pre-filter daily_efficiency by QU conditions so the LLM only receives qualifying nights.
+    # This prevents the LLM from needing to self-filter large unordered row lists when the
+    # QU executor correctly identifies the condition but escalates because it can't answer
+    # the full compound question (e.g. "efficiency < 95% AND loss components").
+    _daily_eff_all = context.get("daily_efficiency") or []
+    _daily_eff_filtered = _daily_eff_all
+    _qu_filtered_dates: set[str] | None = None
+
+    if qu_plan:
+        _ps = _clean_text(qu_plan.get("primary_source", "")).casefold()
+        if _ps == "daily_efficiency":
+            _conds = qu_plan.get("conditions") or []
+            _cond_logic = _clean_text(qu_plan.get("condition_logic") or "AND").upper()
+            _ts = qu_plan.get("time_scope") or {}
+            _entities = qu_plan.get("entities") or []
+            _filtered = _apply_qu_conditions(_daily_eff_all, _conds, _cond_logic)
+            if _filtered is not None:
+                _filtered = _apply_qu_time_scope(_filtered, _ts)
+                _filtered = _apply_qu_entity_filters(_filtered, _entities)
+                if _filtered:
+                    _daily_eff_filtered = _filtered
+                    _qu_filtered_dates = {
+                        _clean_text(r.get("run_date") or "")
+                        for r in _filtered
+                        if r.get("run_date")
+                    }
+
     return {
         "scope": context.get("scope") or {},
         "summary": context.get("summary") or {},
@@ -1806,8 +1833,15 @@ def _compact_chat_context_for_llm(
             "driver_totals": (context.get("loss_time") or {}).get("driver_totals"),
             "top_loss_days": _compact_rows(((context.get("loss_time") or {}).get("top_loss_days") or []), limit=20),
             "low_loss_days": _compact_rows(((context.get("loss_time") or {}).get("low_loss_days") or []), limit=20),
-            # loss_time.all_days is always small (one row per day) — send unconditionally
-            "all_days": _compact_rows(((context.get("loss_time") or {}).get("all_days") or []), limit=370),
+            # loss_time.all_days is always small (one row per day) — send unconditionally;
+            # restricted to QU-filtered dates when an efficiency condition is active
+            "all_days": _compact_rows(
+                [
+                    r for r in ((context.get("loss_time") or {}).get("all_days") or [])
+                    if not _qu_filtered_dates or _clean_text(r.get("run_date") or "") in _qu_filtered_dates
+                ],
+                limit=370,
+            ),
         },
         "towers": _compact_rows(context.get("towers") or [], limit=200),
         "tower_runtime_segments": tower_runtime_segment_rows,
@@ -1825,7 +1859,7 @@ def _compact_chat_context_for_llm(
             context.get("tower_month_summary") or [],
             limit=_lim("tower_month_summary", 500, 10),
         ),
-        "daily_efficiency": context.get("daily_efficiency") or [],
+        "daily_efficiency": _daily_eff_filtered,
         "tower_availability": context.get("tower_availability") or {},
         "tower_downtime_reason_attribution": {
             "attribution_note": tower_attribution.get("attribution_note"),

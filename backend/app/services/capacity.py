@@ -38,6 +38,7 @@ TWIN_FOLDER_GROUP_COLUMN = "Twin Folder Group"
 UV_TOWER_CONFIG_FILENAME = "uv_towers.json"
 TOWER_MASTER_CONFIG_FILENAME = "tower_master.json"
 FOLDER_LIST_CONFIG_FILENAME = "folder_list.json"
+RUNNING_SPEED_LOOKUP_CONFIG_FILENAME = "running_speed_lookup.json"
 EFFECTIVE_RUNTIME_COLUMN = "Effective Runtime Minutes"
 EFFECTIVE_PRINT_ORDER_COLUMN = "Effective Print Order"
 COMMITTED_SPEED_COLUMN = "Committed Speed"
@@ -2067,7 +2068,50 @@ def _effective_print_order(row: pd.Series) -> float:
     return source_print_order
 
 
+def _load_running_speed_lookup() -> dict[str, Any]:
+    path = Path(__file__).resolve().parents[2] / RUNNING_SPEED_LOOKUP_CONFIG_FILENAME
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+_RUNNING_SPEED_LOOKUP: dict[str, Any] = _load_running_speed_lookup()
+
+_SPEED_LOOKUP_COMPLEXITY_KEYS: dict[str, str] = {
+    "snp": "SNP",
+    "snp_complex": "SNP+Complexity",
+    "gnp": "GNP",
+    "gnp_complex": "GNP+Complexity",
+}
+
+
+def _lookup_committed_speed(plant: str, machine: str, folder: str, complexity_key: str) -> float:
+    label = _SPEED_LOOKUP_COMPLEXITY_KEYS.get(complexity_key)
+    if not label:
+        return 0.0
+    plant_entry = _RUNNING_SPEED_LOOKUP.get(plant) or {}
+    machine_entry = plant_entry.get(machine) or {}
+    folder_entry = machine_entry.get(folder) or {}
+    speed = folder_entry.get(label)
+    return float(speed) if speed else 0.0
+
+
 def _committed_speed(row: pd.Series) -> float:
+    # Lookup by plant / machine / folder / complexity (running_speed_lookup.json)
+    classification = _categorize_complexity(row.get("Complexities", ""))
+    looked_up = _lookup_committed_speed(
+        _clean_text(row.get("Plant Name", "")),
+        _clean_text(row.get("Machine", "")),
+        _clean_text(row.get("Folder", "")),
+        classification["key"],
+    )
+    if looked_up > 0:
+        return looked_up
+    # Fall back to Excel column for plants/folders not yet in the lookup
     for column in COMMITTED_SPEED_SOURCE_COLUMNS:
         if column in row:
             speed = _parse_count_value(row.get(column))
