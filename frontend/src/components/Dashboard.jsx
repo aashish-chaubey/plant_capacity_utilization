@@ -310,7 +310,7 @@ export default function Dashboard({
 
   return (
     <div className="mt-5 space-y-5">
-      <section className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))" }}>
+      <section className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(165px, 1fr))" }}>
         {kpis.map((kpi) => (
           <KpiCard key={kpi.label} {...kpi} />
         ))}

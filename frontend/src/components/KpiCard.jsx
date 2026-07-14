@@ -24,32 +24,34 @@ export default function KpiCard({ label, value, valuePlanned, valueAvailable, de
         backgroundImage: selectedTone.pattern || "none",
       }
     : undefined;
+  const valueStyle = { fontSize: "clamp(1.25rem, 1.6vw, 1.675rem)" };
+  const secondaryStyle = { fontSize: "clamp(0.65rem, 0.75vw, 0.875rem)" };
 
   return (
-    <article className={`min-w-[230px] rounded-lg border p-4 shadow-sm ${selectedTone.className}`} style={style}>
-      <p className="text-sm font-bold uppercase leading-snug tracking-normal opacity-75">{label}</p>
+    <article className={`min-w-[165px] rounded-lg border p-3 shadow-sm ${selectedTone.className}`} style={style}>
+      <p className="text-xs font-bold uppercase leading-snug tracking-normal opacity-75">{label}</p>
       {valuePlanned != null ? (
         <>
-          <p className="mt-5 whitespace-nowrap">
-            <span className="text-3xl font-bold leading-none tracking-tight">{valuePlanned}</span>
-            <span className="ml-1 text-sm font-medium leading-snug opacity-60">of Planned Time</span>
+          <p className="mt-3 whitespace-nowrap">
+            <span className="font-bold leading-none tracking-tight" style={valueStyle}>{valuePlanned}</span>
+            <span className="ml-1 font-medium leading-snug opacity-60" style={secondaryStyle}>of Planned Time</span>
           </p>
           {detail && (
-            <p className="mt-4 flex min-w-0 items-center gap-1.5 text-sm font-semibold opacity-75">
+            <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs font-semibold opacity-75">
               <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               <span className="truncate">{detail}</span>
             </p>
           )}
-          <p className="mt-4 whitespace-nowrap">
-            <span className="text-sm font-bold leading-snug opacity-75">{valueAvailable}</span>
-            <span className="ml-1 text-sm font-medium leading-snug opacity-55">of Available Time</span>
+          <p className="mt-3 whitespace-nowrap">
+            <span className="font-bold leading-snug opacity-75" style={secondaryStyle}>{valueAvailable}</span>
+            <span className="ml-1 font-medium leading-snug opacity-55" style={secondaryStyle}>of Available Time</span>
           </p>
         </>
       ) : (
         <>
-          <p className="mt-5 text-3xl font-bold leading-none tracking-tight">{value}</p>
+          <p className="mt-3 font-bold leading-none tracking-tight" style={valueStyle}>{value}</p>
           {detail && (
-            <p className="mt-4 flex min-w-0 items-center gap-1.5 text-sm font-semibold opacity-75">
+            <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs font-semibold opacity-75">
               <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               <span className="truncate">{detail}</span>
             </p>
