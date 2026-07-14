@@ -71,7 +71,7 @@ export default function LandingPage({ onSelectPlant }) {
 
         {/* Tagline */}
         <p className="text-[#38BDF8] font-normal text-sm sm:text-base tracking-wider pl-1 mt-2">
-          Ai-Powered Platform for Capacity Utilisation Analysis
+          AI-Powered Platform for Capacity Utilisation Analysis
         </p>
       </div>
 

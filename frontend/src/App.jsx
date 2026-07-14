@@ -45,12 +45,30 @@ const METRIC_DEFINITIONS = [
   },
   {
     term: "Spare Time",
-    definition: "Unused capacity remaining within the 00:00-04:00 (Regardless of the early PF schedule of 3 plants) reference window after all other components have been accounted for. Formula: Spare Time = 240 min - (Wait time + Loss time+ Downtime + Runtime). Spare Time cannot be negative."
+    definition: "Unused capacity remaining within the 00:00-04:00 (Regardless of the early PF schedule of 3 plants) reference window after all other components have been accounted for. Formula: Spare Time = 240 min - (Wait time + Lost time + Downtime + Runtime). Spare Time cannot be negative in case of Print Finish delay after 4:00 am."
   },
   {
     term: "Unplanned Capacity",
     definition: "Periods where the folder or tower was not scheduled or available for production."
   },
+];
+
+const COMPLEXITY_DEFINITIONS = [
+  { category: "SNP", complexity: "C1", description: "Standard Pagination (SNP)" },
+  { category: "SNP", complexity: "C2", description: "Standard Pagination (SNP) + Multiple Innovations" },
+  { category: "SNP", complexity: "C3", description: "High Pagination (SNP)" },
+  { category: "SNP + Complex", complexity: "C4", description: "High Pagination (SNP) + Multiple Innovations" },
+  { category: "GNP", complexity: "C5", description: "Standard Pagination (Light GNP)" },
+  { category: "GNP", complexity: "C6", description: "Standard Pagination (Light GNP) + Multiple Innovations" },
+  { category: "GNP", complexity: "C7", description: "High Pagination (Light GNP)" },
+  { category: "GNP + Complex", complexity: "C8", description: "Standard Pagination (Heavy GNP)" },
+  { category: "GNP + Complex", complexity: "C9", description: "Standard Pagination (Heavy GNP) + Multiple Innovations" },
+  { category: "GNP + Complex", complexity: "C10", description: "High Pagination (Heavy GNP)" },
+  { category: "GNP + Complex", complexity: "C11", description: "High Pagination (Light GNP) + Multiple Innovations" },
+  { category: "GNP + Complex", complexity: "C12", description: "High Pagination (Heavy GNP) + Multiple Innovations" },
+  { category: "GNP + Complex", complexity: "C13", description: "5th or Special colour in SNP" },
+  { category: "GNP + Complex", complexity: "C14", description: "Special Colour in UV" },
+  { category: "GNP + Complex", complexity: "C15", description: "Other Complex innovations" },
 ];
 
 function normalizeApiBaseUrl(value) {
@@ -109,6 +127,7 @@ function DashboardApp() {
   const [selectedFolders, setSelectedFolders] = useState([]);
   const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [definitionsOpen, setDefinitionsOpen] = useState(false);
+  const [complexitiesOpen, setComplexitiesOpen] = useState(false);
 
   const plantOptions = useMemo(() => buildPlantOptions(datasetMeta || result), [datasetMeta, result]);
   const folderOptions = useMemo(
@@ -623,6 +642,16 @@ function DashboardApp() {
                 <span>Definitions</span>
               </button>
 
+              <button
+                type="button"
+                onClick={() => setComplexitiesOpen(true)}
+                className="flex h-12 shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                title="View complexity definitions"
+              >
+                <Info className="h-4 w-4" aria-hidden="true" />
+                <span>Complexities</span>
+              </button>
+
             </div>
           </div>
         </div>
@@ -630,6 +659,10 @@ function DashboardApp() {
 
       {definitionsOpen && (
         <MetricDefinitionsModal onClose={() => setDefinitionsOpen(false)} />
+      )}
+
+      {complexitiesOpen && (
+        <ComplexitiesModal onClose={() => setComplexitiesOpen(false)} />
       )}
 
       {/* ── Main ────────────────────────────────────────────────── */}
@@ -766,6 +799,54 @@ function MetricDefinitionsModal({ onClose }) {
                 <p className="mt-1 text-sm leading-5 text-slate-600">{item.definition}</p>
               </article>
             ))}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ComplexitiesModal({ onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/35 px-4 py-8 backdrop-blur-sm sm:items-center">
+      <section className="flex max-h-[86vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-slate-950">Complexities</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Complexity categories used across production reporting.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+            aria-label="Close complexities"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto px-5 py-4">
+          <div className="overflow-hidden rounded-lg border border-slate-200">
+            <table className="min-w-full border-collapse text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th scope="col" className="border-b border-slate-200 px-3 py-2 font-bold">Category</th>
+                  <th scope="col" className="border-b border-slate-200 px-3 py-2 font-bold">Complexity</th>
+                  <th scope="col" className="border-b border-slate-200 px-3 py-2 font-bold">Description</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 bg-white">
+                {COMPLEXITY_DEFINITIONS.map((item) => (
+                  <tr key={item.complexity} className="transition hover:bg-slate-50">
+                    <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-700">{item.category}</td>
+                    <td className="whitespace-nowrap px-3 py-2 font-semibold text-slate-900">{item.complexity}</td>
+                    <td className="px-3 py-2 text-slate-600">{item.description}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       </section>
