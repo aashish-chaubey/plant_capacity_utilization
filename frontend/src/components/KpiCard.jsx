@@ -1,3 +1,5 @@
+import { Clock } from "lucide-react";
+
 export default function KpiCard({ label, value, valuePlanned, valueAvailable, detail = "", tone = "slate" }) {
   const tones = {
     blue: { className: "border-blue-200 bg-blue-50 text-blue-800" },
@@ -24,21 +26,34 @@ export default function KpiCard({ label, value, valuePlanned, valueAvailable, de
     : undefined;
 
   return (
-    <article className={`rounded-lg border p-3 shadow-sm ${selectedTone.className}`} style={style}>
-      <p className="text-xs font-semibold uppercase tracking-normal opacity-75">{label}</p>
+    <article className={`min-w-[230px] rounded-lg border p-4 shadow-sm ${selectedTone.className}`} style={style}>
+      <p className="text-sm font-bold uppercase leading-snug tracking-normal opacity-75">{label}</p>
       {valuePlanned != null ? (
         <>
-          <p className="mt-2">
-            <span className="text-2xl font-semibold tracking-normal">{valuePlanned}</span>
-            <span className="ml-1 text-xs font-medium opacity-60">of Planned Time</span>
+          <p className="mt-5 whitespace-nowrap">
+            <span className="text-3xl font-bold leading-none tracking-tight">{valuePlanned}</span>
+            <span className="ml-1 text-sm font-medium leading-snug opacity-60">of Planned Time</span>
           </p>
-          {detail && <p className="mt-1 truncate text-xs font-semibold opacity-70">{detail}</p>}
-          <p className="mt-1 text-right" style={{ fontSize: "0.8rem", opacity: 0.5 }}>{valueAvailable} of Available Time</p>
+          {detail && (
+            <p className="mt-4 flex min-w-0 items-center gap-1.5 text-sm font-semibold opacity-75">
+              <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">{detail}</span>
+            </p>
+          )}
+          <p className="mt-4 whitespace-nowrap">
+            <span className="text-sm font-bold leading-snug opacity-75">{valueAvailable}</span>
+            <span className="ml-1 text-sm font-medium leading-snug opacity-55">of Available Time</span>
+          </p>
         </>
       ) : (
         <>
-          <p className="mt-2 text-2xl font-semibold tracking-normal">{value}</p>
-          {detail && <p className="mt-1 truncate text-xs font-semibold opacity-70">{detail}</p>}
+          <p className="mt-5 text-3xl font-bold leading-none tracking-tight">{value}</p>
+          {detail && (
+            <p className="mt-4 flex min-w-0 items-center gap-1.5 text-sm font-semibold opacity-75">
+              <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">{detail}</span>
+            </p>
+          )}
         </>
       )}
     </article>

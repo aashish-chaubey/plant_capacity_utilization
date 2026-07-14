@@ -310,7 +310,7 @@ export default function Dashboard({
 
   return (
     <div className="mt-5 space-y-5">
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+      <section className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))" }}>
         {kpis.map((kpi) => (
           <KpiCard key={kpi.label} {...kpi} />
         ))}
@@ -776,6 +776,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
   const pageUnitLabel = capacityPeriods.grain === "month" ? "months" : "days";
   const maxPageStart = Math.max(chartKeys.length - pageSize, 0);
   const safePageStart = Math.min(pageStart, maxPageStart);
+  const showPagination = chartKeys.length > pageSize;
   const visibleDays = chartKeys.slice(safePageStart, safePageStart + pageSize);
   const selectedChartKey = summaryPopover?.day || selectedDay;
   const returnViewLabel = formatCapacityReturnViewLabel(timeframeMode, timeframeRange);
@@ -1041,27 +1042,31 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
             })}
           </div>
           )}
-          <button
-            type="button"
-            onClick={setPreviousPage}
-            disabled={safePageStart === 0}
-            aria-label={`Previous ${pageSize} ${pageUnitLabel}`}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
-          </button>
-          <span className="min-w-28 text-center text-xs font-semibold text-slate-500">
-            {safePageStart + 1}-{Math.min(safePageStart + pageSize, chartKeys.length)} of {chartKeys.length}
-          </span>
-          <button
-            type="button"
-            onClick={setNextPage}
-            disabled={safePageStart >= maxPageStart}
-            aria-label={`Next ${pageSize} ${pageUnitLabel}`}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <ChevronRight className="h-4 w-4" aria-hidden="true" />
-          </button>
+          {showPagination && (
+            <>
+              <button
+                type="button"
+                onClick={setPreviousPage}
+                disabled={safePageStart === 0}
+                aria-label={`Previous ${pageSize} ${pageUnitLabel}`}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+              </button>
+              <span className="min-w-28 text-center text-xs font-semibold text-slate-500">
+                {safePageStart + 1}-{Math.min(safePageStart + pageSize, chartKeys.length)} of {chartKeys.length}
+              </span>
+              <button
+                type="button"
+                onClick={setNextPage}
+                disabled={safePageStart >= maxPageStart}
+                aria-label={`Next ${pageSize} ${pageUnitLabel}`}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <ChevronRight className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </>
+          )}
         </div>
       </div>
 
