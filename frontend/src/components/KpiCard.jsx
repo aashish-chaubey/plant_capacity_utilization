@@ -17,6 +17,7 @@ export default function KpiCard({ label, value, valuePlanned, valueAvailable, de
     slate: { className: "border-slate-200 bg-white text-slate-800" }
   };
   const selectedTone = tones[tone] || tones.slate;
+  const isUnplanned = tone === "unplanned";
   const style = selectedTone.bg
     ? {
         backgroundColor: selectedTone.bg,
@@ -49,7 +50,14 @@ export default function KpiCard({ label, value, valuePlanned, valueAvailable, de
         </>
       ) : (
         <>
-          <p className="mt-3 font-bold leading-none tracking-tight" style={valueStyle}>{value}</p>
+          {isUnplanned ? (
+            <p className="mt-3 whitespace-nowrap">
+              <span className="font-bold leading-none tracking-tight" style={valueStyle}>{value}</span>
+              <span className="ml-1 font-medium leading-snug opacity-60" style={secondaryStyle}>of Available Time</span>
+            </p>
+          ) : (
+            <p className="mt-3 font-bold leading-none tracking-tight" style={valueStyle}>{value}</p>
+          )}
           {detail && (
             <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs font-semibold opacity-75">
               <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
