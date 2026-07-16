@@ -37,13 +37,14 @@ export default function KpiCard({
     : undefined;
   const valueStyle = { fontSize: "clamp(1.25rem, 1.6vw, 1.675rem)" };
   const secondaryStyle = { fontSize: "clamp(0.65rem, 0.75vw, 0.875rem)" };
+  const unplannedAvailablePercentStyle = { fontSize: "clamp(0.8rem, 0.95vw, 1rem)" };
   const plannedCapacityDetail = splitDurationDetail(plannedDetail);
   const availableCapacityDetail = splitDurationDetail(availableDetail);
 
   return (
     <article className={`min-w-[165px] rounded-lg border p-3 shadow-sm ${selectedTone.className}`} style={style}>
       {!showCapacityDetails && (
-        <p className="text-xs font-bold uppercase leading-snug tracking-normal opacity-75">{label}</p>
+        <p className={`text-xs font-bold uppercase leading-snug tracking-normal ${isUnplanned ? "text-slate-950" : "opacity-75"}`}>{label}</p>
       )}
       {valuePlanned != null ? (
         <>
@@ -88,18 +89,18 @@ export default function KpiCard({
         <>
           {isUnplanned ? (
             <>
-              <p className="mt-3 whitespace-nowrap">
+              <p className="mt-3 whitespace-nowrap text-slate-950">
                 <span className="font-bold leading-none tracking-tight" style={valueStyle}>-</span>
               </p>
               {detail && (
-                <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs font-semibold opacity-75">
+                <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs font-semibold text-slate-950">
                   <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   <span className="truncate">{detail}</span>
                 </p>
               )}
-              <p className="mt-3 whitespace-nowrap">
-                <span className="font-bold leading-snug opacity-75" style={secondaryStyle}>{value}</span>
-                <span className="ml-1 font-medium leading-snug opacity-55" style={secondaryStyle}>of Available Time</span>
+              <p className="mt-3 whitespace-nowrap text-slate-950">
+                <span className="font-bold leading-snug" style={unplannedAvailablePercentStyle}>{value}</span>
+                <span className="ml-1 font-medium leading-snug" style={secondaryStyle}>of Available Time</span>
               </p>
             </>
           ) : (
