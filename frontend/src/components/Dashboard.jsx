@@ -299,7 +299,7 @@ export default function Dashboard({
   const totalActiveTowerCapacity = Number(data.summary.active_tower_days || 0);
   const plannedAvailableCapacity = Math.max(totalAvailableCapacity - Number(data.summary.total_idle_time || 0), 0);
   const kpis = [
-    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity) },
+    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity), plannedDetail: formatKpiDuration(plannedAvailableCapacity), availableDetail: formatKpiDuration(totalAvailableCapacity) },
     { label: "Runtime",            valuePlanned: formatPercent(calculatePercentage(data.summary.total_runtime,      plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_runtime,      totalAvailableCapacity)), tone: "green",     detail: formatKpiDuration(data.summary.total_runtime) },
     { label: "Wait Time",          valuePlanned: formatPercent(calculatePercentage(data.summary.total_waiting_time, plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), tone: "wait",      detail: formatKpiDuration(data.summary.total_waiting_time) },
     { label: "Lost Time",          valuePlanned: formatPercent(calculatePercentage(data.summary.total_lost_time,    plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_lost_time,    totalAvailableCapacity)), tone: "amber",     detail: formatKpiDuration(data.summary.total_lost_time) },
