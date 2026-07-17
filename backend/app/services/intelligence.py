@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from math import isfinite
 import json
@@ -12,6 +13,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+
+import httpx
 
 
 CAPACITY_MINUTES_PER_FOLDER_DAY = 240.0
@@ -44,7 +47,12 @@ def _asks_how_many(question: str) -> bool:
     return bool(_HOW_MANY_RE.search(question))
 
 
-def build_chat_response(
+def _raise_if_chat_cancelled(cancellation_event: asyncio.Event | None = None) -> None:
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise asyncio.CancelledError()
+
+
+async def build_chat_response(
     message: str,
     intelligence: dict[str, Any] | None = None,
     summary: dict[str, Any] | None = None,
@@ -55,7 +63,9 @@ def build_chat_response(
     book_details: list[dict[str, Any]] | None = None,
     history: list[dict[str, str]] | None = None,
     force_full_llm: bool = False,
+    cancellation_event: asyncio.Event | None = None,
 ) -> dict[str, Any]:
+    _raise_if_chat_cancelled(cancellation_event)
     intelligence = intelligence or {}
     summary = summary or {}
     daily_rows = daily_rows or []
@@ -73,6 +83,7 @@ def build_chat_response(
             scope_label=_chat_scope_label(daily_rows),
         )
 
+    _raise_if_chat_cancelled(cancellation_event)
     context = _build_chat_context(
         intelligence=intelligence,
         tower_details=tower_details,
@@ -110,12 +121,14 @@ def build_chat_response(
     qu_plan: dict[str, Any] | None = None
     if not force_full_llm and _should_use_chat_planner(message):
         try:
-            qu_plan = _call_qu_decomposer(message, endpoint, api_key)
+            _raise_if_chat_cancelled(cancellation_event)
+            qu_plan = await _call_qu_decomposer_async(message, endpoint, api_key, cancellation_event=cancellation_event)
         except Exception as qu_exc:
             print(f"[chat] QU decomposer skipped: {_sanitize_error_message(qu_exc, api_key)}", flush=True)
             qu_plan = None
 
     if not force_full_llm:
+        _raise_if_chat_cancelled(cancellation_event)
         qu_answer = _execute_qu_plan(qu_plan, message, context)
         if qu_answer:
             confidence, conf_reasons = _compute_qu_confidence(qu_plan, qu_answer, context, message)
@@ -139,6 +152,7 @@ def build_chat_response(
         if _chat_debug_enabled():
             print("[chat] force_full_llm=True — skipping QU layer, going directly to full LLM", flush=True)
 
+    _raise_if_chat_cancelled(cancellation_event)
     plan_section = ""
     if qu_plan:
         plan_section = (
@@ -442,9 +456,16 @@ def build_chat_response(
     messages.append({"role": "user", "content": _clean_text(message)})
 
     try:
-        answer = _call_plain_chat_completion(endpoint, api_key, messages).strip()
+        _raise_if_chat_cancelled(cancellation_event)
+        answer = (await _call_plain_chat_completion_async(
+            endpoint,
+            api_key,
+            messages,
+            cancellation_event=cancellation_event,
+        )).strip()
         if _chat_debug_enabled():
             print(f"[chat-debug] raw_answer={answer!r}", flush=True)
+        _raise_if_chat_cancelled(cancellation_event)
         return {
             "answer": answer,
             "status": "ok",
@@ -804,6 +825,25 @@ def _call_qu_decomposer(message: str, endpoint: str, api_key: str) -> dict[str, 
         {"role": "user", "content": _clean_text(message)},
     ]
     raw = _call_chat_completion(endpoint, api_key, messages)
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+    return json.loads(raw)
+
+
+async def _call_qu_decomposer_async(
+    message: str,
+    endpoint: str,
+    api_key: str,
+    cancellation_event: asyncio.Event | None = None,
+) -> dict[str, Any]:
+    """Cancellable chat-only variant of _call_qu_decomposer."""
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _QU_DECOMPOSER_SYSTEM},
+        {"role": "user", "content": _clean_text(message)},
+    ]
+    _raise_if_chat_cancelled(cancellation_event)
+    raw = await _call_chat_completion_async(endpoint, api_key, messages, cancellation_event=cancellation_event)
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
@@ -7598,6 +7638,58 @@ def _call_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, 
     raise RuntimeError("LLM request failed.")
 
 
+async def _call_chat_completion_async(
+    endpoint: str,
+    api_key: str,
+    messages: list[dict[str, str]],
+    cancellation_event: asyncio.Event | None = None,
+) -> str:
+    url = _build_chat_completion_url(endpoint)
+    urls = [url]
+    if not _get_env("AZURE_API_VERSION") and "api-version=" in url:
+        urls.append(_without_api_version(url))
+
+    model = _get_env("AZURE_MODEL") or _get_env("AZURE_OPENAI_MODEL") or _get_env("AZURE_DEPLOYMENT")
+    base: dict[str, Any] = {"messages": messages}
+    if model:
+        base["model"] = model
+
+    payloads = [
+        {**base, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
+        {**base, "max_completion_tokens": 1800},
+        {**base, "temperature": 0.2, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
+        {**base, "temperature": 0.2, "max_completion_tokens": 1800},
+    ]
+    auth_modes = ["api-key", "bearer"]
+    last_error: Exception | None = None
+
+    for request_url in urls:
+        for payload in payloads:
+            for auth_mode in auth_modes:
+                try:
+                    _raise_if_chat_cancelled(cancellation_event)
+                    response = await _post_json_async(request_url, payload, api_key, auth_mode)
+                    text = _extract_llm_text(response)
+                    if text:
+                        return text
+                    raise RuntimeError("LLM response did not contain text content.")
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    if exc.response.status_code in {400, 401, 403, 404}:
+                        continue
+                    raise
+                except httpx.TimeoutException as exc:
+                    last_error = exc
+                    break
+                except httpx.RequestError as exc:
+                    last_error = exc
+                    break
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("LLM request failed.")
+
+
 def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, str]]) -> str:
     """Like _call_chat_completion but never requests JSON mode — returns plain text."""
     model = _get_env("AZURE_MODEL") or _get_env("AZURE_OPENAI_MODEL") or _get_env("AZURE_DEPLOYMENT")
@@ -7661,6 +7753,84 @@ def _call_plain_chat_completion(endpoint: str, api_key: str, messages: list[dict
                     last_error = exc
                     break
                 except URLError as exc:
+                    last_error = exc
+                    break
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("LLM request failed.")
+
+
+async def _call_plain_chat_completion_async(
+    endpoint: str,
+    api_key: str,
+    messages: list[dict[str, str]],
+    cancellation_event: asyncio.Event | None = None,
+) -> str:
+    """Cancellable chat-only variant of _call_plain_chat_completion."""
+    model = _get_env("AZURE_MODEL") or _get_env("AZURE_OPENAI_MODEL") or _get_env("AZURE_DEPLOYMENT")
+    reasoning_effort = _select_reasoning_effort(messages, model)
+
+    auth_modes = ["api-key", "bearer"]
+    last_error: Exception | None = None
+    response_budget = (
+        CHAT_REASONING_RESPONSE_MAX_TOKENS
+        if reasoning_effort and reasoning_effort != "none"
+        else CHAT_RESPONSE_MAX_TOKENS
+    )
+
+    if _should_try_responses_api(endpoint, model):
+        response_url = _build_responses_url(endpoint)
+        response_urls = [response_url]
+        if not _get_env("AZURE_API_VERSION") and "api-version=" in response_url:
+            response_urls.append(_without_api_version(response_url))
+
+        for request_url in response_urls:
+            for payload in _responses_payloads(messages, model, reasoning_effort, max_output_tokens=response_budget):
+                for auth_mode in auth_modes:
+                    try:
+                        _raise_if_chat_cancelled(cancellation_event)
+                        response = await _post_json_async(request_url, payload, api_key, auth_mode)
+                        text = _extract_llm_text(response)
+                        if text:
+                            return text
+                        raise RuntimeError("LLM response did not contain text content.")
+                    except httpx.HTTPStatusError as exc:
+                        last_error = exc
+                        if exc.response.status_code in {400, 401, 403, 404}:
+                            continue
+                        raise
+                    except httpx.TimeoutException as exc:
+                        last_error = exc
+                        break
+                    except httpx.RequestError as exc:
+                        last_error = exc
+                        break
+
+    chat_url = _build_chat_completion_url(endpoint)
+    chat_urls = [chat_url]
+    if not _get_env("AZURE_API_VERSION") and "api-version=" in chat_url:
+        chat_urls.append(_without_api_version(chat_url))
+
+    for request_url in chat_urls:
+        for payload in _chat_completion_payloads(messages, model, reasoning_effort, max_tokens=response_budget):
+            for auth_mode in auth_modes:
+                try:
+                    _raise_if_chat_cancelled(cancellation_event)
+                    response = await _post_json_async(request_url, payload, api_key, auth_mode)
+                    text = _extract_llm_text(response)
+                    if text:
+                        return text
+                    raise RuntimeError("LLM response did not contain text content.")
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    if exc.response.status_code in {400, 401, 403, 404}:
+                        continue
+                    raise
+                except httpx.TimeoutException as exc:
+                    last_error = exc
+                    break
+                except httpx.RequestError as exc:
                     last_error = exc
                     break
 
@@ -7958,6 +8128,35 @@ def _post_json(url: str, payload: dict[str, Any], api_key: str, auth_mode: str) 
     return json.loads(body)
 
 
+async def _post_json_async(url: str, payload: dict[str, Any], api_key: str, auth_mode: str) -> dict[str, Any]:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if auth_mode == "bearer":
+        headers["Authorization"] = f"Bearer {api_key}"
+    else:
+        headers["api-key"] = api_key
+
+    data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.post(url, content=data, headers=headers)
+            response.raise_for_status()
+            return response.json()
+    except httpx.TimeoutException:
+        raise
+    except httpx.TransportError as exc:
+        message = str(exc).casefold()
+        if "certificate_verify_failed" not in message and "certificate verify failed" not in message:
+            raise
+
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS, verify=False) as client:
+            response = await client.post(url, content=data, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
+
 def _is_ssl_certificate_verification_error(exc: URLError) -> bool:
     reason = getattr(exc, "reason", exc)
     if isinstance(reason, ssl.SSLCertVerificationError):
@@ -7968,7 +8167,7 @@ def _is_ssl_certificate_verification_error(exc: URLError) -> bool:
 
 
 def _is_timeout_error(exc: BaseException) -> bool:
-    if isinstance(exc, TimeoutError):
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return True
 
     reason = getattr(exc, "reason", None)

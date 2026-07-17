@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import pickle
 import time
@@ -80,11 +81,47 @@ class ChatTimeframe(BaseModel):
 class ChatRequest(BaseModel):
     job_id: str
     message: str
+    chat_turn_id: str = ""
     selected_plant: str = ""
     selected_folders: list[str] = []
     timeframe: ChatTimeframe | None = None
     history: list[dict[str, Any]] = []
     force_full_llm: bool = False
+
+
+class ChatCancelRequest(BaseModel):
+    chat_turn_id: str
+
+
+_ACTIVE_CHAT_TURNS: dict[str, dict[str, Any]] = {}
+_ACTIVE_CHAT_TURNS_LOCK = Lock()
+
+
+def _register_chat_turn(chat_turn_id: str, job_id: str, task: asyncio.Task[Any], cancellation_event: asyncio.Event) -> None:
+    with _ACTIVE_CHAT_TURNS_LOCK:
+        _ACTIVE_CHAT_TURNS[chat_turn_id] = {
+            "job_id": job_id,
+            "task": task,
+            "cancellation_event": cancellation_event,
+            "started_at": time.time(),
+        }
+
+
+def _unregister_chat_turn(chat_turn_id: str) -> None:
+    with _ACTIVE_CHAT_TURNS_LOCK:
+        _ACTIVE_CHAT_TURNS.pop(chat_turn_id, None)
+
+
+def _cancel_chat_turn(chat_turn_id: str) -> bool:
+    with _ACTIVE_CHAT_TURNS_LOCK:
+        turn = _ACTIVE_CHAT_TURNS.get(chat_turn_id)
+        if not turn:
+            return False
+        turn["cancellation_event"].set()
+        task = turn.get("task")
+        if task and not task.done():
+            task.cancel()
+        return True
 
 
 def _json_default(obj: Any) -> Any:
@@ -637,19 +674,29 @@ def capacity_intelligence(request: IntelligenceRequest) -> JSONResponse:
 
 
 @app.post("/api/chat")
-def capacity_chat(request: ChatRequest) -> JSONResponse:
+async def capacity_chat(request: ChatRequest) -> JSONResponse:
+    chat_turn_id = request.chat_turn_id or uuid.uuid4().hex
+    cancellation_event = asyncio.Event()
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        _register_chat_turn(chat_turn_id, request.job_id, current_task, cancellation_event)
+
     _cleanup_upload_jobs()
     job = _get_upload_job(request.job_id)
     frames = _get_upload_job_frames(request.job_id)
     if not job or job.get("status") != "complete" or frames is None:
+        _unregister_chat_turn(chat_turn_id)
         return JSONResponse({
             "valid": False,
+            "chat_turn_id": chat_turn_id,
             "answer": "This dashboard session is no longer available. Please re-upload the file.",
             "status": "not_found",
         }, status_code=404)
 
     _touch_upload_job(request.job_id)
     try:
+        if cancellation_event.is_set():
+            raise asyncio.CancelledError()
         scoped = scope_capacity_result(
             folder_day_df=frames["folder_day_df"],
             tower_day_df=frames["tower_day_df"],
@@ -660,7 +707,9 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
             timeframe_start=request.timeframe.start if request.timeframe else "",
             timeframe_end=request.timeframe.end if request.timeframe else "",
         )
-        result = build_chat_response(
+        if cancellation_event.is_set():
+            raise asyncio.CancelledError()
+        result = await build_chat_response(
             message=request.message,
             summary=scoped["summary"],
             daily_rows=scoped["daily"],
@@ -670,7 +719,10 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
             book_details=scoped["book_details"],
             history=request.history,
             force_full_llm=request.force_full_llm,
+            cancellation_event=cancellation_event,
         )
+        if cancellation_event.is_set():
+            raise asyncio.CancelledError()
         context_json = json.dumps(_safe_json(scoped), separators=(",", ":"))
         log_chat_eval_async(
             chat_id=uuid.uuid4().hex,
@@ -688,6 +740,7 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
         )
         return JSONResponse({
             "valid": True,
+            "chat_turn_id": chat_turn_id,
             "answer": result.get("answer", ""),
             "status": result.get("status", "ok"),
             "detail": result.get("detail", ""),
@@ -698,13 +751,43 @@ def capacity_chat(request: ChatRequest) -> JSONResponse:
             "llm_status": result.get("llm_status", ""),
             "chart": _safe_json(result.get("chart")) if result.get("chart") else None,
         })
+    except asyncio.CancelledError:
+        cancellation_event.set()
+        return JSONResponse({
+            "valid": False,
+            "chat_turn_id": chat_turn_id,
+            "answer": "",
+            "status": "cancelled",
+            "detail": "Chat response generation was cancelled.",
+        }, status_code=499)
     except Exception as exc:
         return JSONResponse({
             "valid": False,
+            "chat_turn_id": chat_turn_id,
             "answer": "Unable to process your question.",
             "status": "error",
             "error": str(exc),
         })
+    finally:
+        _unregister_chat_turn(chat_turn_id)
+
+
+@app.post("/api/chat/cancel")
+async def cancel_capacity_chat(request: ChatCancelRequest) -> JSONResponse:
+    chat_turn_id = request.chat_turn_id.strip()
+    if not chat_turn_id:
+        return JSONResponse({
+            "valid": False,
+            "status": "missing_chat_turn_id",
+        }, status_code=400)
+
+    cancelled = _cancel_chat_turn(chat_turn_id)
+    return JSONResponse({
+        "valid": True,
+        "chat_turn_id": chat_turn_id,
+        "status": "cancelled" if cancelled else "not_found",
+        "cancelled": cancelled,
+    })
 
 
 # Chat evaluation log viewer API.

@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import { ChevronLeft, ChevronRight, MessageSquare, Send, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronLeft, ChevronRight, MessageSquare, Pencil, Send, Square, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -120,11 +120,14 @@ export default function Dashboard({
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatStopping, setChatStopping] = useState(false);
   const [forceLLM, setForceLLM] = useState(true);
   const [chatSize, setChatSize] = useState({ width: 360, height: 480 });
   const chatEndRef = useRef(null);
   const prevIntelligenceRef = useRef(null);
   const chatSizeRef = useRef({ width: 360, height: 480 });
+  const activeChatTurnIdRef = useRef("");
+  const chatAbortControllerRef = useRef(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -171,9 +174,51 @@ export default function Dashboard({
     document.addEventListener("mouseup", onUp);
   }
 
+  function createChatTurnId() {
+    if (window.crypto?.randomUUID) {
+      return window.crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  async function handleChatStop() {
+    const chatTurnId = activeChatTurnIdRef.current;
+    if (!chatTurnId || chatStopping) return;
+
+    setChatStopping(true);
+    chatAbortControllerRef.current?.abort();
+    try {
+      await fetch(`${CHAT_API_BASE}/api/chat/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_turn_id: chatTurnId }),
+      });
+    } catch {
+    } finally {
+      if (activeChatTurnIdRef.current === chatTurnId) {
+        activeChatTurnIdRef.current = "";
+        chatAbortControllerRef.current = null;
+        setChatLoading(false);
+        setChatStopping(false);
+      }
+    }
+  }
+
+  function handleEditLatestUserMessage(index) {
+    const message = chatMessages[index];
+    if (chatLoading || !message || message.role !== "user") return;
+    setChatInput(message.content || "");
+    setChatMessages(chatMessages.slice(0, index));
+  }
+
   async function handleChatSend() {
+    if (chatLoading) {
+      handleChatStop();
+      return;
+    }
+
     const text = chatInput.trim();
-    if (!text || chatLoading) return;
+    if (!text) return;
     if (!jobId) {
       setChatMessages([
         ...chatMessages,
@@ -187,16 +232,25 @@ export default function Dashboard({
       setChatInput("");
       return;
     }
+
+    const chatTurnId = createChatTurnId();
+    const abortController = new AbortController();
+    activeChatTurnIdRef.current = chatTurnId;
+    chatAbortControllerRef.current = abortController;
+
     setChatInput("");
-    const nextMessages = [...chatMessages, { role: "user", content: text }];
+    const nextMessages = [...chatMessages, { id: chatTurnId, role: "user", content: text }];
     setChatMessages(nextMessages);
     setChatLoading(true);
+    setChatStopping(false);
     try {
       const response = await fetch(`${CHAT_API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
         body: JSON.stringify({
           job_id: jobId,
+          chat_turn_id: chatTurnId,
           message: text,
           selected_plant: selectedPlant || "",
           selected_folders: selectedFolders || [],
@@ -206,7 +260,15 @@ export default function Dashboard({
         }),
       });
       const payload = await response.json();
+      if (
+        activeChatTurnIdRef.current !== chatTurnId ||
+        payload.status === "cancelled" ||
+        (payload.chat_turn_id && payload.chat_turn_id !== chatTurnId)
+      ) {
+        return;
+      }
       setChatMessages([...nextMessages, {
+        id: `${chatTurnId}-assistant`,
         role: "assistant",
         content: payload.answer || "No response.",
         plan: payload.plan || null,
@@ -218,14 +280,23 @@ export default function Dashboard({
         llmUsed: payload.llm_used ?? false,
         llmStatus: payload.llm_status || "",
       }]);
-    } catch {
+    } catch (error) {
+      if (error?.name === "AbortError" || activeChatTurnIdRef.current !== chatTurnId) {
+        return;
+      }
       setChatMessages([...nextMessages, {
+        id: `${chatTurnId}-error`,
         role: "assistant",
         content: "The assistant service did not respond. Please try again.",
         plan: null,
       }]);
     } finally {
-      setChatLoading(false);
+      if (activeChatTurnIdRef.current === chatTurnId) {
+        activeChatTurnIdRef.current = "";
+        chatAbortControllerRef.current = null;
+        setChatLoading(false);
+        setChatStopping(false);
+      }
     }
   }
 
@@ -307,6 +378,10 @@ export default function Dashboard({
     { label: "Spare Time",         valuePlanned: formatPercent(calculatePercentage(data.summary.total_buffer_time,  plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_buffer_time,  totalAvailableCapacity)), tone: "spare",     detail: formatKpiDuration(data.summary.total_buffer_time) },
     { label: "Unplanned Capacity", value: formatPercent(calculatePercentage(data.summary.total_idle_time,          totalAvailableCapacity)),                                                                                                                 tone: "unplanned", detail: formatKpiDuration(data.summary.total_idle_time) },
   ];
+
+  const latestEditableUserIndex = chatLoading
+    ? -1
+    : chatMessages.map((message) => message.role).lastIndexOf("user");
 
   return (
     <div className="mt-5 space-y-5">
@@ -444,7 +519,10 @@ export default function Dashboard({
                 {chatMessages.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => setChatMessages([])}
+                    onClick={() => {
+                      if (chatLoading) handleChatStop();
+                      setChatMessages([]);
+                    }}
                     title="Clear conversation"
                     className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
                   >
@@ -453,7 +531,10 @@ export default function Dashboard({
                 )}
                 <button
                   type="button"
-                  onClick={() => setChatOpen(false)}
+                  onClick={() => {
+                    if (chatLoading) handleChatStop();
+                    setChatOpen(false);
+                  }}
                   title="Close chat"
                   className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
                 >
@@ -470,7 +551,7 @@ export default function Dashboard({
                 </p>
               )}
               {chatMessages.map((msg, idx) => (
-                <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div key={msg.id || idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                   <div className={`max-w-[82%] ${msg.role === "user" ? "" : "flex flex-col gap-1"}`}>
                     <div
                       className={`rounded-2xl px-3 py-2 text-sm leading-relaxed ${
@@ -481,6 +562,19 @@ export default function Dashboard({
                     >
                       <ChatMessageContent content={msg.content} role={msg.role} />
                     </div>
+                    {msg.role === "user" && idx === latestEditableUserIndex && (
+                      <div className="mt-1 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => handleEditLatestUserMessage(idx)}
+                          title="Edit and resubmit this question"
+                          className="inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                        >
+                          <Pencil className="h-3 w-3" aria-hidden="true" />
+                          Edit
+                        </button>
+                      </div>
+                    )}
                     {msg.role === "assistant" && msg.chart && (
                       <ChatChart chart={msg.chart} />
                     )}
@@ -584,10 +678,19 @@ export default function Dashboard({
                 <button
                   type="button"
                   onClick={handleChatSend}
-                  disabled={chatLoading || intelligenceLoading || !chatInput.trim()}
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white transition hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400"
+                  disabled={intelligenceLoading || (!chatLoading && !chatInput.trim()) || chatStopping}
+                  title={chatLoading ? "Stop response generation" : "Send question"}
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white transition disabled:bg-slate-200 disabled:text-slate-400 ${
+                    chatLoading
+                      ? "bg-red-600 hover:bg-red-700"
+                      : "bg-blue-600 hover:bg-blue-700"
+                  }`}
                 >
-                  <Send className="h-4 w-4" aria-hidden="true" />
+                  {chatLoading ? (
+                    <Square className="h-4 w-4" aria-hidden="true" />
+                  ) : (
+                    <Send className="h-4 w-4" aria-hidden="true" />
+                  )}
                 </button>
               </div>
               {forceLLM && (
