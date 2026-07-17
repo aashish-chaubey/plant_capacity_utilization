@@ -58,6 +58,7 @@ const COMPLEXITY_DEFINITIONS = [
   { category: "SNP", complexity: "C2", description: "Standard Pagination (SNP) + Multiple Innovations" },
   { category: "SNP", complexity: "C3", description: "High Pagination (SNP)" },
   { category: "SNP + Complex", complexity: "C4", description: "High Pagination (SNP) + Multiple Innovations" },
+  { category: "SNP + Complex", complexity: "C13", description: "5th or Special colour in SNP" },
   { category: "GNP", complexity: "C5", description: "Standard Pagination (Light GNP)" },
   { category: "GNP", complexity: "C6", description: "Standard Pagination (Light GNP) + Multiple Innovations" },
   { category: "GNP", complexity: "C7", description: "High Pagination (Light GNP)" },
@@ -66,7 +67,6 @@ const COMPLEXITY_DEFINITIONS = [
   { category: "GNP + Complex", complexity: "C10", description: "High Pagination (Heavy GNP)" },
   { category: "GNP + Complex", complexity: "C11", description: "High Pagination (Light GNP) + Multiple Innovations" },
   { category: "GNP + Complex", complexity: "C12", description: "High Pagination (Heavy GNP) + Multiple Innovations" },
-  { category: "GNP + Complex", complexity: "C13", description: "5th or Special colour in SNP" },
   { category: "GNP + Complex", complexity: "C14", description: "Special Colour in UV" },
   { category: "GNP + Complex", complexity: "C15", description: "Other Complex innovations" },
 ];
@@ -807,6 +807,8 @@ function MetricDefinitionsModal({ onClose }) {
 }
 
 function ComplexitiesModal({ onClose }) {
+  const complexityGroups = groupComplexitiesByCategory(COMPLEXITY_DEFINITIONS);
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/35 px-4 py-8 backdrop-blur-sm sm:items-center">
       <section className="flex max-h-[86vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
@@ -828,7 +830,7 @@ function ComplexitiesModal({ onClose }) {
         </div>
 
         <div className="overflow-y-auto px-5 py-4">
-          <div className="overflow-hidden rounded-lg border border-slate-200">
+          <div className="overflow-hidden rounded-lg border border-slate-300">
             <table className="min-w-full border-collapse text-left text-sm">
               <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
                 <tr>
@@ -837,14 +839,23 @@ function ComplexitiesModal({ onClose }) {
                   <th scope="col" className="border-b border-slate-200 px-3 py-2 font-bold">Description</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 bg-white">
-                {COMPLEXITY_DEFINITIONS.map((item) => (
-                  <tr key={item.complexity} className="transition hover:bg-slate-50">
-                    <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-700">{item.category}</td>
-                    <td className="whitespace-nowrap px-3 py-2 font-semibold text-slate-900">{item.complexity}</td>
-                    <td className="px-3 py-2 text-slate-600">{item.description}</td>
-                  </tr>
-                ))}
+              <tbody className="bg-white">
+                {complexityGroups.map((group) =>
+                  group.items.map((item, index) => (
+                  <tr key={item.complexity} className="border-b border-slate-200 transition last:border-b-0 hover:bg-slate-50">
+                      {index === 0 && (
+                        <td
+                          rowSpan={group.items.length}
+                          className="whitespace-nowrap border-b border-slate-200 border-r border-slate-200 px-3 py-2 align-middle font-bold text-slate-800"
+                        >
+                          {group.category}
+                        </td>
+                      )}
+                      <td className="whitespace-nowrap border-r border-slate-200 px-3 py-2 font-semibold text-slate-900">{item.complexity}</td>
+                      <td className="px-3 py-2 text-slate-600">{item.description}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -852,6 +863,18 @@ function ComplexitiesModal({ onClose }) {
       </section>
     </div>
   );
+}
+
+function groupComplexitiesByCategory(items) {
+  return items.reduce((groups, item) => {
+    const currentGroup = groups[groups.length - 1];
+    if (currentGroup?.category === item.category) {
+      currentGroup.items.push(item);
+    } else {
+      groups.push({ category: item.category, items: [item] });
+    }
+    return groups;
+  }, []);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

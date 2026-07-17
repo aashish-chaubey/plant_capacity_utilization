@@ -69,7 +69,7 @@ export default function KpiCard({
             <p className="text-xs font-bold uppercase leading-snug tracking-normal opacity-75">Planned Time</p>
             <p className="mt-2 whitespace-nowrap text-slate-950">
               <span className="font-bold leading-none tracking-tight" style={valueStyle}>{plannedCapacityDetail.amount}</span>
-              <span className="ml-1 font-medium leading-snug text-slate-700 opacity-60" style={secondaryStyle}>
+              <span className="ml-1 font-medium leading-snug text-slate-800 opacity-75" style={secondaryStyle}>
                 {plannedCapacityDetail.unit}
               </span>
             </p>
@@ -79,7 +79,7 @@ export default function KpiCard({
             <p className="text-xs font-bold uppercase leading-snug tracking-normal opacity-75">Available Time</p>
             <p className="mt-2 whitespace-nowrap text-slate-950">
               <span className="font-bold leading-none tracking-tight" style={valueStyle}>{availableCapacityDetail.amount}</span>
-              <span className="ml-1 font-medium leading-snug text-slate-700 opacity-60" style={secondaryStyle}>
+              <span className="ml-1 font-medium leading-snug text-slate-800 opacity-75" style={secondaryStyle}>
                 {availableCapacityDetail.unit}
               </span>
             </p>
