@@ -75,7 +75,7 @@ export default function EvalLogPage() {
                 {records.map((record, index) => (
                   <tr key={`${record.line_number}-${record.chat_id}`} className="border-t border-slate-200 align-top">
                     <td className="px-3 py-3 text-xs">
-                      {record.created_at || "-"}
+                      {record.created_at_display || formatIstTime(record.created_at) || "-"}
                       <div className="text-slate-400">#{record.line_number}</div>
                     </td>
                     <td className="px-3 py-3 text-xs">
@@ -296,6 +296,23 @@ function score(metric) {
   if (!metric || metric.score === null || metric.score === undefined) return "-";
   const pass = metric.passed === true ? "yes" : metric.passed === false ? "no" : "";
   return `${Number(metric.score).toFixed(2)} ${pass}`;
+}
+
+function formatIstTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
 }
 
 function statusClass(status) {

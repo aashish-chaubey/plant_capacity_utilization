@@ -40,6 +40,7 @@ _SERVER_DATA_CONFIG_FILENAMES = (
     "twin_folder.json",
     "twin_folders.json",
     "uv_towers.json",
+    "RunningSpeed.xlsx",
     "running_speed_lookup.json",
 )
 
@@ -724,18 +725,22 @@ async def capacity_chat(request: ChatRequest) -> JSONResponse:
         if cancellation_event.is_set():
             raise asyncio.CancelledError()
         context_json = json.dumps(_safe_json(scoped), separators=(",", ":"))
+        eval_trace = result.get("eval_trace") or {}
         log_chat_eval_async(
             chat_id=uuid.uuid4().hex,
             query=request.message,
             response=result.get("answer", ""),
-            system_prompt="Answer using only the scoped dashboard context supplied in retrieval_context.",
-            retrieval_context=[context_json],
+            system_prompt=eval_trace.get("system_prompt")
+            or "Chat response did not include an eval trace; using scoped dashboard context fallback.",
+            retrieval_context=eval_trace.get("retrieval_context") or [context_json],
             metadata={
                 "job_id": request.job_id,
                 "selected_plant": request.selected_plant,
                 "selected_folders": request.selected_folders,
                 "timeframe": request.timeframe.model_dump() if request.timeframe else None,
                 "status": result.get("status", "ok"),
+                "eval_trace_mode": eval_trace.get("mode"),
+                "history_turns_used": eval_trace.get("history_turns_used"),
             },
         )
         return JSONResponse({

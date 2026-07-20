@@ -1,0 +1,100 @@
+status,row_count,plant,machine,folder,run_type,matched_running_speed_key,matched_speed,raw_example,complexities_example
+MISSING_MACHINE_FOLDER_OR_RUNTYPE,60,Trivandrum,Citiline,F1,SNP,,0,"('Trivandrum', 'Citiline', 'F1')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,560,Bommasandra,Regioman-B,Folder D,SNP,,0,"('Bommasandra', 'Regioman-B', 'Folder D')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,242,Vejalpur,Cityline-1,F1,SNP,,0,"('Vejalpur', 'Cityline-1', 'F1')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,188,Chinhat,Hiline-1,Folder 2,SNP,,0,"('Chinhat', 'Hiline-1', 'Folder 2')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,172,Saltlake,Regioman,Folder A,SNP,,0,"('Saltlake', 'Regioman', 'Folder A')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,163,Butibori,HILINE,JF-1,SNP,,0,"('Butibori', 'Hiline', 'JF-1')",C2-Standard Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,159,Bommasandra,Regioman-A,Folder A,SNP,,0,"('Bommasandra', 'Regioman-A', 'Folder A')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,153,Bommasandra,Regioman-B,Folder C,SNP,,0,"('Bommasandra', 'Regioman-B', 'Folder C')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,140,Bhosari,Regioman,Folder 4,SNP,,0,"('Bhosari', 'Regioman', 'Folder 4')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,123,Chemmencherry,Regioman,Folder 1,SNP,,0,"('Chemmencherry', 'Regioman', 'Folder 1')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,116,Bhosari,Regioman,Folder 3,SNP,,0,"('Bhosari', 'Regioman', 'Folder 3')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,114,Chinhat,Hiline-2,Folder 3,SNP,,0,"('Chinhat', 'Hiline-2', 'Folder 3')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,106,Saltlake,Cromoman,Folder D,SNP,,0,"('Saltlake', 'Cromoman', 'Folder D')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,93,Nacharam,Hiline-2,Folder 3,SNP,,0,"('Nacharam', 'Hiline-2', 'Folder 3')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,88,Vejalpur,HILINE,HL - Folder 1,SNP,,0,"('Vejalpur', 'Hiline', 'HL - Folder 1')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,78,Saltlake,Cromoman,Folder C,SNP,,0,"('Saltlake', 'Cromoman', 'Folder C')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,76,Chemmencherry,Regioman,Folder 2,SNP,,0,"('Chemmencherry', 'Regioman', 'Folder 2')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,73,Nacharam,Hiline-1,F-1,SNP,,0,"('Nacharam', 'Hiline-1', 'F-1')",C2-Standard Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,61,Bommasandra,Regioman-A,Folder B,SNP,,0,"('Bommasandra', 'Regioman-A', 'Folder B')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,38,Nacharam,Hiline-1,F-2,SNP,,0,"('Nacharam', 'Hiline-1', 'F-2')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,21,Bommasandra,Regioman-A,Folder A,GNP,,0,"('Bommasandra', 'Regioman-A', 'Folder A')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,18,Bommasandra,Regioman-B,Folder C,GNP,,0,"('Bommasandra', 'Regioman-B', 'Folder C')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,16,Chemmencherry,Regioman,Folder 1,GNP,,0,"('Chemmencherry', 'Regioman', 'Folder 1')",C5-Standard Pagination (Light GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,16,Chinhat,Hiline-1,Folder 2,GNP+Complexity,,0,"('Chinhat', 'Hiline-1', 'Folder 2')",C11-High Pagination (Light GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,14,Chemmencherry,Regioman,Folder 2,GNP,,0,"('Chemmencherry', 'Regioman', 'Folder 2')",C5-Standard Pagination (Light GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,13,Nacharam,Hiline-2,Folder 3,GNP,,0,"('Nacharam', 'Hiline-2', 'Folder 3')",C5-Standard Pagination (Light GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,10,Saltlake,Regioman,Folder A,GNP,,0,"('Saltlake', 'Regioman', 'Folder A')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,10,Nacharam,Hiline-2,Folder 4,SNP,,0,"('Nacharam', 'Hiline-2', 'Folder 4')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,9,Vejalpur,HILINE,HL - Folder 1,GNP+Complexity,,0,"('Vejalpur', 'Hiline', 'HL - Folder 1')",C10-High Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,8,Bhosari,Regioman,Folder 3,GNP,,0,"('Bhosari', 'Regioman', 'Folder 3')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,8,Chemmencherry,Regioman,Folder 1,GNP+Complexity,,0,"('Chemmencherry', 'Regioman', 'Folder 1')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,7,Bommasandra,Regioman-A,Folder A,GNP+Complexity,,0,"('Bommasandra', 'Regioman-A', 'Folder A')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,7,Chemmencherry,Regioman,Folder 2,GNP+Complexity,,0,"('Chemmencherry', 'Regioman', 'Folder 2')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,7,Nacharam,Hiline-2,Folder 3,GNP+Complexity,,0,"('Nacharam', 'Hiline-2', 'Folder 3')",C10-High Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,6,Vejalpur,Cityline-1,F1,GNP,,0,"('Vejalpur', 'Cityline-1', 'F1')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,6,Nacharam,Hiline-1,F-2,GNP,,0,"('Nacharam', 'Hiline-1', 'F-2')",C5-Standard Pagination (Light GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,6,Bommasandra,Regioman-B,Folder C,GNP+Complexity,,0,"('Bommasandra', 'Regioman-B', 'Folder C')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,6,Chinhat,Hiline-1,Folder 2,SNP+Complexity,,0,"('Chinhat', 'Hiline-1', 'Folder 2')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,6,Saltlake,Cromoman,Folder C,SNP+Complexity,,0,"('Saltlake', 'Cromoman', 'Folder C')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,6,Chinhat,Hiline-1,Folder 1,SNP,,0,"('Chinhat', 'Hiline-1', 'Folder 1')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,5,Vejalpur,HILINE,HL - Folder 1,GNP,,0,"('Vejalpur', 'Hiline', 'HL - Folder 1')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,5,Chinhat,Hiline-1,Folder 2,GNP,,0,"('Chinhat', 'Hiline-1', 'Folder 2')",C7-High Pagination (Light GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,5,Saltlake,Cromoman,Folder C,GNP+Complexity,,0,"('Saltlake', 'Cromoman', 'Folder C')",C12-High Pagination (Heavy GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,5,Nacharam,Hiline-1,F-1,GNP+Complexity,,0,"('Nacharam', 'Hiline-1', 'F-1')",C12-High Pagination (Heavy GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,4,Saltlake,Cromoman,Folder C,GNP,,0,"('Saltlake', 'Cromoman', 'Folder C')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,4,Chinhat,Hiline-2,Folder 3,GNP,,0,"('Chinhat', 'Hiline-2', 'Folder 3')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,3,Chinhat,Hiline-2,Folder 3,SNP+Complexity,,0,"('Chinhat', 'Hiline-2', 'Folder 3')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,2,Bhosari,Regioman,Folder 3,GNP+Complexity,,0,"('Bhosari', 'Regioman', 'Folder 3')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,2,Butibori,HILINE,JF-2,SNP,,0,"('Butibori', 'Hiline', 'JF-2')",C2-Standard Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,2,Nacharam,Hiline-1,F-1,GNP,,0,"('Nacharam', 'Hiline-1', 'F-1')",C6-Standard Pagination (Light GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,2,Bhosari,Regioman,Folder 4,GNP,,0,"('Bhosari', 'Regioman', 'Folder 4')",C8-Standard Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,2,Vejalpur,Cityline-1,F1,GNP+Complexity,,0,"('Vejalpur', 'Cityline-1', 'F1')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,2,Nacharam,Hiline-2,Folder 3,SNP+Complexity,,0,"('Nacharam', 'Hiline-2', 'Folder 3')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,2,Bhosari,Regioman,Folder 4,GNP+Complexity,,0,"('Bhosari', 'Regioman', 'Folder 4')",C10-High Pagination (Heavy GNP)
+MISSING_PLANT_IN_RUNNING_SPEED,2,Chinhat,Hiline-2,Folder 4,SNP,,0,"('Chinhat', 'Hiline-2', 'Folder 4')",C1-Standard Pagination (SNP)
+MISSING_PLANT_IN_RUNNING_SPEED,2,Chemmencherry,Regioman,Folder 1,SNP+Complexity,,0,"('Chemmencherry', 'Regioman', 'Folder 1')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,2,Chemmencherry,Regioman,Folder 2,SNP+Complexity,,0,"('Chemmencherry', 'Regioman', 'Folder 2')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,1,Bhosari,Regioman,Folder 3,SNP+Complexity,,0,"('Bhosari', 'Regioman', 'Folder 3')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,1,Nacharam,Hiline-1,F-2,SNP+Complexity,,0,"('Nacharam', 'Hiline-1', 'F-2')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,1,Vejalpur,HILINE,HL - Folder 1,SNP+Complexity,,0,"('Vejalpur', 'Hiline', 'HL - Folder 1')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,1,Nacharam,Hiline-1,F-1,SNP+Complexity,,0,"('Nacharam', 'Hiline-1', 'F-1')",C4-High Pagination (SNP) + Multiple Innovations
+MISSING_PLANT_IN_RUNNING_SPEED,1,Nacharam,Hiline-1,F-2,GNP+Complexity,,0,"('Nacharam', 'Hiline-1', 'F-2')",C15-Other complex innovation
+MISSING_PLANT_IN_RUNNING_SPEED,1,Nacharam,Hiline-2,Folder 4,GNP,,0,"('Nacharam', 'Hiline-2', 'Folder 4')",C5-Standard Pagination (Light GNP)
+FIX_BY_NORMALIZED_MATCH,263,Manesar,TKS1,Folder-1,SNP,Manesar / TKS1 / Folder 1 / SNP,55000.0,"('Manesar', 'TKS1', 'Folder-1')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,247,Kandivali,Colorman-B,COLOR  B,SNP,Kandivali / Colorman-B / COLOR B / SNP,76000.0,"('Kandivali', 'Colorman-B', 'COLOR  B')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,240,Baroda,HILINE,Folder-1,SNP,Baroda / Hiline / Folder 1 / SNP,25000.0,"('Baroda', 'Hiline', 'Folder-1')",C1-Standard Pagination (SNP)
+OK_EXACT,233,Airoli,Cromoman-C,Press 5,SNP,Airoli / Cromoman-C / Press 5 / SNP,68000.0,"('Airoli', 'Cromoman-C', 'Press 5')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,209,Sahibabad,Colorman-D,COLOR  F,SNP,Sahibabad / Colorman-D / COLOR F / SNP,78000.0,"('Sahibabad', 'Colorman-D', 'COLOR  F')",C1-Standard Pagination (SNP)
+OK_EXACT,207,Sahibabad,Geoman-B,GEOMAN B,SNP,Sahibabad / Geoman-B / GEOMAN B / SNP,66000.0,"('Sahibabad', 'Geoman-B', 'GEOMAN B')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,194,Kandivali,Colorman-D,COLOR  D,SNP,Kandivali / Colorman-D / COLOR D / SNP,76000.0,"('Kandivali', 'Colorman-D', 'COLOR  D')",C1-Standard Pagination (SNP)
+OK_EXACT,187,Airoli,Colorman-B,Press 3,SNP,Airoli / Colorman-B / Press 3 / SNP,76000.0,"('Airoli', 'Colorman-B', 'Press 3')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,161,Sahibabad,Colorman-D,COLOR  G,SNP,Sahibabad / Colorman-D / COLOR G / SNP,78000.0,"('Sahibabad', 'Colorman-D', 'COLOR  G')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,157,Sahibabad,Colorman-C,COLOR  D,SNP,Sahibabad / Colorman-C / COLOR D / SNP,78000.0,"('Sahibabad', 'Colorman-C', 'COLOR  D')",C1-Standard Pagination (SNP)
+OK_EXACT,98,Airoli,Colorman-A,Press 1,SNP,Airoli / Colorman-A / Press 1 / SNP,76000.0,"('Airoli', 'Colorman-A', 'Press 1')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,71,Sahibabad,Colorman-C,COLOR  E,SNP,Sahibabad / Colorman-C / COLOR E / SNP,78000.0,"('Sahibabad', 'Colorman-C', 'COLOR  E')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,71,Kandivali,Colorman-D,COLOR  E,SNP,Kandivali / Colorman-D / COLOR E / SNP,72000.0,"('Kandivali', 'Colorman-D', 'COLOR  E')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,55,Kandivali,Colorman-B,COLOR  C,SNP,Kandivali / Colorman-B / COLOR C / SNP,72000.0,"('Kandivali', 'Colorman-B', 'COLOR  C')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,40,Sahibabad,Colorman-D,COLOR  G,GNP,Sahibabad / Colorman-D / COLOR G / GNP,70000.0,"('Sahibabad', 'Colorman-D', 'COLOR  G')",C5-Standard Pagination (Light GNP)
+OK_EXACT,29,Airoli,Colorman-B,Press 3,GNP,Airoli / Colorman-B / Press 3 / GNP,70000.0,"('Airoli', 'Colorman-B', 'Press 3')",C5-Standard Pagination (Light GNP)
+FIX_BY_NORMALIZED_MATCH,25,Sahibabad,Colorman-C,COLOR  D,GNP,Sahibabad / Colorman-C / COLOR D / GNP,70000.0,"('Sahibabad', 'Colorman-C', 'COLOR  D')",C5-Standard Pagination (Light GNP)
+OK_EXACT,23,Kandivali,Geoman-A,GEOMAN A,SNP,Kandivali / Geoman-A / GEOMAN A / SNP,66000.0,"('Kandivali', 'Geoman-A', 'GEOMAN A')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,17,Sahibabad,Colorman-C,COLOR  D,GNP+Complexity,Sahibabad / Colorman-C / COLOR D / GNP+Complexity,62000.0,"('Sahibabad', 'Colorman-C', 'COLOR  D')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+OK_EXACT,16,Airoli,Colorman-A,Press 1,GNP,Airoli / Colorman-A / Press 1 / GNP,70000.0,"('Airoli', 'Colorman-A', 'Press 1')",C5-Standard Pagination (Light GNP)
+FIX_BY_NORMALIZED_MATCH,14,Sahibabad,Colorman-D,COLOR  F,GNP,Sahibabad / Colorman-D / COLOR F / GNP,68000.0,"('Sahibabad', 'Colorman-D', 'COLOR  F')",C5-Standard Pagination (Light GNP)
+OK_EXACT,14,Airoli,Colorman-A,Press 1,GNP+Complexity,Airoli / Colorman-A / Press 1 / GNP+Complexity,64000.0,"('Airoli', 'Colorman-A', 'Press 1')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+FIX_BY_NORMALIZED_MATCH,13,Kandivali,Colorman-D,COLOR  D,GNP,Kandivali / Colorman-D / COLOR D / GNP,70000.0,"('Kandivali', 'Colorman-D', 'COLOR  D')",C8-Standard Pagination (Heavy GNP)
+FIX_BY_NORMALIZED_MATCH,13,Manesar,TKS1,Folder-1,GNP,Manesar / TKS1 / Folder 1 / GNP,50000.0,"('Manesar', 'TKS1', 'Folder-1')",C8-Standard Pagination (Heavy GNP)
+OK_EXACT,13,Sahibabad,Geoman-B,GEOMAN B,GNP+Complexity,Sahibabad / Geoman-B / GEOMAN B / GNP+Complexity,58000.0,"('Sahibabad', 'Geoman-B', 'GEOMAN B')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+FIX_BY_NORMALIZED_MATCH,12,Kandivali,Colorman-B,COLOR  B,GNP,Kandivali / Colorman-B / COLOR B / GNP,70000.0,"('Kandivali', 'Colorman-B', 'COLOR  B')",C5-Standard Pagination (Light GNP)
+OK_EXACT,11,Sahibabad,Geoman-B,GEOMAN B,GNP,Sahibabad / Geoman-B / GEOMAN B / GNP,66000.0,"('Sahibabad', 'Geoman-B', 'GEOMAN B')",C5-Standard Pagination (Light GNP)
+FIX_BY_NORMALIZED_MATCH,10,Kandivali,Colorman-D,COLOR  D,GNP+Complexity,Kandivali / Colorman-D / COLOR D / GNP+Complexity,64000.0,"('Kandivali', 'Colorman-D', 'COLOR  D')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+FIX_BY_NORMALIZED_MATCH,10,Sahibabad,Colorman-D,COLOR  G,GNP+Complexity,Sahibabad / Colorman-D / COLOR G / GNP+Complexity,62000.0,"('Sahibabad', 'Colorman-D', 'COLOR  G')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+FIX_BY_NORMALIZED_MATCH,7,Manesar,TKS1,Folder-1,GNP+Complexity,Manesar / TKS1 / Folder 1 / GNP+Complexity,48000.0,"('Manesar', 'TKS1', 'Folder-1')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+OK_EXACT,6,Airoli,Colorman-B,Press 3,GNP+Complexity,Airoli / Colorman-B / Press 3 / GNP+Complexity,64000.0,"('Airoli', 'Colorman-B', 'Press 3')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+FIX_BY_NORMALIZED_MATCH,5,Kandivali,Colorman-B,COLOR  B,SNP+Complexity,Kandivali / Colorman-B / COLOR B / SNP+Complexity,70000.0,"('Kandivali', 'Colorman-B', 'COLOR  B')",C4-High Pagination (SNP) + Multiple Innovations
+FIX_BY_NORMALIZED_MATCH,4,Kandivali,Colorman-D,COLOR  D,SNP+Complexity,Kandivali / Colorman-D / COLOR D / SNP+Complexity,70000.0,"('Kandivali', 'Colorman-D', 'COLOR  D')",C4-High Pagination (SNP) + Multiple Innovations
+OK_EXACT,3,Airoli,Colorman-B,Press 4,SNP,Airoli / Colorman-B / Press 4 / SNP,76000.0,"('Airoli', 'Colorman-B', 'Press 4')",C1-Standard Pagination (SNP)
+FIX_BY_NORMALIZED_MATCH,3,Kandivali,Colorman-B,COLOR  B,GNP+Complexity,Kandivali / Colorman-B / COLOR B / GNP+Complexity,64000.0,"('Kandivali', 'Colorman-B', 'COLOR  B')",C9-Standard Pagination (Heavy GNP) + Multiple Innovations
+OK_EXACT,2,Airoli,Cromoman-C,Press 5,SNP+Complexity,Airoli / Cromoman-C / Press 5 / SNP+Complexity,65000.0,"('Airoli', 'Cromoman-C', 'Press 5')",C4-High Pagination (SNP) + Multiple Innovations

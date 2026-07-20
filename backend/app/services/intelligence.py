@@ -112,6 +112,12 @@ async def build_chat_response(
             "llm_status": "unconfigured",
             "refined": False,
             "chart": None,
+            "eval_trace": {
+                "mode": "unconfigured",
+                "system_prompt": "LLM is not configured; no system prompt was used.",
+                "retrieval_context": [],
+                "history_turns_used": 0,
+            },
         }
 
     # Phase 1 — Query Understanding: decompose the question into a rich structured plan,
@@ -144,6 +150,14 @@ async def build_chat_response(
                     "llm_used": False,
                     "llm_status": "fast_path",
                     "chart": _chart_for_answer(qu_answer, message, context, history, qu_plan),
+                    "eval_trace": {
+                        "mode": "fast_path",
+                        "system_prompt": "Deterministic fast path; no LLM system prompt was used.",
+                        "retrieval_context": [
+                            _chat_context_to_toon(_compact_chat_context_for_llm(context, message, qu_plan=qu_plan))
+                        ],
+                        "history_turns_used": 0,
+                    },
                 }
             # Below threshold — fall through to full LLM for a better answer
             if _chat_debug_enabled():
@@ -276,11 +290,13 @@ async def build_chat_response(
         "- Spare Capacity: (Spare Time / (Total Available Time - Unplanned Time)) * 100.\n"
         "- Speed Efficiency / Efficiency %: measures how fast the machine actually ran relative to its committed speed. "
         "Calculated in four steps:\n"
-        "  1. Speed per Minute = Committed Speed (CPH) ÷ 60\n"
+        "  1. Speed per Minute = Avg Speed (CPH) ÷ 60\n"
         "  2. Apportioned PO (per slot) = Speed per Minute × clipped runtime minutes in that slot. "
         "Slot rules: post-midnight slot counts only minutes after 00:00; editions crossing print finish time are clipped at that time.\n"
         "  3. Actual Speed = Total PO ÷ (Total Runtime + Total Downtime) — converting runtime+DT to hours to match CPH units.\n"
         "  4. Efficiency % = Actual Speed ÷ Committed Speed × 100.\n"
+        "Important: committed speed is only the denominator/target in step 4; never use committed speed to calculate "
+        "Speed per Minute, Apportioned PO, or Total PO. Those use Avg Speed.\n"
         "In the data, efficiency_pct in tower_runtime_segments is pre-computed using these formulas. "
         "Use it directly for segment-level efficiency questions; for period/folder/plant-level efficiency, "
         "sum the segment PO and runtime+DT values then reapply step 3–4.\n"
@@ -446,6 +462,7 @@ async def build_chat_response(
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
     history_char_limit = 800
+    history_turns_used = 0
     for turn in (history or [])[-6:]:
         role = _clean_text(turn.get("role", ""))
         content = _clean_text(turn.get("content", ""))
@@ -453,7 +470,14 @@ async def build_chat_response(
             if len(content) > history_char_limit:
                 content = content[:history_char_limit] + "… [truncated]"
             messages.append({"role": role, "content": content})
+            history_turns_used += 1
     messages.append({"role": "user", "content": _clean_text(message)})
+    eval_trace = {
+        "mode": "full_llm",
+        "system_prompt": system_content,
+        "retrieval_context": [context_text],
+        "history_turns_used": history_turns_used,
+    }
 
     try:
         _raise_if_chat_cancelled(cancellation_event)
@@ -474,6 +498,7 @@ async def build_chat_response(
             "llm_used": True,
             "llm_status": "weak_answer" if _is_weak_chat_answer(answer) else "answered",
             "chart": _chart_for_answer(answer, message, context, history, qu_plan),
+            "eval_trace": eval_trace,
         }
     except Exception as exc:
         detail = _sanitize_error_message(exc, api_key)
@@ -492,6 +517,7 @@ async def build_chat_response(
                 "llm_status": "timeout",
                 "refined": False,
                 "chart": None,
+                "eval_trace": eval_trace,
             }
         return {
             "answer": "The full AI request failed before producing an answer.",
@@ -502,6 +528,7 @@ async def build_chat_response(
             "llm_status": "failed",
             "refined": False,
             "chart": None,
+            "eval_trace": eval_trace,
         }
 
 

@@ -39,6 +39,8 @@ UV_TOWER_CONFIG_FILENAME = "uv_towers.json"
 TOWER_MASTER_CONFIG_FILENAME = "tower_master.json"
 FOLDER_LIST_CONFIG_FILENAME = "folder_list.json"
 RUNNING_SPEED_LOOKUP_CONFIG_FILENAME = "running_speed_lookup.json"
+RUNNING_SPEED_WORKBOOK_FILENAME = "RunningSpeed.xlsx"
+RUNNING_SPEED_WORKBOOK_SHEET = "Running_Speed"
 EFFECTIVE_RUNTIME_COLUMN = "Effective Runtime Minutes"
 EFFECTIVE_PRINT_ORDER_COLUMN = "Effective Print Order"
 COMMITTED_SPEED_COLUMN = "Committed Speed"
@@ -46,6 +48,8 @@ COMMITTED_SPEED_SOURCE_COLUMNS = (
     "Committed Speed",
     "Committed Speed (CPH)",
     "Committed Speed CPH",
+)
+ACTUAL_SPEED_SOURCE_COLUMNS = (
     "Avg Speed",
     "Avg.Speed",
 )
@@ -2068,15 +2072,132 @@ def _effective_print_order(row: pd.Series) -> float:
     return source_print_order
 
 
-def _load_running_speed_lookup() -> dict[str, Any]:
-    path = Path(__file__).resolve().parents[2] / RUNNING_SPEED_LOOKUP_CONFIG_FILENAME
+def _speed_lookup_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def _speed_lookup_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _speed_lookup_text(value).casefold())
+
+
+def _speed_lookup_number(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        if pd.isna(value):
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, Real):
+        return float(value)
+    text = str(value).replace(",", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _add_running_speed_entry(
+    exact: dict[str, Any],
+    normalized: dict[tuple[str, str, str, str], float],
+    plant: Any,
+    machine: Any,
+    folder: Any,
+    run_type: Any,
+    speed: Any,
+) -> None:
+    plant_name = _speed_lookup_text(plant)
+    machine_name = _speed_lookup_text(machine)
+    folder_name = _speed_lookup_text(folder)
+    run_type_name = _speed_lookup_text(run_type)
+    speed_value = _speed_lookup_number(speed)
+    if not plant_name or not machine_name or not folder_name or not run_type_name or speed_value <= 0:
+        return
+
+    exact.setdefault(plant_name, {}).setdefault(machine_name, {}).setdefault(folder_name, {})[run_type_name] = speed_value
+    normalized[
+        (
+            _speed_lookup_key(plant_name),
+            _speed_lookup_key(machine_name),
+            _speed_lookup_key(folder_name),
+            _speed_lookup_key(run_type_name),
+        )
+    ] = speed_value
+
+
+def _load_running_speed_workbook(path: Path) -> dict[str, Any]:
+    exact: dict[str, Any] = {}
+    normalized: dict[tuple[str, str, str, str], float] = {}
     if not path.exists():
-        return {}
+        return {"exact": exact, "normalized": normalized}
+
+    try:
+        df = pd.read_excel(path, sheet_name=RUNNING_SPEED_WORKBOOK_SHEET)
+    except Exception:
+        return {"exact": exact, "normalized": normalized}
+
+    df = df.rename(columns={column: str(column).strip() for column in df.columns})
+    required_columns = {"PlantName", "Machine", "Folder", "RunType", "RunningSpeed (CPH)"}
+    if not required_columns.issubset(df.columns):
+        return {"exact": exact, "normalized": normalized}
+
+    for _, row in df.iterrows():
+        _add_running_speed_entry(
+            exact,
+            normalized,
+            row.get("PlantName"),
+            row.get("Machine"),
+            row.get("Folder"),
+            row.get("RunType"),
+            row.get("RunningSpeed (CPH)"),
+        )
+
+    return {"exact": exact, "normalized": normalized}
+
+
+def _load_running_speed_json(path: Path) -> dict[str, Any]:
+    exact: dict[str, Any] = {}
+    normalized: dict[tuple[str, str, str, str], float] = {}
+    if not path.exists():
+        return {"exact": exact, "normalized": normalized}
+
     try:
         with path.open("r", encoding="utf-8") as file:
-            return json.load(file)
+            raw = json.load(file)
     except (OSError, json.JSONDecodeError):
-        return {}
+        return {"exact": exact, "normalized": normalized}
+
+    if not isinstance(raw, dict):
+        return {"exact": exact, "normalized": normalized}
+
+    for plant, machines in raw.items():
+        if not isinstance(machines, dict):
+            continue
+        for machine, folders in machines.items():
+            if not isinstance(folders, dict):
+                continue
+            for folder, speeds in folders.items():
+                if not isinstance(speeds, dict):
+                    continue
+                for run_type, speed in speeds.items():
+                    _add_running_speed_entry(exact, normalized, plant, machine, folder, run_type, speed)
+
+    return {"exact": exact, "normalized": normalized}
+
+
+def _load_running_speed_lookup() -> dict[str, Any]:
+    backend_dir = Path(__file__).resolve().parents[2]
+    return {
+        "workbook": _load_running_speed_workbook(backend_dir / RUNNING_SPEED_WORKBOOK_FILENAME),
+        "json": _load_running_speed_json(backend_dir / RUNNING_SPEED_LOOKUP_CONFIG_FILENAME),
+    }
 
 
 _RUNNING_SPEED_LOOKUP: dict[str, Any] = _load_running_speed_lookup()
@@ -2093,15 +2214,34 @@ def _lookup_committed_speed(plant: str, machine: str, folder: str, complexity_ke
     label = _SPEED_LOOKUP_COMPLEXITY_KEYS.get(complexity_key)
     if not label:
         return 0.0
-    plant_entry = _RUNNING_SPEED_LOOKUP.get(plant) or {}
-    machine_entry = plant_entry.get(machine) or {}
-    folder_entry = machine_entry.get(folder) or {}
-    speed = folder_entry.get(label)
-    return float(speed) if speed else 0.0
+
+    normalized_key = (
+        _speed_lookup_key(plant),
+        _speed_lookup_key(machine),
+        _speed_lookup_key(folder),
+        _speed_lookup_key(label),
+    )
+
+    for source_name in ("workbook", "json"):
+        source = _RUNNING_SPEED_LOOKUP.get(source_name) or {}
+        exact = source.get("exact") or {}
+        plant_entry = exact.get(plant) or {}
+        machine_entry = plant_entry.get(machine) or {}
+        folder_entry = machine_entry.get(folder) or {}
+        speed = folder_entry.get(label)
+        if speed:
+            return float(speed)
+
+        normalized = source.get("normalized") or {}
+        speed = normalized.get(normalized_key)
+        if speed:
+            return float(speed)
+
+    return 0.0
 
 
 def _committed_speed(row: pd.Series) -> float:
-    # Lookup by plant / machine / folder / complexity (running_speed_lookup.json)
+    # Lookup by plant / machine / folder / complexity (RunningSpeed.xlsx first, JSON fallback)
     classification = _categorize_complexity(row.get("Complexities", ""))
     looked_up = _lookup_committed_speed(
         _clean_text(row.get("Plant Name", "")),
@@ -2121,9 +2261,11 @@ def _committed_speed(row: pd.Series) -> float:
 
 
 def _apportioned_print_order(row: pd.Series, runtime_minutes: float) -> float:
-    committed_speed = _committed_speed(row)
-    if committed_speed > 0 and runtime_minutes > 0:
-        return (committed_speed / 60.0) * runtime_minutes
+    for column in ACTUAL_SPEED_SOURCE_COLUMNS:
+        if column in row:
+            actual_speed = _parse_count_value(row.get(column))
+            if actual_speed > 0 and runtime_minutes > 0:
+                return (actual_speed / 60.0) * runtime_minutes
     return _effective_print_order(row)
 
 
