@@ -28,11 +28,11 @@
     /* Horizontal: fully transparent at 8%, fully opaque at 23% of image width  */
     /* Vertical:   fully opaque until 70%, fully transparent at 90% of image height */
     -webkit-mask-image:
-        linear-gradient(to right,  transparent 8%, black 23%),
+        linear-gradient(to right, transparent 8%, black 23%),
         linear-gradient(to bottom, black 70%, transparent 90%);
     -webkit-mask-composite: destination-in;
     mask-image:
-        linear-gradient(to right,  transparent 8%, black 23%),
+        linear-gradient(to right, transparent 8%, black 23%),
         linear-gradient(to bottom, black 70%, transparent 90%);
     mask-composite: intersect;
     pointer-events: none;
@@ -41,7 +41,7 @@
 }
 
 /* All direct content above the background image */
-.landing-page-container > *:not(.machine-bg-img) {
+.landing-page-container>*:not(.machine-bg-img) {
     position: relative;
     z-index: 1;
 }
@@ -220,7 +220,7 @@
     }
 
     /* Suppress header top margin on larger screens */
-    .landing-page-container > div:first-of-type {
+    .landing-page-container>div:first-of-type {
         margin-top: 0 !important;
     }
 

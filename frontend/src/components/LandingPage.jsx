@@ -2,39 +2,39 @@ import React from 'react';
 import { Clock } from 'lucide-react';
 import './LandingPage.css';
 
-// Import plant monument icons
-import ahmImg from '../../images/KAN/AHM.png';
-import airImg from '../../images/KAN/AIR.png';
-import barImg from '../../images/KAN/BAR.png';
-import blrImg from '../../images/KAN/BLR.png';
-import cheImg from '../../images/KAN/CHE.png';
-import hydImg from '../../images/KAN/HYD.png';
-import kanImg from '../../images/KAN/KAN.png';
-import kolImg from '../../images/KAN/KOL.png';
-import lucImg from '../../images/KAN/LUC.png';
-import msrImg from '../../images/KAN/MSR.png';
-import nagImg from '../../images/KAN/NAG.png';
-import punImg from '../../images/KAN/PUN.png';
-import sbdImg from '../../images/KAN/SBD.png';
-import tvmImg from '../../images/KAN/TVM.png';
+// Import plant monument SVG icons
+import ahmSvg from '../../images/svg_icons/AHM.svg';
+import airSvg from '../../images/svg_icons/AIR.svg';
+import barSvg from '../../images/svg_icons/BAR.svg';
+import blrSvg from '../../images/svg_icons/BLR.svg';
+import cheSvg from '../../images/svg_icons/CHE.svg';
+import hydSvg from '../../images/svg_icons/HYD.svg';
+import kanSvg from '../../images/svg_icons/KAN.svg';
+import kolSvg from '../../images/svg_icons/KOL.svg';
+import lucSvg from '../../images/svg_icons/LUC.svg';
+import msrSvg from '../../images/svg_icons/MSR.svg';
+import nagSvg from '../../images/svg_icons/NAG.svg';
+import punSvg from '../../images/svg_icons/PUN.svg';
+import sbdSvg from '../../images/svg_icons/SBD.svg';
+import tvmSvg from '../../images/svg_icons/TVM.svg';
 import machineImg from '../../images/KAN/machine_img.png';
 import logoImg from '../../images/KAN/logo.png';
 
 const DESIGN_PLANTS = [
-  { key: "Vejalpur", label: "AHMEDABAD", img: ahmImg },
-  { key: "Airoli", label: "AIROLI", img: airImg },
-  { key: "Bommasandra", label: "BANGALORE", img: blrImg },
-  { key: "Baroda", label: "BARODA", img: barImg },
-  { key: "Chemmencherry", label: "CHENNAI", img: cheImg },
-  { key: "Nacharam", label: "HYDERABAD", img: hydImg },
-  { key: "Kandivali", label: "KANDIVALI", img: kanImg },
-  { key: "Saltlake", label: "KOLKATA", img: kolImg },
-  { key: "Chinhat", label: "LUCKNOW", img: lucImg },
-  { key: "Manesar", label: "MANESAR", img: msrImg },
-  { key: "Butibori", label: "NAGPUR", img: nagImg },
-  { key: "Bhosari", label: "PUNE", img: punImg },
-  { key: "Sahibabad", label: "SAHIBABAD", img: sbdImg },
-  { key: "Trivandrum", label: "TRIVANDRAM", img: tvmImg }
+  { key: "Vejalpur", label: "AHMEDABAD", img: ahmSvg },
+  { key: "Airoli", label: "AIROLI", img: airSvg },
+  { key: "Bommasandra", label: "BANGALORE", img: blrSvg },
+  { key: "Baroda", label: "BARODA", img: barSvg },
+  { key: "Chemmencherry", label: "CHENNAI", img: cheSvg },
+  { key: "Nacharam", label: "HYDERABAD", img: hydSvg },
+  { key: "Kandivali", label: "KANDIVALI", img: kanSvg },
+  { key: "Saltlake", label: "KOLKATA", img: kolSvg },
+  { key: "Chinhat", label: "LUCKNOW", img: lucSvg },
+  { key: "Manesar", label: "MANESAR", img: msrSvg },
+  { key: "Butibori", label: "NAGPUR", img: nagSvg },
+  { key: "Bhosari", label: "PUNE", img: punSvg },
+  { key: "Sahibabad", label: "SAHIBABAD", img: sbdSvg },
+  { key: "Trivandrum", label: "TRIVANDRAM", img: tvmSvg }
 ];
 
 export default function LandingPage({ onSelectPlant }) {
@@ -54,9 +54,9 @@ export default function LandingPage({ onSelectPlant }) {
       <div className="max-w-[1360px] w-full mt-4 lg:mt-8">
         {/* PACE Logo */}
         <div className="flex items-center select-none pace-logo-wrap">
-          <img 
-            src={logoImg} 
-            alt="PACE Logo" 
+          <img
+            src={logoImg}
+            alt="PACE Logo"
             className="h-[60px] sm:h-[75px] lg:h-[85px] w-auto object-contain"
           />
         </div>
@@ -159,3 +159,4 @@ export default function LandingPage({ onSelectPlant }) {
     </div>
   );
 }
+
