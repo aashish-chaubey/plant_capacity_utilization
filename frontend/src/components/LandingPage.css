@@ -176,8 +176,7 @@
     position: relative;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     background-color: transparent !important;
-    /* no background changes */
-    padding-bottom: 0.75rem;
+    padding-bottom: 0.95rem !important;
 }
 
 .plant-item-btn img {
@@ -198,8 +197,8 @@
 }
 
 .plant-item-btn:hover::after {
-    width: 50%;
-    left: 25%;
+    width: 60%;
+    left: 20%;
 }
 
 .plant-item-btn:hover img {
@@ -251,7 +250,7 @@
 
     .plant-item-btn {
         padding-top: 0.25rem !important;
-        padding-bottom: 0.5rem !important;
+        padding-bottom: 0.85rem !important;
         padding-left: 0px !important;
         padding-right: 0px !important;
     }
@@ -279,13 +278,9 @@
         height: 140px !important;
     }
 
-
-
-
-
     .plant-item-btn {
         padding-top: 0.5rem !important;
-        padding-bottom: 0.75rem !important;
+        padding-bottom: 0.95rem !important;
         padding-left: 2px !important;
         padding-right: 2px !important;
     }

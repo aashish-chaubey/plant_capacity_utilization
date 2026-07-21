@@ -21,19 +21,19 @@ import machineImg from '../../images/KAN/machine_img.png';
 import logoImg from '../../images/KAN/logo.png';
 
 const DESIGN_PLANTS = [
-  { key: "Vejalpur", label: "AHMEDABAD", img: ahmSvg },
+  { key: "Sahibabad", label: "SAHIBABAD", img: sbdSvg },
+  { key: "Manesar", label: "MANESAR", img: msrSvg },
+  { key: "Kandivali", label: "KANDIVALI", img: kanSvg },
   { key: "Airoli", label: "AIROLI", img: airSvg },
   { key: "Bommasandra", label: "BANGALORE", img: blrSvg },
-  { key: "Baroda", label: "BARODA", img: barSvg },
   { key: "Chemmencherry", label: "CHENNAI", img: cheSvg },
-  { key: "Nacharam", label: "HYDERABAD", img: hydSvg },
-  { key: "Kandivali", label: "KANDIVALI", img: kanSvg },
   { key: "Saltlake", label: "KOLKATA", img: kolSvg },
-  { key: "Chinhat", label: "LUCKNOW", img: lucSvg },
-  { key: "Manesar", label: "MANESAR", img: msrSvg },
-  { key: "Butibori", label: "NAGPUR", img: nagSvg },
   { key: "Bhosari", label: "PUNE", img: punSvg },
-  { key: "Sahibabad", label: "SAHIBABAD", img: sbdSvg },
+  { key: "Nacharam", label: "HYDERABAD", img: hydSvg },
+  { key: "Vejalpur", label: "AHMEDABAD", img: ahmSvg },
+  { key: "Baroda", label: "BARODA", img: barSvg },
+  { key: "Chinhat", label: "LUCKNOW", img: lucSvg },
+  { key: "Butibori", label: "NAGPUR", img: nagSvg },
   { key: "Trivandrum", label: "TRIVANDRAM", img: tvmSvg }
 ];
 
@@ -142,14 +142,17 @@ export default function LandingPage({ onSelectPlant }) {
                 key={plant.key}
                 type="button"
                 onClick={() => onSelectPlant(plant.key)}
-                className="plant-item-btn flex flex-col items-center flex-1 py-3 px-1 rounded-xl text-center group cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-100"
+                className="plant-item-btn flex flex-col items-center flex-1 py-1 px-1 rounded-xl text-center group cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-100"
               >
-                <div className="plant-image-wrapper flex items-center justify-center">
+                <div className="plant-image-wrapper flex flex-col items-center justify-center m-0 p-0">
                   <img
                     src={plant.img}
                     alt={plant.label}
-                    className="max-h-full max-w-full object-contain filter drop-shadow-sm select-none"
+                    className="max-h-full max-w-full object-contain filter drop-shadow-sm select-none m-0 p-0"
                   />
+                  <span className="plant-label-text text-[8px] sm:text-[9px] font-bold text-slate-800 tracking-wider m-0 p-0 mt-0 mb-1.5 leading-none select-none transition-colors group-hover:text-blue-600">
+                    {plant.label}
+                  </span>
                 </div>
               </button>
             ))}
