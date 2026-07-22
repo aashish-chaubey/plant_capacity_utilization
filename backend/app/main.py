@@ -88,6 +88,7 @@ class ChatRequest(BaseModel):
     timeframe: ChatTimeframe | None = None
     history: list[dict[str, Any]] = []
     force_full_llm: bool = False
+    conversation_state: dict[str, Any] | None = None
 
 
 class ChatCancelRequest(BaseModel):
@@ -721,6 +722,10 @@ async def capacity_chat(request: ChatRequest) -> JSONResponse:
             history=request.history,
             force_full_llm=request.force_full_llm,
             cancellation_event=cancellation_event,
+            conversation_state=request.conversation_state,
+            selected_plant=request.selected_plant,
+            selected_folders=request.selected_folders,
+            timeframe=request.timeframe.model_dump() if request.timeframe else None,
         )
         if cancellation_event.is_set():
             raise asyncio.CancelledError()
@@ -755,6 +760,7 @@ async def capacity_chat(request: ChatRequest) -> JSONResponse:
             "llm_used": result.get("llm_used", False),
             "llm_status": result.get("llm_status", ""),
             "chart": _safe_json(result.get("chart")) if result.get("chart") else None,
+            "conversation_state": _safe_json(result.get("conversation_state")) if result.get("conversation_state") else None,
         })
     except asyncio.CancelledError:
         cancellation_event.set()

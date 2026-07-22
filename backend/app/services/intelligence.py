@@ -52,6 +52,142 @@ def _raise_if_chat_cancelled(cancellation_event: asyncio.Event | None = None) ->
         raise asyncio.CancelledError()
 
 
+# ── Conversation state (compact, structured memory instead of raw history turns) ────────────────
+
+_INTENT_KEYWORD_RULES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\btrend|forecast|predict|projection|extrapolat"), "trend"),
+    (re.compile(r"\baverage\b|\bavg\b"), "average"),
+    (re.compile(r"\bcompare|comparison|\bvs\.?\b|\bversus\b"), "comparison"),
+    (re.compile(r"\btop\b|\brank|\bhighest\b|\blowest\b|\bworst\b|\bbest\b"), "ranking"),
+    (re.compile(r"\bbreakdown\b|\bcomponents\b|\bsplit\b"), "breakdown"),
+]
+
+
+def _infer_query_intent(message: str, qu_plan: dict[str, Any] | None) -> str:
+    """Deterministic, no-extra-LLM-call classification of what kind of question this was.
+
+    Prefers the QU decomposer's own intent field (already computed this turn) and only falls back
+    to keyword matching when no plan was produced (force_full_llm or decomposer failure).
+    """
+    if isinstance(qu_plan, dict):
+        intent = _clean_text(qu_plan.get("intent", ""))
+        if intent:
+            return intent
+    question = _clean_text(message).casefold()
+    if _asks_how_many(question):
+        return "count"
+    for pattern, label in _INTENT_KEYWORD_RULES:
+        if pattern.search(question):
+            return label
+    return "lookup"
+
+
+def _infer_latest_metric(qu_plan: dict[str, Any] | None) -> str:
+    """Best-effort human label for what metric this turn was about, from the plan already computed
+    this turn — never fabricated, and left blank rather than guessed when no plan exists."""
+    if not isinstance(qu_plan, dict):
+        return ""
+    for metric in qu_plan.get("metrics") or []:
+        if isinstance(metric, dict):
+            label = _clean_text(metric.get("label") or metric.get("field") or "")
+        else:
+            label = _clean_text(metric)
+        if label:
+            return label
+    return ""
+
+
+def _summarize_answer_for_state(answer: str, limit: int = 220) -> str:
+    """Deterministic truncation of the real answer just produced — not a fabricated summary."""
+    text = _clean_text(answer)
+    text = re.sub(r"\|", " ", text)
+    text = re.sub(r"[#*_`]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
+def _next_conversation_state(
+    selected_plant: str,
+    selected_folders: list[str] | None,
+    timeframe: dict[str, Any] | None,
+    message: str,
+    qu_plan: dict[str, Any] | None,
+    answer: str,
+) -> dict[str, Any]:
+    tf = timeframe or {}
+    return {
+        "selected_plant": _clean_text(selected_plant),
+        "selected_folders": [_clean_text(f) for f in (selected_folders or []) if _clean_text(f)],
+        "timeframe": {"start": _clean_text(tf.get("start", "")), "end": _clean_text(tf.get("end", ""))},
+        "latest_metric_requested": _infer_latest_metric(qu_plan),
+        "last_query_intent": _infer_query_intent(message, qu_plan),
+        "previous_answer_summary": _summarize_answer_for_state(answer),
+    }
+
+
+def _conversation_state_prompt_block(conversation_state: dict[str, Any] | None) -> str:
+    """Renders the PRIOR turn's structured state for prompt injection, replacing reliance on raw
+    dialogue for continuity. Explicitly scoped as context-only so the model never treats a stale
+    previous_answer_summary as a shortcut instead of recomputing from the current dashboard data."""
+    if not isinstance(conversation_state, dict) or not conversation_state:
+        return ""
+    plant = _clean_text(conversation_state.get("selected_plant", ""))
+    folders = [f for f in (conversation_state.get("selected_folders") or []) if _clean_text(f)]
+    tf = conversation_state.get("timeframe") or {}
+    tf_start = _clean_text(tf.get("start", ""))
+    tf_end = _clean_text(tf.get("end", ""))
+    metric = _clean_text(conversation_state.get("latest_metric_requested", ""))
+    intent = _clean_text(conversation_state.get("last_query_intent", ""))
+    summary = _clean_text(conversation_state.get("previous_answer_summary", ""))
+    if not any([plant, folders, tf_start, tf_end, metric, intent, summary]):
+        return ""
+    lines = [
+        "CONVERSATION STATE (prior turn — use ONLY to resolve follow-up phrasing such as pronouns "
+        "or 'what about X'; NEVER quote its numbers as the answer, always recompute from the "
+        "dashboard context below):"
+    ]
+    if plant:
+        lines.append(f"- selected_plant: {plant}")
+    if folders:
+        lines.append(f"- selected_folders: {', '.join(folders)}")
+    if tf_start or tf_end:
+        lines.append(f"- timeframe: {tf_start} to {tf_end}")
+    if metric:
+        lines.append(f"- latest_metric_requested: {metric}")
+    if intent:
+        lines.append(f"- last_query_intent: {intent}")
+    if summary:
+        lines.append(f"- previous_answer_summary: {summary}")
+    return "\n".join(lines) + "\n\n"
+
+
+def _qu_decomposer_user_content(message: str, conversation_state: dict[str, Any] | None) -> str:
+    """Short one-line conversation hint prefixed onto the decomposer's user message so follow-up
+    questions ('and for GNP nights only?') resolve against the right prior entity/metric — the
+    decomposer otherwise sees no history at all."""
+    clean_message = _clean_text(message)
+    if not isinstance(conversation_state, dict) or not conversation_state:
+        return clean_message
+    parts: list[str] = []
+    plant = _clean_text(conversation_state.get("selected_plant", ""))
+    folders = [f for f in (conversation_state.get("selected_folders") or []) if _clean_text(f)]
+    metric = _clean_text(conversation_state.get("latest_metric_requested", ""))
+    intent = _clean_text(conversation_state.get("last_query_intent", ""))
+    if plant:
+        parts.append(f"plant={plant}")
+    if folders:
+        parts.append(f"folders={','.join(folders)}")
+    if metric:
+        parts.append(f"previous_metric={metric}")
+    if intent:
+        parts.append(f"previous_intent={intent}")
+    if not parts:
+        return clean_message
+    return f"[Conversation context: {'; '.join(parts)}]\nQuestion: {clean_message}"
+
+
 async def build_chat_response(
     message: str,
     intelligence: dict[str, Any] | None = None,
@@ -64,6 +200,10 @@ async def build_chat_response(
     history: list[dict[str, str]] | None = None,
     force_full_llm: bool = False,
     cancellation_event: asyncio.Event | None = None,
+    conversation_state: dict[str, Any] | None = None,
+    selected_plant: str = "",
+    selected_folders: list[str] | None = None,
+    timeframe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _raise_if_chat_cancelled(cancellation_event)
     intelligence = intelligence or {}
@@ -74,6 +214,7 @@ async def build_chat_response(
     downtime_reasons = downtime_reasons or []
     book_details = book_details or []
     history = history or []
+    selected_folders = selected_folders or []
 
     if not (intelligence.get("sections") or {}) and (summary or daily_rows or details):
         intelligence = _build_deterministic_intelligence(
@@ -112,6 +253,7 @@ async def build_chat_response(
             "llm_status": "unconfigured",
             "refined": False,
             "chart": None,
+            "conversation_state": conversation_state,
             "eval_trace": {
                 "mode": "unconfigured",
                 "system_prompt": "LLM is not configured; no system prompt was used.",
@@ -123,12 +265,18 @@ async def build_chat_response(
     # Phase 1 — Query Understanding: decompose the question into a rich structured plan,
     # then execute it deterministically. Only falls through to the full LLM when the executor
     # can't produce a confident answer (trend/prediction intents, unresolvable fields, etc.).
-    # Skipped entirely when force_full_llm=True (user explicitly requested full LLM).
+    # Still runs when force_full_llm=True — that flag only skips the deterministic fast-path
+    # ANSWER below, not this plan. Skipping the decomposer entirely here used to mean every
+    # forced-full-LLM question (the frontend's default chat mode) had no required_sources to size
+    # context by, so every table fell back to a small stub/no-plan cap regardless of what the
+    # question actually needed — the exact "capping causes wrong answers" bug, in the app's
+    # default mode. The plan is now used purely for context sizing and prompt guidance here.
     qu_plan: dict[str, Any] | None = None
-    if not force_full_llm and _should_use_chat_planner(message):
+    if _should_use_chat_planner(message):
         try:
             _raise_if_chat_cancelled(cancellation_event)
-            qu_plan = await _call_qu_decomposer_async(message, endpoint, api_key, cancellation_event=cancellation_event)
+            decomposer_input = _qu_decomposer_user_content(message, conversation_state)
+            qu_plan = await _call_qu_decomposer_async(decomposer_input, endpoint, api_key, cancellation_event=cancellation_event)
         except Exception as qu_exc:
             print(f"[chat] QU decomposer skipped: {_sanitize_error_message(qu_exc, api_key)}", flush=True)
             qu_plan = None
@@ -150,6 +298,9 @@ async def build_chat_response(
                     "llm_used": False,
                     "llm_status": "fast_path",
                     "chart": _chart_for_answer(qu_answer, message, context, history, qu_plan),
+                    "conversation_state": _next_conversation_state(
+                        selected_plant, selected_folders, timeframe, message, qu_plan, qu_answer
+                    ),
                     "eval_trace": {
                         "mode": "fast_path",
                         "system_prompt": "Deterministic fast path; no LLM system prompt was used.",
@@ -237,6 +388,10 @@ async def build_chat_response(
         "- For GNP-vs-SNP folder/edition questions about average spare, loss, wait, LPR-to-print-start, reflong, downtime, delayed finish, or minimum-3-GNP-folder nights, use gnp_snp_folder_analysis first. "
         "Its comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, and delayed_finish_complexity tables are precomputed from the data. "
         "For web-break comparisons on named towers, use web_break_gnp_snp_tower_comparison; if can_split_web_break_by_product_type=false, explicitly state that web-break events are not stored with product type and compare against GNP/SNP runtime mix only.\n"
+        "- For '<metric> on GNP nights per folder' / '... on SNP nights per folder' questions specifically (a per-folder breakdown filtered by the PLANT-WIDE night classification, not the folder's own edition mix), "
+        "use exact_dashboard.folder_days directly: filter rows where night_type = 'GNP/UV' (or 'SNP/non-UV'), then group by folder and average/sum the requested metric. "
+        "Every folder_days row already carries this precomputed night_type field — never re-derive it by hand-joining against the night_classification/uv_nights date list, and never substitute gnp_snp_folder_analysis for this "
+        "(that table classifies by the folder's own GNP/SNP edition codes, which is a different scope than the plant-wide night type).\n"
         "- For any efficiency question involving DATES, DAYS, or THRESHOLDS (e.g. 'days below 90% efficiency', 'average efficiency per night', 'trend of efficiency'), "
         "use daily_efficiency. It has one row per production night with run_date, efficiency_pct, total_po, total_runtime_min, total_dt_min, actual_speed_cph, committed_speed_cph. "
         "Filter rows by efficiency_pct threshold, count matching rows, or group by month/weekday from run_date.\n"
@@ -431,8 +586,11 @@ async def build_chat_response(
         "runtime_min, loss_time_min, waiting_time_min, downtime_min, spare_time_min, unplanned_time_min, "
         "utilization_pct, spare_capacity_pct, complexity_codes, editions, print_finish_time (HH:MM, that "
         "folder's actual finish time that night, populated whether on time or late), last_edition / "
-        "last_edition_name (which edition produced it), delayed_print_finish (bool), overrun_minutes. "
-        "Use for day-by-day breakdown within a folder, weekday-wise or month-wise per-folder questions, or to filter by a specific date.\n"
+        "last_edition_name (which edition produced it), delayed_print_finish (bool), overrun_minutes, "
+        "night_type ('GNP/UV' or 'SNP/non-UV', the plant-wide per-date classification — at least one "
+        "folder ran GNP/GNP Complex that date), gnp_night (bool, same classification). "
+        "Use for day-by-day breakdown within a folder, weekday-wise or month-wise per-folder questions, to filter by a specific date, "
+        "or to filter/group a per-folder metric by GNP-night vs SNP-night (filter night_type = 'GNP/UV' or 'SNP/non-UV').\n"
         "- loss_time.all_days: per-date plant-level loss breakdown. Fields: run_date, weekday (precomputed), "
         "month (YYYY-MM, ALREADY PRECOMPUTED), runtime_min, lost_time_min (= loss_time_min), waiting_time_min, "
         "available_capacity_min, loss_pct, dominant_driver, loss_components (a dict keyed by component name — "
@@ -457,13 +615,14 @@ async def build_chat_response(
         "this folder') can be drawn directly from the data; only state a root cause if the data explicitly shows "
         "it (e.g. a specific downtime reason). If several explanations are possible, say what the data suggests "
         "without presenting speculation as settled fact.\n\n"
+        f"{_conversation_state_prompt_block(conversation_state)}"
         f"Dashboard context (TOON):\n{context_text}"
     )
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
     history_char_limit = 800
     history_turns_used = 0
-    for turn in (history or [])[-6:]:
+    for turn in (history or [])[-3:]:
         role = _clean_text(turn.get("role", ""))
         content = _clean_text(turn.get("content", ""))
         if role in ("user", "assistant") and content:
@@ -498,6 +657,9 @@ async def build_chat_response(
             "llm_used": True,
             "llm_status": "weak_answer" if _is_weak_chat_answer(answer) else "answered",
             "chart": _chart_for_answer(answer, message, context, history, qu_plan),
+            "conversation_state": _next_conversation_state(
+                selected_plant, selected_folders, timeframe, message, qu_plan, answer
+            ),
             "eval_trace": eval_trace,
         }
     except Exception as exc:
@@ -517,6 +679,7 @@ async def build_chat_response(
                 "llm_status": "timeout",
                 "refined": False,
                 "chart": None,
+                "conversation_state": conversation_state,
                 "eval_trace": eval_trace,
             }
         return {
@@ -528,6 +691,7 @@ async def build_chat_response(
             "llm_status": "failed",
             "refined": False,
             "chart": None,
+            "conversation_state": conversation_state,
             "eval_trace": eval_trace,
         }
 
@@ -741,7 +905,7 @@ def _call_planner(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
 _QU_DECOMPOSER_SOURCES = """\
 exact_dashboard.daily       — per-date plant totals; fields: run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, night_type
 exact_dashboard.folders     — per-folder period totals; fields: resource (folder name), runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, active_nights, utilization_pct, spare_capacity_pct
-exact_dashboard.folder_days — per-folder per-date; fields: folder, run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, delayed_print_finish, overrun_minutes, print_finish_time
+exact_dashboard.folder_days — per-folder per-date; fields: folder, run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, delayed_print_finish, overrun_minutes, print_finish_time, night_type ("GNP/UV" or "SNP/non-UV", plant-wide per-date classification), gnp_night (bool). Use night_type for any GNP-night-vs-SNP-night filter on a per-folder basis.
 loss_time.all_days          — per-date loss breakdown; fields: run_date, weekday, month, runtime_min, lost_time_min, waiting_time_min, loss_pct, loss_components (dict), dominant_driver
 delayed_pf                  — late-night folder rows only; fields: run_date, folder, overrun_minutes, loss_time_min, downtime_min, waiting_time_min, runtime_min, night_type, editions
 towers                      — per-tower period totals; fields: tower, machine, runtime_min, downtime_min, loss_time_min, waiting_time_min, spare_time_min, active_nights, utilization_pct, uv_tower
@@ -832,6 +996,18 @@ _QU_DECOMPOSER_SYSTEM = (
     "'delayed nights, complexity, and reasons'→['gnp_snp_folder_analysis.delayed_finish_complexity','loss_time.all_days','exact_dashboard.folder_days']; "
     "'average spare time when 3+ GNP folders'→['gnp_snp_folder_analysis.nights_with_min_3_gnp_folders']; "
     "'downtime by tower by reason'→['towers','tower_downtime_reason_attribution'].\n"
+    "R13 GNP/SNP NIGHT PER FOLDER: exact_dashboard.folder_days carries night_type ('GNP/UV' or "
+    "'SNP/non-UV') and gnp_night (bool) on every row — the plant-wide classification (a GNP/UV "
+    "night is any date where at least one folder ran GNP or GNP Complex editions), already joined "
+    "onto each folder's per-night row. For any '<metric> on GNP nights per folder' / '... on SNP "
+    "nights per folder' / 'GNP vs SNP nights by folder' question, use primary_source: "
+    "'exact_dashboard.folder_days', a condition on the night_type field (not gnp_night, to avoid "
+    "boolean/string value mismatches — value:'GNP/UV' or value:'SNP/non-UV'), and group_by:'folder'. "
+    "Example: 'average spare time on GNP nights in each folder'→primary_source: "
+    "'exact_dashboard.folder_days', conditions:[{field:'night_type',op:'=',value:'GNP/UV',"
+    "label:'GNP/UV nights'}], group_by:'folder', metrics:[{field:'spare_time_min',"
+    "aggregation:'avg'}], intent:'average'. Do not use gnp_snp_folder_analysis for this — that "
+    "table classifies GNP/SNP at the folder's own edition level, not the plant-wide night.\n"
 )
 
 # Inject the source list at runtime to avoid f-string issues with the braces in the schema above
@@ -884,22 +1060,24 @@ def _apply_qu_conditions(
 ) -> list[dict[str, Any]] | None:
     """Multi-condition filter with AND/OR logic.
 
-    Returns None when a numeric comparator references a field that doesn't exist on the source
+    Returns None when ANY condition references a field that doesn't exist anywhere on the source
     (same abort-signal contract as _apply_plan_filters) so the caller can fall through cleanly
-    rather than returning an over-broad unfiltered count that looks like a real answer.
+    rather than returning an over-broad unfiltered count that looks like a real answer. This used
+    to only apply to numeric comparators (">"/"<"/etc) — an "=" or "contains" condition on an
+    unresolved field silently passed every row, which looked like a real filtered answer but
+    was actually the full unfiltered set.
     """
     if not conditions or not rows:
         return rows
 
     logic = (logic or "AND").strip().upper()
 
-    # Pre-validate: any numeric condition on an unknown field aborts the whole plan.
+    # Pre-validate: any condition (of any operator) on a field absent from the whole row set
+    # aborts the whole plan rather than silently no-op-filtering.
     for cond in conditions:
-        op = _clean_text(cond.get("op", "")).strip()
-        if op in (">", "<", ">=", "<="):
-            field_raw = _clean_text(cond.get("field", ""))
-            if field_raw and not _resolve_row_field(rows, field_raw):
-                return None
+        field_raw = _clean_text(cond.get("field", ""))
+        if field_raw and not _resolve_row_field(rows, field_raw):
+            return None
 
     def _passes(row: dict[str, Any]) -> bool:
         results: list[bool] = []
@@ -909,10 +1087,9 @@ def _apply_qu_conditions(
             value = cond.get("value")
             field_name = _resolve_row_field([row], field_raw) or _resolve_row_field(rows, field_raw)
             if not field_name:
-                if op in (">", "<", ">=", "<="):
-                    results.append(False)
-                else:
-                    results.append(True)
+                # Field exists on the row set overall (pre-validated above) but not on this
+                # specific row — treat as a non-match rather than an automatic pass.
+                results.append(False)
                 continue
             row_val = row.get(field_name)
             if op in (">", "<", ">=", "<="):
@@ -1768,14 +1945,19 @@ def _build_chat_context(
         "gnp_snp_folder_analysis": gnp_snp_folder_analysis,
         "uv_towers": uv_towers,
         "non_uv_towers": non_uv_towers,
-        "delayed_pf": delayed_pf_rows[:500],
+        # delayed_pf and book_details used to be hard-capped here (500 rows each) with no uncapped
+        # fallback, unlike tower_days/tower_downtime_runs above — that silently truncated the base
+        # data the deterministic executor itself reads (_rows_for_plan_source has no "_all" variant
+        # for either), undercounting "how many delayed nights" / edition-level questions on longer
+        # date ranges. Sent in full now.
+        "delayed_pf": delayed_pf_rows,
         "uv_nights": uv_nights,
         "downtime_by_reason": downtime_by_reason,
         "downtime_by_folder": downtime_by_folder,
         "editions_by_date": editions_by_date,
         "editions_by_folder": editions_by_folder,
         "editions_by_tower": editions_by_tower,
-        "book_details": _select_book_details_for_llm(book_details or [], question, limit=500),
+        "book_details": _select_book_details_for_llm(book_details or [], question, limit=None),
     }
 
 
@@ -1813,23 +1995,30 @@ def _compact_chat_context_for_llm(
             for r in required
         )
 
-    def _lim(key: str, full: int, stub: int) -> int:
-        """Return full if source is required, stub if not.
-        When no plan is available (force_full_llm=True or decomposer skipped),
-        use a conservative baseline so large workbooks stay under model limits."""
-        if _req(key):
-            return full
-        if not required:
-            return min(full, 60)
+    def _lim(key: str, full: int, stub: int) -> int | None:
+        """Return None (uncapped — every row) if the source is required, or if no plan is
+        available at all (force_full_llm=True skips the decomposer entirely, and the frontend's
+        default chat mode uses force_full_llm=True — so 'no plan' is the common case, not a rare
+        edge case). Only when a plan DOES exist and explicitly does not need this table do we send
+        the small stub — that's the one case where truncation doesn't risk cutting real data the
+        question needs. Capped 'full' values used to still be small fixed numbers (e.g. 120 rows),
+        which silently truncated the exact table a question needed on larger workbooks and
+        produced wrong aggregates/counts. The overall context-size check further down (which
+        degrades to _minimal_chat_context_for_llm) is the backstop against oversized requests, not
+        a blanket per-table cap."""
+        if not required or _req(key):
+            return None
         return stub
 
-    # tower_runtime_segments is a large table — only include when explicitly required
+    # tower_runtime_segments is a large table — only include when explicitly required, but send
+    # every row once it is (no cap) so runtime/product-share math isn't computed off a truncated
+    # subset of segments.
     wants_tower_runtime_segments = _req("tower_runtime_segments")
     tower_runtime_segment_rows = (
         _tower_runtime_segment_context_rows(
             context.get("tower_days_all") or context.get("tower_days") or [],
             "",
-            limit=600,
+            limit=None,
         )
         if wants_tower_runtime_segments
         else []
@@ -1869,22 +2058,26 @@ def _compact_chat_context_for_llm(
             "source": exact.get("source"),
             "scope": exact.get("scope") or {},
             "summary": exact.get("summary") or {},
-            # daily and folders are always small aggregates — send unconditionally
-            "daily": _compact_rows(exact.get("daily") or [], limit=370),
-            "folders": _compact_rows(exact.get("folders") or [], limit=200),
+            # daily and folders are one row per date/folder — sent uncapped so longer date ranges
+            # never get silently truncated into a wrong aggregate.
+            "daily": _compact_rows(exact.get("daily") or [], limit=None),
+            "folders": _compact_rows(exact.get("folders") or [], limit=None),
             "folder_days": _compact_rows(
                 exact.get("folder_days") or [],
                 limit=_lim("exact_dashboard.folder_days", 120, 5),
             ),
-            "complexity_downtime_by_code": _compact_rows(exact.get("complexity_downtime_by_code") or [], limit=30),
+            "complexity_downtime_by_code": _compact_rows(exact.get("complexity_downtime_by_code") or [], limit=None),
         },
-        "folders": _compact_rows(context.get("folders") or [], limit=200),
+        "folders": _compact_rows(context.get("folders") or [], limit=None),
         "unused_folders": context.get("unused_folders") or [],
         "speed": {
             "overall": (context.get("speed") or {}).get("overall") or {},
-            "by_category": _compact_rows(((context.get("speed") or {}).get("by_category") or []), limit=20),
-            "by_folder": _compact_rows(((context.get("speed") or {}).get("by_folder") or []), limit=200),
-            "by_machine": _compact_rows(((context.get("speed") or {}).get("by_machine") or []), limit=80),
+            "by_category": _compact_rows(((context.get("speed") or {}).get("by_category") or []), limit=None),
+            "by_folder": _compact_rows(((context.get("speed") or {}).get("by_folder") or []), limit=None),
+            "by_machine": _compact_rows(((context.get("speed") or {}).get("by_machine") or []), limit=None),
+            # fastest/slowest/highest_complexity_share are already top-N ranked lists computed
+            # upstream (sorted + sliced to ~4-6 items) — this limit is a harmless no-op, not a
+            # truncation of a larger real answer.
             "fastest": _compact_rows(((context.get("speed") or {}).get("fastest") or []), limit=10),
             "slowest": _compact_rows(((context.get("speed") or {}).get("slowest") or []), limit=10),
             "highest_complexity_share": _compact_rows(
@@ -1892,32 +2085,33 @@ def _compact_chat_context_for_llm(
                 limit=10,
             ),
         },
-        "complexity_vs_loss": _compact_rows(context.get("complexity_vs_loss") or [], limit=30),
-        "complexity_by_code": _compact_rows(context.get("complexity_by_code") or [], limit=30),
-        "complexity_downtime_by_code": _compact_rows(context.get("complexity_downtime_by_code") or [], limit=30),
+        "complexity_vs_loss": _compact_rows(context.get("complexity_vs_loss") or [], limit=None),
+        "complexity_by_code": _compact_rows(context.get("complexity_by_code") or [], limit=None),
+        "complexity_downtime_by_code": _compact_rows(context.get("complexity_downtime_by_code") or [], limit=None),
         "loss_time": {
             "dominant_driver": (context.get("loss_time") or {}).get("dominant_driver"),
             "driver_totals": (context.get("loss_time") or {}).get("driver_totals"),
+            # top_loss_days/low_loss_days are already top-N ranked lists computed upstream.
             "top_loss_days": _compact_rows(((context.get("loss_time") or {}).get("top_loss_days") or []), limit=20),
             "low_loss_days": _compact_rows(((context.get("loss_time") or {}).get("low_loss_days") or []), limit=20),
-            # loss_time.all_days is always small (one row per day) — send unconditionally;
-            # restricted to QU-filtered dates when an efficiency condition is active
+            # all_days is one row per date — sent uncapped; restricted to QU-filtered dates when an
+            # efficiency condition is active
             "all_days": _compact_rows(
                 [
                     r for r in ((context.get("loss_time") or {}).get("all_days") or [])
                     if not _qu_filtered_dates or _clean_text(r.get("run_date") or "") in _qu_filtered_dates
                 ],
-                limit=370,
+                limit=None,
             ),
         },
-        "towers": _compact_rows(context.get("towers") or [], limit=200),
+        "towers": _compact_rows(context.get("towers") or [], limit=None),
         "tower_runtime_segments": tower_runtime_segment_rows,
-        "tower_runtime_mix": _compact_rows(context.get("tower_runtime_mix") or [], limit=80),
+        "tower_runtime_mix": _compact_rows(context.get("tower_runtime_mix") or [], limit=None),
         "tower_days": _compact_rows(
             context.get("tower_days_all") or context.get("tower_days") or [],
             limit=_lim("tower_days", 150, 5),
         ),
-        "tower_usage_distribution": _compact_rows(context.get("tower_usage_distribution") or [], limit=80),
+        "tower_usage_distribution": _compact_rows(context.get("tower_usage_distribution") or [], limit=None),
         "tower_weekday_summary": _compact_rows(
             context.get("tower_weekday_summary") or [],
             limit=_lim("tower_weekday_summary", 500, 10),
@@ -1977,9 +2171,9 @@ def _compact_chat_context_for_llm(
             ),
         },
         "downtime_by_reason": {
-            "top_reasons": _compact_rows(downtime_by_reason.get("top_reasons") or [], limit=50),
+            "top_reasons": _compact_rows(downtime_by_reason.get("top_reasons") or [], limit=None),
         },
-        "downtime_by_folder": _compact_rows(context.get("downtime_by_folder") or [], limit=120),
+        "downtime_by_folder": _compact_rows(context.get("downtime_by_folder") or [], limit=None),
         "editions_by_date": _compact_rows(
             context.get("editions_by_date") or [],
             limit=_lim("editions_by_date", 300, 5),
@@ -2003,7 +2197,13 @@ def _minimal_chat_context_for_llm(
     context: dict[str, Any],
     qu_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Last-resort compact context for large workbooks that exceed model input limits."""
+    """Last-resort compact context for large workbooks that exceed model input limits.
+
+    Unlike _compact_chat_context_for_llm, row AND nested-list caps here are deliberately kept
+    tight (max_list_items=10) regardless of what triggered the fallback — this path only exists to
+    guarantee the request fits, so it must not inherit the "send every row/list item" behavior of
+    the regular path.
+    """
     exact = context.get("exact_dashboard") or {}
     primary_source = _clean_text((qu_plan or {}).get("primary_source") or "")
     source_rows = _rows_for_plan_source(primary_source, context) if primary_source else []
@@ -2012,15 +2212,17 @@ def _minimal_chat_context_for_llm(
         "summary": context.get("summary") or {},
         "context_note": "Large workbook context was reduced to stay under the model input limit.",
         "primary_source": primary_source,
-        "primary_source_rows": _compact_rows(source_rows, limit=80),
+        "primary_source_rows": _compact_rows(source_rows, limit=80, max_list_items=10),
         "exact_dashboard": {
             "summary": (exact.get("summary") or {}),
-            "daily": _compact_rows(exact.get("daily") or [], limit=120),
-            "folders": _compact_rows(exact.get("folders") or [], limit=80),
-            "folder_days": _compact_rows(exact.get("folder_days") or [], limit=30),
+            "daily": _compact_rows(exact.get("daily") or [], limit=120, max_list_items=10),
+            "folders": _compact_rows(exact.get("folders") or [], limit=80, max_list_items=10),
+            "folder_days": _compact_rows(exact.get("folder_days") or [], limit=30, max_list_items=10),
         },
         "downtime_by_reason": {
-            "top_reasons": _compact_rows(((context.get("downtime_by_reason") or {}).get("top_reasons") or []), limit=30),
+            "top_reasons": _compact_rows(
+                ((context.get("downtime_by_reason") or {}).get("top_reasons") or []), limit=30, max_list_items=10
+            ),
         },
     }
 
@@ -2160,13 +2362,22 @@ def _toon_needs_csv_quotes(text: str) -> bool:
 
 def _compact_rows(
     rows: list[dict[str, Any]],
-    limit: int,
+    limit: int | None,
     include_keys: set[str] | None = None,
+    max_list_items: int | None = None,
 ) -> list[dict[str, Any]]:
-    return [_compact_row(row, include_keys=include_keys) for row in rows[:limit] if isinstance(row, dict)]
+    selected = rows if limit is None else rows[:limit]
+    return [
+        _compact_row(row, include_keys=include_keys, max_list_items=max_list_items)
+        for row in selected if isinstance(row, dict)
+    ]
 
 
-def _compact_row(row: dict[str, Any], include_keys: set[str] | None = None) -> dict[str, Any]:
+def _compact_row(
+    row: dict[str, Any],
+    include_keys: set[str] | None = None,
+    max_list_items: int | None = None,
+) -> dict[str, Any]:
     include_keys = include_keys or set()
     omitted_keys = {
         "runtime_segments",
@@ -2181,12 +2392,16 @@ def _compact_row(row: dict[str, Any], include_keys: set[str] | None = None) -> d
         if key in omitted_keys and key not in include_keys:
             continue
         if isinstance(value, list):
-            compact[key] = [_compact_list_value(item, include_keys=include_keys) for item in value[:10]]
-            if len(value) > 10:
-                compact[f"{key}_omitted_count"] = len(value) - 10
+            items = value if max_list_items is None else value[:max_list_items]
+            compact[key] = [
+                _compact_list_value(item, include_keys=include_keys, max_list_items=max_list_items)
+                for item in items
+            ]
+            if max_list_items is not None and len(value) > max_list_items:
+                compact[f"{key}_omitted_count"] = len(value) - max_list_items
         elif isinstance(value, dict):
             compact[key] = {
-                child_key: _compact_list_value(child_value, include_keys=include_keys)
+                child_key: _compact_list_value(child_value, include_keys=include_keys, max_list_items=max_list_items)
                 for child_key, child_value in value.items()
                 if child_key not in omitted_keys or child_key in include_keys
             }
@@ -2195,11 +2410,13 @@ def _compact_row(row: dict[str, Any], include_keys: set[str] | None = None) -> d
     return compact
 
 
-def _compact_list_value(value: Any, include_keys: set[str] | None = None) -> Any:
+def _compact_list_value(
+    value: Any,
+    include_keys: set[str] | None = None,
+    max_list_items: int | None = None,
+) -> Any:
     if isinstance(value, dict):
-        return _compact_row(value, include_keys=include_keys)
-    if isinstance(value, list):
-        return value[:10]
+        return _compact_row(value, include_keys=include_keys, max_list_items=max_list_items)
     return value
 
 
@@ -2220,7 +2437,7 @@ def _wants_tower_runtime_segment_context(question: str) -> bool:
 def _tower_runtime_segment_context_rows(
     tower_day_rows: list[dict[str, Any]],
     question: str,
-    limit: int,
+    limit: int | None,
 ) -> list[dict[str, Any]]:
     wants_non_uv = any(term in question for term in ["non uv", "non-uv", "non gnp", "non-gnp"])
     wants_gnp_uv_tower = (
@@ -2260,7 +2477,7 @@ def _tower_runtime_segment_context_rows(
                 "category": segment.get("category"),
                 "minutes": _clean_number(minutes),
             })
-            if len(rows) >= limit:
+            if limit is not None and len(rows) >= limit:
                 return rows
 
     return rows
@@ -2282,7 +2499,8 @@ def _build_exact_dashboard_context(
     exact_daily_rows = _exact_daily_rows(daily_rows, folder_rows, dates, folder_keys)
     exact_folder_rows = _exact_folder_rows(folder_rows, dates)
     exact_folder_day_rows, folder_day_note = _exact_folder_day_rows(folder_rows, question)
-    exact_folder_day_rows_all = [_exact_folder_day_row(row) for row in folder_rows]
+    gnp_night_lookup_all = _gnp_night_lookup(folder_rows)
+    exact_folder_day_rows_all = [_exact_folder_day_row(row, gnp_night_lookup_all) for row in folder_rows]
     night_classification = _build_gnp_night_classification(folder_rows, dates)
     delayed_pf_rows = _build_delayed_pf_rows(folder_rows)
     complexity_downtime_by_code = _complexity_downtime_by_code(folder_rows)
@@ -3929,7 +4147,7 @@ def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict
         "tower_runtime_segments": _tower_runtime_segment_context_rows(
             context.get("tower_days_all") or context.get("tower_days") or [],
             "",
-            limit=2500,
+            limit=None,
         ),
         "tower_days": context.get("tower_days_all") or context.get("tower_days"),
         "tower_usage_distribution": context.get("tower_usage_distribution"),
@@ -5392,11 +5610,17 @@ def _exact_folder_day_rows(folder_rows: list[dict[str, Any]], question: str) -> 
             "use daily and folder totals for complete-period answers."
         )
 
-    rows = [_exact_folder_day_row(row) for row in selected_rows[:limit]]
+    gnp_night_lookup = _gnp_night_lookup(folder_rows)
+    rows = [_exact_folder_day_row(row, gnp_night_lookup) for row in selected_rows[:limit]]
     return rows, note
 
 
 def _folder_day_context_limit(matching: bool) -> int:
+    """Row cap for the LLM-facing folder_days view. Defaults to effectively unlimited — a fixed
+    1500/2000-row cap here used to silently truncate longer date ranges and produce wrong
+    aggregates/counts even when the question's own relevance filter (matching_rows) had already
+    selected exactly the rows needed. CAPACITY_CHAT_MAX_FOLDER_DAY_ROWS still lets an operator
+    reintroduce a cap (e.g. for cost control) without a code change."""
     configured = _get_env("CAPACITY_CHAT_MAX_FOLDER_DAY_ROWS")
     if configured:
         try:
@@ -5406,10 +5630,13 @@ def _folder_day_context_limit(matching: bool) -> int:
             return max(value, 1)
         except ValueError:
             pass
-    return 2000 if matching else 1500
+    return 1_000_000
 
 
-def _exact_folder_day_row(row: dict[str, Any]) -> dict[str, Any]:
+def _exact_folder_day_row(
+    row: dict[str, Any],
+    gnp_night_lookup: dict[str, bool] | None = None,
+) -> dict[str, Any]:
     available = _available_minutes(row)
     unplanned_time = _number(row.get("idle_time"))
     spare_time = _number(row.get("buffer_time"))
@@ -5424,8 +5651,13 @@ def _exact_folder_day_row(row: dict[str, Any]) -> dict[str, Any]:
     machine, folder_name = _split_machine_folder(_clean_text(row.get("folder")))
     overrun = _number(row.get("overrun_minutes"))
     cutoff_minutes = _pf_compliance_minutes(row.get("plant_name"))
+    run_date = _clean_text(row.get("run_date"))
+    # Plant-wide GNP/UV night classification (same definition as delayed_pf and exact_dashboard.daily,
+    # via _gnp_night_lookup) — attached per row so GNP-vs-SNP-night filters/group-bys on a per-folder
+    # basis don't need a join the deterministic plan executor can't perform across two source tables.
+    is_gnp_night = (gnp_night_lookup or {}).get(run_date, False)
     return {
-        "run_date": _clean_text(row.get("run_date")),
+        "run_date": run_date,
         "weekday": _weekday_label(row.get("run_date")),
         "month": _month_label(row.get("run_date")),
         "plant": _clean_text(row.get("plant_name")),
@@ -5433,6 +5665,8 @@ def _exact_folder_day_row(row: dict[str, Any]) -> dict[str, Any]:
         "folder_name": folder_name,
         "folder": _display_resource_name(row.get("folder")),
         "active_night": _is_active_folder_row(row),
+        "night_type": "GNP/UV" if is_gnp_night else "SNP/non-UV",
+        "gnp_night": is_gnp_night,
         "available_capacity_min": _clean_number(available),
         "runtime_min": _clean_number(runtime),
         "loss_time_min": _clean_number(loss_time),
@@ -5507,7 +5741,7 @@ def _book_detail_matches_question(row: dict[str, Any], question_text: str) -> bo
 def _select_book_details_for_llm(
     book_details: list[dict[str, Any]],
     question: str,
-    limit: int,
+    limit: int | None,
 ) -> list[dict[str, Any]]:
     """Prioritize book_details rows relevant to the question instead of an arbitrary slice.
 
@@ -5515,7 +5749,7 @@ def _select_book_details_for_llm(
     order is chronological-ascending — a plain [:limit] slice would otherwise drop recent data
     first, which is the opposite of what most questions care about.
     """
-    if not book_details or len(book_details) <= limit:
+    if not book_details or limit is None or len(book_details) <= limit:
         return book_details or []
 
     question_text = _clean_text(question).casefold()
@@ -7630,11 +7864,16 @@ def _call_chat_completion(endpoint: str, api_key: str, messages: list[dict[str, 
     if model:
         base["model"] = model
 
+    # temperature=0 (greedy decoding) attempted first so the same question always produces the
+    # same plan — the QU decomposer's output drives which real numbers get computed downstream, so
+    # sampling variance here was a direct cause of different answers to the same question. The
+    # no-temperature payloads are kept as a fallback only, for any deployment that rejects an
+    # explicit temperature (400) rather than ignoring it.
     payloads = [
+        {**base, "temperature": 0, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
+        {**base, "temperature": 0, "max_completion_tokens": 1800},
         {**base, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
         {**base, "max_completion_tokens": 1800},
-        {**base, "temperature": 0.2, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
-        {**base, "temperature": 0.2, "max_completion_tokens": 1800},
     ]
     auth_modes = ["api-key", "bearer"]
     last_error: Exception | None = None
@@ -7681,11 +7920,16 @@ async def _call_chat_completion_async(
     if model:
         base["model"] = model
 
+    # temperature=0 (greedy decoding) attempted first so the same question always produces the
+    # same plan — the QU decomposer's output drives which real numbers get computed downstream, so
+    # sampling variance here was a direct cause of different answers to the same question. The
+    # no-temperature payloads are kept as a fallback only, for any deployment that rejects an
+    # explicit temperature (400) rather than ignoring it.
     payloads = [
+        {**base, "temperature": 0, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
+        {**base, "temperature": 0, "max_completion_tokens": 1800},
         {**base, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
         {**base, "max_completion_tokens": 1800},
-        {**base, "temperature": 0.2, "max_completion_tokens": 1800, "response_format": {"type": "json_object"}},
-        {**base, "temperature": 0.2, "max_completion_tokens": 1800},
     ]
     auth_modes = ["api-key", "bearer"]
     last_error: Exception | None = None
@@ -7945,6 +8189,14 @@ def _responses_payloads(
             **base_payload,
             "reasoning": {"effort": reasoning_effort},
         })
+    else:
+        # Greedy decoding (temperature=0) attempted first so repeated identical questions get
+        # repeatable numeric answers. Reasoning-effort payloads above never get a temperature —
+        # reasoning-family models generally reject it — so this branch only fires for the
+        # non-reasoning / effort="none" case. The original default-temperature payloads remain as
+        # a fallback for any deployment that 400s on an explicit temperature.
+        _append_unique_payload(payloads, {**low_verbosity_payload, "temperature": 0})
+        _append_unique_payload(payloads, {**base_payload, "temperature": 0})
     _append_unique_payload(payloads, low_verbosity_payload)
     _append_unique_payload(payloads, base_payload)
     return payloads
@@ -7968,10 +8220,12 @@ def _chat_completion_payloads(
             "max_completion_tokens": max_tokens,
         })
 
-    # Try minimal payloads first. Newer GPT/o-series deployments reject max_tokens,
-    # so use max_completion_tokens consistently.
+    # Greedy decoding (temperature=0) attempted first for reproducible numeric answers; the
+    # no-temperature payload remains as a fallback for deployments that reject an explicit
+    # temperature. Newer GPT/o-series deployments reject max_tokens, so use max_completion_tokens
+    # consistently.
+    _append_unique_payload(payloads, {**base_payload, "temperature": 0, "max_completion_tokens": max_tokens})
     _append_unique_payload(payloads, {**base_payload, "max_completion_tokens": max_tokens})
-    _append_unique_payload(payloads, {**base_payload, "temperature": 0.2, "max_completion_tokens": max_tokens})
     return payloads
 
 

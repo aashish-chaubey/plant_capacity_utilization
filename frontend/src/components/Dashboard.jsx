@@ -118,6 +118,7 @@ export default function Dashboard({
   const [selectedBreakdownKeys, setSelectedBreakdownKeys] = useState(DEFAULT_BREAKDOWN_KEYS);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
+  const [conversationState, setConversationState] = useState(null);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatStopping, setChatStopping] = useState(false);
@@ -142,6 +143,7 @@ export default function Dashboard({
       prevIntelligenceRef.current !== intelligence
     ) {
       setChatMessages([]);
+      setConversationState(null);
     }
     prevIntelligenceRef.current = intelligence;
   }, [intelligence]);
@@ -255,7 +257,8 @@ export default function Dashboard({
           selected_plant: selectedPlant || "",
           selected_folders: selectedFolders || [],
           timeframe: timeframeRange ? { start: timeframeRange.start, end: timeframeRange.end } : null,
-          history: chatMessages.map(({ role, content }) => ({ role, content })),
+          history: chatMessages.slice(-3).map(({ role, content }) => ({ role, content })),
+          conversation_state: conversationState,
           force_full_llm: forceLLM,
         }),
       });
@@ -267,6 +270,7 @@ export default function Dashboard({
       ) {
         return;
       }
+      setConversationState(payload.conversation_state || null);
       setChatMessages([...nextMessages, {
         id: `${chatTurnId}-assistant`,
         role: "assistant",
