@@ -41,10 +41,26 @@ LOSS_DRIVER_INFERENCES = {
 # Tolerates common typos ("how may days") so a misspelling doesn't silently fall through a
 # keyword-gated deterministic shortcut straight to the full LLM call.
 _HOW_MANY_RE = re.compile(r"how\s+(?:many|much|may)\b")
+_OUT_OF_SCOPE_CHAT_PATTERNS = [
+    re.compile(r"\b(?:python|javascript|java|c\+\+|pygame)\b.*\b(?:code|game|script|program)\b"),
+    re.compile(r"\b(?:code|script|program|game)\b.*\b(?:python|javascript|java|c\+\+|pygame)\b"),
+    re.compile(r"\b(?:rewrite|rephrase|paraphrase|proofread)\b"),
+]
 
 
 def _asks_how_many(question: str) -> bool:
     return bool(_HOW_MANY_RE.search(question))
+
+
+def _is_out_of_scope_chat_request(message: str) -> bool:
+    """Reject clear general-assistant requests before spending tokens on the decomposer.
+
+    Capacity questions can be phrased very broadly, so this guard intentionally targets only
+    explicit non-dashboard tasks observed in production. The final LLM prompt provides the
+    broader domain boundary for anything less clear-cut.
+    """
+    text = _clean_text(message).casefold()
+    return bool(text and any(pattern.search(text) for pattern in _OUT_OF_SCOPE_CHAT_PATTERNS))
 
 
 def _raise_if_chat_cancelled(cancellation_event: asyncio.Event | None = None) -> None:
@@ -216,6 +232,29 @@ async def build_chat_response(
     history = history or []
     selected_folders = selected_folders or []
 
+    if _is_out_of_scope_chat_request(message):
+        return {
+            "answer": (
+                "I can only help with this plant-capacity dashboard, its production data, "
+                "and related operational analytics."
+            ),
+            "status": "out_of_scope",
+            "detail": "",
+            "plan": None,
+            "confidence": None,
+            "refined": False,
+            "llm_used": False,
+            "llm_status": "out_of_scope",
+            "chart": None,
+            "conversation_state": conversation_state,
+            "eval_trace": {
+                "mode": "out_of_scope",
+                "system_prompt": "Request rejected locally as outside the capacity-dashboard scope.",
+                "retrieval_context": [],
+                "history_turns_used": 0,
+            },
+        }
+
     if not (intelligence.get("sections") or {}) and (summary or daily_rows or details):
         intelligence = _build_deterministic_intelligence(
             summary=summary,
@@ -277,6 +316,7 @@ async def build_chat_response(
             _raise_if_chat_cancelled(cancellation_event)
             decomposer_input = _qu_decomposer_user_content(message, conversation_state)
             qu_plan = await _call_qu_decomposer_async(decomposer_input, endpoint, api_key, cancellation_event=cancellation_event)
+            qu_plan = _normalize_qu_plan_for_question(qu_plan, message, context)
         except Exception as qu_exc:
             print(f"[chat] QU decomposer skipped: {_sanitize_error_message(qu_exc, api_key)}", flush=True)
             qu_plan = None
@@ -315,7 +355,11 @@ async def build_chat_response(
                 print(f"[chat] QU confidence {confidence} below threshold {_QU_CONFIDENCE_THRESHOLD}, escalating to full LLM", flush=True)
     else:
         if _chat_debug_enabled():
-            print("[chat] force_full_llm=True — skipping QU layer, going directly to full LLM", flush=True)
+            print(
+                "[chat] force_full_llm=True — using the QU plan for focused retrieval and "
+                "skipping only the deterministic answer",
+                flush=True,
+            )
 
     _raise_if_chat_cancelled(cancellation_event)
     plan_section = ""
@@ -331,18 +375,36 @@ async def build_chat_response(
             "verify Utilized Time = Runtime (SNP + GNP) + Lost Time + Downtime; "
             "spot-check that runtime + loss + downtime + wait + spare ≈ available_capacity. "
             "Do not reveal private reasoning; only return the answer.\n"
-            "5. Format your response as specified in output_format\n\n"
+            "5. Format your response as specified in output_format. For day/night/date counts, "
+            "return the distinct count and every authoritative evidence row as a Markdown table; "
+            "never return only a single value.\n\n"
         )
 
+    authoritative_date_count = _date_count_evidence_for_plan(qu_plan, message, context)
     llm_context = _compact_chat_context_for_llm(context, message, qu_plan=qu_plan)
+    if authoritative_date_count:
+        llm_context["authoritative_result"] = {
+            key: value
+            for key, value in authoritative_date_count.items()
+            if key not in {"answer", "required_values"}
+        }
     context_text = _chat_context_to_toon(llm_context)
     if len(context_text) > 650_000:
         llm_context = _minimal_chat_context_for_llm(context, qu_plan=qu_plan)
+        if authoritative_date_count:
+            llm_context["authoritative_result"] = {
+                key: value
+                for key, value in authoritative_date_count.items()
+                if key not in {"answer", "required_values"}
+            }
         context_text = _chat_context_to_toon(llm_context)
 
     system_content = (
         f"{plan_section}"
-        "You are a concise analytics assistant for a print plant production dashboard. "
+        "You are a concise analytics assistant exclusively for this print-plant capacity dashboard. "
+        "Only answer questions about the supplied dashboard data, its metrics and formulas, print "
+        "production, capacity, and related operational analysis. Politely refuse unrelated coding, "
+        "games, general writing, rewriting, or other general-assistant requests. "
         "For numerical or data-specific questions, answer ONLY from the TOON dashboard context supplied — never invent values. "
         "For conceptual, definitional, or formula questions (e.g. 'what does X mean', 'what is the formula for Y', 'how is Z calculated', 'explain X'), answer from your domain knowledge — do not say the data is absent. "
         "Use the curated computed tables supplied here "
@@ -363,6 +425,12 @@ async def build_chat_response(
         "- A block like rows[3]{a,b,c}: means 3 table rows; each following indented CSV row maps to columns a,b,c in order.\n"
         "- Quoted cells are strings. null, true, false, and numbers keep their normal meanings. JSON snippets inside a cell are a single cell value.\n"
         "- You can filter, group, count, sum, average, rank, and compare these rows exactly as tabular data.\n\n"
+        "- When selected_sources is present, its keys are the exact table names selected by the "
+        "query plan, and its rows have already been filtered by the plan's conditions, timeframe, "
+        "and entities. source_selection reports the original and selected row counts.\n\n"
+        "- When authoritative_result is present, its distinct_date_count and rows were computed "
+        "deterministically from the filtered source. Reproduce that count and every row in a "
+        "Markdown table. Do not substitute a single-value response or recompute a different result.\n\n"
 
         "OUTPUT FORMATTING (the response is rendered as Markdown, so use it deliberately):\n"
         "- Any answer with 2+ rows of comparable data (rankings, breakdowns by folder/tower/date/reason, "
@@ -388,10 +456,11 @@ async def build_chat_response(
         "- For GNP-vs-SNP folder/edition questions about average spare, loss, wait, LPR-to-print-start, reflong, downtime, delayed finish, or minimum-3-GNP-folder nights, use gnp_snp_folder_analysis first. "
         "Its comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, and delayed_finish_complexity tables are precomputed from the data. "
         "For web-break comparisons on named towers, use web_break_gnp_snp_tower_comparison; if can_split_web_break_by_product_type=false, explicitly state that web-break events are not stored with product type and compare against GNP/SNP runtime mix only.\n"
-        "- For '<metric> on GNP nights per folder' / '... on SNP nights per folder' questions specifically (a per-folder breakdown filtered by the PLANT-WIDE night classification, not the folder's own edition mix), "
-        "use exact_dashboard.folder_days directly: filter rows where night_type = 'GNP/UV' (or 'SNP/non-UV'), then group by folder and average/sum the requested metric. "
-        "Every folder_days row already carries this precomputed night_type field — never re-derive it by hand-joining against the night_classification/uv_nights date list, and never substitute gnp_snp_folder_analysis for this "
-        "(that table classifies by the folder's own GNP/SNP edition codes, which is a different scope than the plant-wide night type).\n"
+        "- For '<metric> on days this folder ran GNP/GNP Complex/SNP' questions, use "
+        "exact_dashboard.folder_days and the FOLDER-SPECIFIC flags folder_has_gnp, "
+        "folder_has_gnp_complex, folder_has_snp, or folder_has_snp_only. Never use the plant-level "
+        "plant_night_type/plant_gnp_night fields for that question. Use plant_night_type only when "
+        "the user explicitly asks whether the plant as a whole ran GNP that night.\n"
         "- For any efficiency question involving DATES, DAYS, or THRESHOLDS (e.g. 'days below 90% efficiency', 'average efficiency per night', 'trend of efficiency'), "
         "use daily_efficiency. It has one row per production night with run_date, efficiency_pct, total_po, total_runtime_min, total_dt_min, actual_speed_cph, committed_speed_cph. "
         "Filter rows by efficiency_pct threshold, count matching rows, or group by month/weekday from run_date.\n"
@@ -400,6 +469,9 @@ async def build_chat_response(
         "- 'lost time' / 'losses': total lost_time (changeover + late-start + reflong). Waiting time is always separate.\n"
         "- 'unscheduled time' means Unplanned Time, not Lost Time. Unplanned Time is capacity where the folder/tower was not scheduled or available for production.\n"
         "- 'spare time' / 'spare capacity': always buffer_time (= spare_time_min in exact_dashboard.folders), never unplanned_time.\n"
+        "- 'wait-time percentage' / 'waiting-time percentage': Waiting Time / Available Capacity * 100. "
+        "For a folder-night, use available_capacity_min (normally 240 minutes) as the denominator. "
+        "Never divide waiting time by runtime + waiting time.\n"
         "- 'average spare time per folder' or 'spare time for each folder': use exact_dashboard.folders[].spare_time_min / active_nights. "
         "List every folder with its average spare time per active night in minutes.\n"
         "- 'utilized time' / 'utilised time' / 'utilization' with no qualifier: "
@@ -581,16 +653,21 @@ async def build_chat_response(
         "for every active night — use this for 'what time did printing finish' questions, NOT delayed_pf), "
         "last_edition / last_edition_name / last_folder (which edition/folder produced that last finish) "
         "— use this for trend analysis, extrapolation, and weekday-wise or month-wise plant-level questions.\n"
-        "- exact_dashboard.folder_days: per-folder per-date rows. Fields: folder, run_date, weekday "
+        "- exact_dashboard.folder_days: exactly one row per folder and run_date. Fields: plant, machine, "
+        "folder_name, folder, run_date, weekday "
         "(Monday-Sunday, precomputed), month (YYYY-MM, ALREADY PRECOMPUTED), active_night, "
         "runtime_min, loss_time_min, waiting_time_min, downtime_min, spare_time_min, unplanned_time_min, "
         "utilization_pct, spare_capacity_pct, complexity_codes, editions, print_finish_time (HH:MM, that "
         "folder's actual finish time that night, populated whether on time or late), last_edition / "
         "last_edition_name (which edition produced it), delayed_print_finish (bool), overrun_minutes, "
-        "night_type ('GNP/UV' or 'SNP/non-UV', the plant-wide per-date classification — at least one "
-        "folder ran GNP/GNP Complex that date), gnp_night (bool, same classification). "
+        "folder_has_gnp (that folder ran any C5-C15), folder_has_gnp_complex (that folder ran any "
+        "C9-C15), folder_has_snp (that folder ran any C1-C4), folder_has_snp_only, "
+        "folder_product_types, waiting_time_pct (= waiting_time_min / available_capacity_min * 100), "
+        "plant_night_type and plant_gnp_night. "
         "Use for day-by-day breakdown within a folder, weekday-wise or month-wise per-folder questions, to filter by a specific date, "
-        "or to filter/group a per-folder metric by GNP-night vs SNP-night (filter night_type = 'GNP/UV' or 'SNP/non-UV').\n"
+        "or to filter a per-folder metric by what that specific folder printed. Do not use "
+        "plant_night_type for 'days this folder ran GNP/SNP'. After filtering a named folder, never "
+        "repeat a run_date in the answer.\n"
         "- loss_time.all_days: per-date plant-level loss breakdown. Fields: run_date, weekday (precomputed), "
         "month (YYYY-MM, ALREADY PRECOMPUTED), runtime_min, lost_time_min (= loss_time_min), waiting_time_min, "
         "available_capacity_min, loss_pct, dominant_driver, loss_components (a dict keyed by component name — "
@@ -611,7 +688,8 @@ async def build_chat_response(
         "(4) Unqualified metric names → aggregate totals first. "
         "(5) When comparing plants, machines, towers, folders, editions, or categories, always name the metric the "
         "comparison is based on. "
-        "(6) For 'why' questions, separate observation from cause: an observation (e.g. 'lost time was higher on "
+        "(6) Wait-time percentage uses available_capacity_min as its denominator, never runtime + waiting time. "
+        "(7) For 'why' questions, separate observation from cause: an observation (e.g. 'lost time was higher on "
         "this folder') can be drawn directly from the data; only state a root cause if the data explicitly shows "
         "it (e.g. a specific downtime reason). If several explanations are possible, say what the data suggests "
         "without presenting speculation as settled fact.\n\n"
@@ -648,6 +726,12 @@ async def build_chat_response(
         )).strip()
         if _chat_debug_enabled():
             print(f"[chat-debug] raw_answer={answer!r}", flush=True)
+        authoritative_fallback = bool(
+            authoritative_date_count
+            and not _date_count_answer_is_complete(answer, authoritative_date_count)
+        )
+        if authoritative_fallback:
+            answer = _clean_text(authoritative_date_count.get("answer"))
         _raise_if_chat_cancelled(cancellation_event)
         return {
             "answer": answer,
@@ -655,7 +739,11 @@ async def build_chat_response(
             "plan": qu_plan,
             "refined": True,
             "llm_used": True,
-            "llm_status": "weak_answer" if _is_weak_chat_answer(answer) else "answered",
+            "llm_status": (
+                "authoritative_fallback"
+                if authoritative_fallback
+                else ("weak_answer" if _is_weak_chat_answer(answer) else "answered")
+            ),
             "chart": _chart_for_answer(answer, message, context, history, qu_plan),
             "conversation_state": _next_conversation_state(
                 selected_plant, selected_folders, timeframe, message, qu_plan, answer
@@ -666,6 +754,22 @@ async def build_chat_response(
         detail = _sanitize_error_message(exc, api_key)
         if _chat_debug_enabled():
             print(f"[chat] full LLM request failed: {_chat_error_kind(exc)} — {detail}", flush=True)
+        if authoritative_date_count:
+            answer = _clean_text(authoritative_date_count.get("answer"))
+            return {
+                "answer": answer,
+                "status": "ok",
+                "detail": detail,
+                "plan": qu_plan,
+                "llm_used": False,
+                "llm_status": "authoritative_fallback",
+                "refined": False,
+                "chart": _chart_for_answer(answer, message, context, history, qu_plan),
+                "conversation_state": _next_conversation_state(
+                    selected_plant, selected_folders, timeframe, message, qu_plan, answer
+                ),
+                "eval_trace": eval_trace,
+            }
         if _is_timeout_error(exc):
             return {
                 "answer": (
@@ -705,11 +809,14 @@ exact_dashboard.folders — per-folder aggregated totals across all dates
   active_nights, total_nights, utilization_pct, active_day_utilization_pct, spare_capacity_pct
 
 exact_dashboard.folder_days — per-folder per-date rows (use for day-level breakdown, weekday-wise, month-wise, or specific date)
-  Fields: folder, run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED — use this field directly,
+  Fields: plant, machine, folder_name, folder, run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED — use this field directly,
   never derive weekday from run_date yourself), month (YYYY-MM, ALREADY PRECOMPUTED — use this field
   directly for month-on-month grouping, never derive it yourself), active_night, runtime_min, loss_time_min,
   waiting_time_min, downtime_min, spare_time_min, unplanned_time_min,
-  utilization_pct, spare_capacity_pct, complexity_codes, editions, print_finish_time (HH:MM — the
+  waiting_time_pct (= waiting_time_min / available_capacity_min * 100), utilization_pct,
+  spare_capacity_pct, complexity_codes, complexity_categories,
+  folder_has_gnp, folder_has_gnp_complex, folder_has_snp, folder_has_snp_only, folder_product_types,
+  plant_night_type, plant_gnp_night, editions, print_finish_time (HH:MM — the
   ACTUAL print finish time for that folder that night, populated whether on time or late; use this
   for "print finish time" questions, NOT delayed_pf which only has the late subset), last_edition,
   last_edition_name (which edition produced that finish), delayed_print_finish (bool), overrun_minutes
@@ -905,7 +1012,7 @@ def _call_planner(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
 _QU_DECOMPOSER_SOURCES = """\
 exact_dashboard.daily       — per-date plant totals; fields: run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, night_type
 exact_dashboard.folders     — per-folder period totals; fields: resource (folder name), runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, active_nights, utilization_pct, spare_capacity_pct
-exact_dashboard.folder_days — per-folder per-date; fields: folder, run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, delayed_print_finish, overrun_minutes, print_finish_time, night_type ("GNP/UV" or "SNP/non-UV", plant-wide per-date classification), gnp_night (bool). Use night_type for any GNP-night-vs-SNP-night filter on a per-folder basis.
+exact_dashboard.folder_days — exactly one row per folder per date; fields: plant, machine, folder_name, folder, run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, waiting_time_pct (= waiting_time_min / available_capacity_min * 100), spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, complexity_codes, complexity_categories, folder_has_gnp (bool: this folder ran any C5-C15), folder_has_gnp_complex (bool: this folder ran any C9-C15), folder_has_snp (bool: this folder ran any C1-C4), folder_has_snp_only (bool), folder_product_types, plant_night_type, plant_gnp_night, delayed_print_finish, overrun_minutes, print_finish_time. For what a specific folder printed, use folder_has_*; plant_night_type is only the whole-plant classification. For an arbitrary clock threshold such as "after 03:30", compare print_finish_time here; do not use delayed_pf unless the question asks about the compliance cutoff.
 loss_time.all_days          — per-date loss breakdown; fields: run_date, weekday, month, runtime_min, lost_time_min, waiting_time_min, loss_pct, loss_components (dict), dominant_driver
 delayed_pf                  — late-night folder rows only; fields: run_date, folder, overrun_minutes, loss_time_min, downtime_min, waiting_time_min, runtime_min, night_type, editions
 towers                      — per-tower period totals; fields: tower, machine, runtime_min, downtime_min, loss_time_min, waiting_time_min, spare_time_min, active_nights, utilization_pct, uv_tower
@@ -925,10 +1032,10 @@ _QU_DECOMPOSER_SYSTEM = (
     "{\n"
     '  "intent": "count|aggregate|average|breakdown|trend|comparison|lookup|list|ranking|prediction",\n'
     '  "primary_source": "<source key from the list below>",\n'
-    '  "entities": [{"type": "folder|tower|plant|edition|date", "value": "<specific name or ALL>"}],\n'
+    '  "entities": [{"type": "folder|machine|tower|plant|edition|date", "value": "<specific name or ALL>"}],\n'
     '  "metrics": [{"field": "<exact field name from source>", "label": "<human label>", "aggregation": "sum|avg|max|min|count"}],\n'
     '  "conditions": [\n'
-    '    {"field": "<exact field name>", "op": ">|<|>=|<=|=|contains", "value": <number or string>, "label": "<human readable>"}\n'
+    '    {"field": "<exact field name>", "op": ">|<|>=|<=|=|contains", "value": <number, string, or boolean>, "label": "<human readable>"}\n'
     '  ],\n'
     '  "condition_logic": "AND|OR",\n'
     '  "time_scope": {\n'
@@ -956,7 +1063,8 @@ _QU_DECOMPOSER_SYSTEM = (
     "R2 TIME SCOPE: 'on Fridays'→weekdays:['Friday']. 'weekends'→['Friday','Saturday','Sunday'] "
     "(Indian newspaper plants: Friday/Saturday/Sunday nights are weekend editions). "
     "'in September'→months:['2025-09']. Date range→date_from/date_to. No time constraint→type:'none'.\n"
-    "R3 ENTITY: 'for folder F1'→entities:[{type:folder,value:F1}]. Unspecified scope→entities:[].\n"
+    "R3 ENTITY: 'for folder F1'→entities:[{type:folder,value:F1}]. A press/machine name such as "
+    "'Hiline-1'→entities:[{type:machine,value:Hiline-1}]. Unspecified scope→entities:[].\n"
     "R4 COMPOUND QUESTION: Two separate things asked (e.g. 'how many nights AND what are the key components') "
     "→ sub_questions with one entry per distinct ask. Simple single question→sub_questions:[].\n"
     "R5 IMPLICIT CONDITIONS: 'had downtime'→{field:downtime_min,op:>,value:0}. "
@@ -969,8 +1077,10 @@ _QU_DECOMPOSER_SYSTEM = (
     "Filter on tower_type_key ('gnp_uv' for UV/GNP towers, 'non_uv' for standard towers) "
     "and product_type ('SNP' or 'GNP'). NEVER use the towers table for this — it has no product_type field. "
     "For even more granular segment-level data use tower_runtime_segments with the same fields.\n"
-    "R7 COUNT DEDUP: When intent='count' on a source with multiple rows per night (delayed_pf, folder_days), "
-    "count distinct run_date values — note this in the first sub_question description.\n"
+    "R7 COUNT DEDUP AND EVIDENCE: When intent='count' asks for days, nights, or dates, count "
+    "distinct run_date values, set output_format:'table', and include the matching dates and "
+    "relevant condition values. Never use output_format:'single_value' for a date count. "
+    "Sources such as delayed_pf and folder_days can contain multiple matching rows per date.\n"
     "R8 METRIC FIELDS: Use exact field names from the source listed above (e.g. 'loss_time_min', not 'lost time'). "
     "Aggregation defaults to 'sum' for totals, 'avg' for per-night averages.\n"
     "R9 SORT: Include sort_by only when user asks for ranking or top/bottom N. Otherwise omit or set to null.\n"
@@ -996,18 +1106,22 @@ _QU_DECOMPOSER_SYSTEM = (
     "'delayed nights, complexity, and reasons'→['gnp_snp_folder_analysis.delayed_finish_complexity','loss_time.all_days','exact_dashboard.folder_days']; "
     "'average spare time when 3+ GNP folders'→['gnp_snp_folder_analysis.nights_with_min_3_gnp_folders']; "
     "'downtime by tower by reason'→['towers','tower_downtime_reason_attribution'].\n"
-    "R13 GNP/SNP NIGHT PER FOLDER: exact_dashboard.folder_days carries night_type ('GNP/UV' or "
-    "'SNP/non-UV') and gnp_night (bool) on every row — the plant-wide classification (a GNP/UV "
-    "night is any date where at least one folder ran GNP or GNP Complex editions), already joined "
-    "onto each folder's per-night row. For any '<metric> on GNP nights per folder' / '... on SNP "
-    "nights per folder' / 'GNP vs SNP nights by folder' question, use primary_source: "
-    "'exact_dashboard.folder_days', a condition on the night_type field (not gnp_night, to avoid "
-    "boolean/string value mismatches — value:'GNP/UV' or value:'SNP/non-UV'), and group_by:'folder'. "
-    "Example: 'average spare time on GNP nights in each folder'→primary_source: "
-    "'exact_dashboard.folder_days', conditions:[{field:'night_type',op:'=',value:'GNP/UV',"
-    "label:'GNP/UV nights'}], group_by:'folder', metrics:[{field:'spare_time_min',"
-    "aggregation:'avg'}], intent:'average'. Do not use gnp_snp_folder_analysis for this — that "
-    "table classifies GNP/SNP at the folder's own edition level, not the plant-wide night.\n"
+    "R13 FOLDER-SPECIFIC GNP/SNP — MANDATORY: For any question about days/nights when a named "
+    "folder itself ran GNP, GNP Complex, or SNP, use exact_dashboard.folder_days. Filter "
+    "folder_has_gnp=true for GNP including GNP Complex (C5-C15), folder_has_gnp_complex=true for "
+    "GNP Complex only (C9-C15), folder_has_snp=true when it ran any SNP (C1-C4), or "
+    "folder_has_snp_only=true for SNP-only nights. Never use plant_night_type or plant_gnp_night "
+    "unless the user explicitly asks what the whole plant ran. Example: 'average spare-time "
+    "percentage for Folder B across all days it ran GNP including GNP Complex' → primary_source "
+    "exact_dashboard.folder_days, entity folder=Folder B, condition folder_has_gnp=true, metric "
+    "spare_capacity_pct aggregation=avg, intent=average. 'average wait-time percentage' uses "
+    "waiting_time_pct aggregation=avg, whose denominator is available capacity, never runtime + wait. "
+    "Include only exact_dashboard.folder_days in required_sources "
+    "unless another distinct part of the question truly needs another table.\n"
+    "R14 PRINT-FINISH CLOCK THRESHOLDS — MANDATORY: Questions such as 'print finish after 03:30' "
+    "use exact_dashboard.folder_days.print_finish_time and a normal clock condition. A named press "
+    "such as Hiline-1 is a machine entity, not a folder equality condition. Use delayed_pf only "
+    "when the question explicitly refers to delayed/compliance-cutoff finishes.\n"
 )
 
 # Inject the source list at runtime to avoid f-string issues with the braces in the schema above
@@ -1053,6 +1167,290 @@ async def _call_qu_decomposer_async(
     return json.loads(raw)
 
 
+def _normalize_qu_plan_for_question(
+    qu_plan: dict[str, Any] | None,
+    message: str,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Correct high-risk source/field mistakes before a plan controls retrieval.
+
+    The decomposer remains responsible for general query understanding. This validator only
+    enforces semantic invariants that are knowable from the data model, chiefly that "this folder
+    ran GNP" is a folder-night property rather than a plant-night property.
+    """
+    if not isinstance(qu_plan, dict) or not qu_plan:
+        return qu_plan
+
+    normalized = json.loads(json.dumps(qu_plan))
+    question = _clean_text(message).casefold()
+    entities = normalized.get("entities") or []
+    has_folder_scope = (
+        "folder" in question
+        or bool(re.search(r"\bcolor\s+[a-z0-9]+\b", question))
+        or _clean_text(normalized.get("group_by")).casefold() == "folder"
+        or any(_clean_text(entity.get("type")).casefold() == "folder" for entity in entities)
+    )
+    mentions_gnp = "gnp" in question
+    mentions_snp = bool(re.search(r"\bsnp\b", question))
+    if has_folder_scope and (mentions_gnp or mentions_snp):
+        source_key = "exact_dashboard.folder_days"
+        normalized["primary_source"] = source_key
+
+        if not any(_clean_text(entity.get("type")).casefold() == "folder" for entity in entities):
+            alias_match = re.search(r"\bfolder\s+([a-z0-9])\b", _clean_text(message), re.IGNORECASE)
+            if alias_match:
+                entities.append({"type": "folder", "value": f"Folder {alias_match.group(1).upper()}"})
+            else:
+                color_match = re.search(r"\bcolor\s+([a-z0-9]+)\b", _clean_text(message), re.IGNORECASE)
+                if color_match:
+                    entities.append({"type": "folder", "value": f"COLOR {color_match.group(1).upper()}"})
+        normalized["entities"] = entities
+
+        conditions = [
+            condition
+            for condition in (normalized.get("conditions") or [])
+            if _clean_text(condition.get("field")).casefold()
+            not in {
+                "night_type",
+                "gnp_night",
+                "plant_night_type",
+                "plant_gnp_night",
+                "folder_has_gnp",
+                "folder_has_gnp_complex",
+                "folder_has_snp",
+                "folder_has_snp_only",
+            }
+        ]
+        # A GNP-vs-SNP comparison needs both populations, so do not reduce it to one flag.
+        if mentions_gnp and not mentions_snp:
+            complex_only = "gnp complex" in question and not any(
+                term in question for term in ["including gnp complex", "include gnp complex", "including complex"]
+            )
+            condition_field = "folder_has_gnp_complex" if complex_only else "folder_has_gnp"
+            conditions.append({
+                "field": condition_field,
+                "op": "=",
+                "value": True,
+                "label": "folder ran GNP Complex" if complex_only else "folder ran GNP (including GNP Complex)",
+            })
+        elif mentions_snp and not mentions_gnp:
+            condition_field = "folder_has_snp_only" if "snp only" in question or "only snp" in question else "folder_has_snp"
+            conditions.append({
+                "field": condition_field,
+                "op": "=",
+                "value": True,
+                "label": "folder ran SNP only" if condition_field.endswith("_only") else "folder ran SNP",
+            })
+        normalized["conditions"] = conditions
+        normalized["condition_logic"] = "AND"
+
+        asks_percentage = any(term in question for term in ["percentage", "percent", "%"])
+        if asks_percentage and any(term in question for term in ["wait time", "wait-time", "waiting time"]):
+            normalized["metrics"] = [{
+                "field": "waiting_time_pct",
+                "label": "Wait-time percentage",
+                "aggregation": "avg" if "average" in question or "avg" in question else "sum",
+            }]
+        elif asks_percentage and "spare" in question:
+            normalized["metrics"] = [{
+                "field": "spare_capacity_pct",
+                "label": "Spare-capacity percentage",
+                "aggregation": "avg" if "average" in question or "avg" in question else "sum",
+            }]
+
+        required_sources = [source_key]
+        for sub_question in normalized.get("sub_questions") or []:
+            sub_source = _clean_text(sub_question.get("primary_source"))
+            if sub_source and sub_source != source_key and sub_source not in required_sources:
+                required_sources.append(sub_source)
+        normalized["required_sources"] = required_sources[:6]
+
+    if context:
+        normalized = _resolve_qu_plan_entities(normalized, context)
+    if _plan_counts_dates(normalized, question):
+        normalized["output_format"] = "table"
+    return normalized
+
+
+_QU_ENTITY_FIELD_CANDIDATES: dict[str, list[str]] = {
+    "folder": ["folder_name", "folder", "resource"],
+    "machine": ["machine", "machine_name"],
+    "tower": ["tower_name", "tower"],
+    "plant": ["plant", "plant_name"],
+    "edition": ["edition", "edition_name", "editions"],
+    "date": ["run_date", "date"],
+}
+
+
+def _plan_counts_dates(plan: dict[str, Any], question: str) -> bool:
+    has_count_intent = _clean_text(plan.get("intent")).casefold() == "count" or any(
+        isinstance(sub_question, dict)
+        and _clean_text(sub_question.get("intent")).casefold() == "count"
+        for sub_question in (plan.get("sub_questions") or [])
+    )
+    if not has_count_intent:
+        return False
+    if re.search(r"\b(?:day|days|night|nights|date|dates)\b", question):
+        return True
+    return any(
+        _clean_text(metric.get("field") if isinstance(metric, dict) else metric).casefold()
+        in {"run_date", "date"}
+        and (
+            not isinstance(metric, dict)
+            or _clean_text(metric.get("aggregation") or "count").casefold() == "count"
+        )
+        for metric in (plan.get("metrics") or [])
+    )
+
+
+def _entity_match_score(entity_type: str, expected: str, actual: Any) -> int:
+    expected_normalized = " ".join(re.findall(r"[a-z0-9]+", _clean_text(expected).casefold()))
+    actual_normalized = " ".join(re.findall(r"[a-z0-9]+", _row_value_text(actual).casefold()))
+    if not expected_normalized or not actual_normalized:
+        return 0
+    if expected_normalized == actual_normalized:
+        return 4
+    if _entity_value_matches(entity_type, expected, actual):
+        return 2
+    return 0
+
+
+def _resolve_qu_plan_entities(
+    plan: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve decomposer entity labels against canonical fields on its selected source."""
+    rows = _rows_for_plan_source(_clean_text(plan.get("primary_source")), context)
+    if not rows:
+        return plan
+
+    resolved_entities: list[dict[str, Any]] = []
+    original_entity_values: set[str] = set()
+    for entity in plan.get("entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        entity_value = _clean_text(entity.get("value"))
+        declared_type = _clean_text(entity.get("type")).casefold()
+        if not entity_value or entity_value.casefold() in {"all", "any"}:
+            resolved_entities.append(entity)
+            continue
+        original_entity_values.add(" ".join(re.findall(r"[a-z0-9]+", entity_value.casefold())))
+        best_type = declared_type
+        best_score = 0
+        for candidate_type, fields in _QU_ENTITY_FIELD_CANDIDATES.items():
+            for field in fields:
+                resolved_field = _resolve_row_field(rows, field)
+                if not resolved_field:
+                    continue
+                score = max(
+                    (_entity_match_score(candidate_type, entity_value, row.get(resolved_field)) for row in rows),
+                    default=0,
+                )
+                if score > best_score or (
+                    score == best_score and score > 0 and candidate_type == declared_type
+                ):
+                    best_type = candidate_type
+                    best_score = score
+        resolved_entities.append({**entity, "type": best_type or declared_type})
+
+    identity_fields = {
+        field
+        for fields in _QU_ENTITY_FIELD_CANDIDATES.values()
+        for field in fields
+    }
+    conditions: list[dict[str, Any]] = []
+    for condition in plan.get("conditions") or []:
+        if not isinstance(condition, dict):
+            continue
+        field = _clean_text(condition.get("field")).casefold()
+        value_normalized = " ".join(
+            re.findall(r"[a-z0-9]+", _clean_text(condition.get("value")).casefold())
+        )
+        is_redundant_entity_equality = (
+            _clean_text(condition.get("op") or "=") == "="
+            and field in identity_fields
+            and value_normalized in original_entity_values
+        )
+        if not is_redundant_entity_equality:
+            conditions.append(condition)
+
+    plan["entities"] = resolved_entities
+    plan["conditions"] = conditions
+    return plan
+
+
+_CLOCK_COMPARISON_FIELDS = {
+    "printfinishtime",
+    "actualprintfinishtime",
+    "estimatedprintfinishtime",
+    "pfcutofftime",
+    "cutofftime",
+}
+
+
+def _clock_minutes(value: Any) -> float | None:
+    """Parse a clock value without turning invalid strings or blanks into midnight."""
+    if isinstance(value, datetime):
+        return value.hour * 60 + value.minute + value.second / 60
+    text = _clean_text(value).casefold()
+    if not text:
+        return None
+    text = re.sub(r"\b([ap])\.?m\.?$", r"\1m", text)
+    text = re.sub(r"(?<=\d)\.(?=\d{2}(?:\s*[ap]m)?$)", ":", text)
+    match = re.search(
+        r"(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    second = int(match.group(3) or 0)
+    meridiem = (match.group(4) or "").casefold()
+    if minute > 59 or second > 59:
+        return None
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    elif hour > 23:
+        return None
+    return hour * 60 + minute + second / 60
+
+
+def _finite_number_or_none(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if isfinite(numeric) else None
+
+
+def _compare_condition_values(field: str, actual: Any, expected: Any, op: str) -> bool:
+    compare_fn = _COMPARATOR_FUNCS.get(op)
+    if compare_fn is None:
+        return False
+    normalized_field = _normalize_field_name(field)
+    actual_clock = _clock_minutes(actual)
+    expected_clock = _clock_minutes(expected)
+    if normalized_field in _CLOCK_COMPARISON_FIELDS or (
+        actual_clock is not None and expected_clock is not None
+    ):
+        return bool(
+            actual_clock is not None
+            and expected_clock is not None
+            and compare_fn(actual_clock, expected_clock)
+        )
+    actual_number = _finite_number_or_none(actual)
+    expected_number = _finite_number_or_none(expected)
+    return bool(
+        actual_number is not None
+        and expected_number is not None
+        and compare_fn(actual_number, expected_number)
+    )
+
+
 def _apply_qu_conditions(
     rows: list[dict[str, Any]],
     conditions: list[dict[str, Any]],
@@ -1093,8 +1491,7 @@ def _apply_qu_conditions(
                 continue
             row_val = row.get(field_name)
             if op in (">", "<", ">=", "<="):
-                compare_fn = _COMPARATOR_FUNCS.get(op)
-                results.append(bool(compare_fn and compare_fn(_number(row_val), _number(value))))
+                results.append(_compare_condition_values(field_name, row_val, value, op))
             elif op == "=":
                 results.append(
                     _clean_text(row_val).casefold() == _clean_text(str(value) if value is not None else "").casefold()
@@ -1155,32 +1552,51 @@ def _apply_qu_time_scope(rows: list[dict[str, Any]], time_scope: dict[str, Any])
 def _apply_qu_entity_filters(
     rows: list[dict[str, Any]], entities: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Filter rows by typed entity (folder, tower, plant, edition, date)."""
+    """Filter rows by typed entity (folder, machine, tower, plant, edition, date)."""
     if not entities or not rows:
         return rows
     result = list(rows)
-    _ENTITY_FIELD_CANDIDATES: dict[str, list[str]] = {
-        "folder": ["folder", "resource"],
-        "tower": ["tower", "tower_name"],
-        "plant": ["plant", "plant_name"],
-        "edition": ["edition", "edition_name"],
-        "date": ["run_date", "date"],
-    }
     for entity in entities:
         entity_type = _clean_text(entity.get("type", "")).casefold()
         entity_value = _clean_text(entity.get("value", ""))
         if not entity_value or entity_value.casefold() in ("all", "any", ""):
             continue
-        candidates = _ENTITY_FIELD_CANDIDATES.get(entity_type, [entity_type])
-        field_name = next(
-            (_resolve_row_field(result, c) for c in candidates if _resolve_row_field(result, c)),
-            None,
-        )
-        if not field_name:
+        field_names = [
+            resolved
+            for candidate in _QU_ENTITY_FIELD_CANDIDATES.get(entity_type, [entity_type])
+            if (resolved := _resolve_row_field(result, candidate))
+        ]
+        if not field_names:
             continue
-        val_lower = entity_value.casefold()
-        result = [r for r in result if val_lower in _row_value_text(r.get(field_name)).casefold()]
+        result = [
+            row for row in result
+            if any(
+                _entity_value_matches(entity_type, entity_value, row.get(field_name))
+                for field_name in field_names
+            )
+        ]
     return result
+
+
+def _entity_value_matches(entity_type: str, expected: str, actual: Any) -> bool:
+    expected_text = _clean_text(expected).casefold()
+    actual_text = _row_value_text(actual).casefold()
+    if not expected_text or expected_text in actual_text:
+        return bool(expected_text)
+    # Treat repeated whitespace and punctuation consistently. This handles canonical names such as
+    # "COLOR  B" when the user or decomposer emits "COLOR B".
+    expected_normalized = " ".join(re.findall(r"[a-z0-9]+", expected_text))
+    actual_normalized = " ".join(re.findall(r"[a-z0-9]+", actual_text))
+    if expected_normalized and expected_normalized in actual_normalized:
+        return True
+    if entity_type != "folder":
+        return False
+
+    # Users commonly refer to dashboard aliases as "Folder B" while the canonical value is
+    # "COLOR B". Match that alias to the final folder-name token without broad fuzzy matching.
+    alias = re.fullmatch(r"(?:folder\s*)?([a-z0-9])", expected_text)
+    actual_tokens = re.findall(r"[a-z0-9]+", actual_text)
+    return bool(alias and actual_tokens and actual_tokens[-1] == alias.group(1))
 
 
 def _qu_metric_fields(qu_plan: dict[str, Any], rows: list[dict[str, Any]]) -> list[str]:
@@ -1331,8 +1747,9 @@ def _execute_qu_plan(
         return ""
 
     source_key = _clean_text(qu_plan.get("primary_source", ""))
-    rows = _rows_for_plan_source(source_key, context)
-    if not rows:
+    source_rows = _rows_for_plan_source(source_key, context)
+    rows = list(source_rows)
+    if not source_rows:
         return ""
 
     # 1. Multi-condition filter (AND/OR)
@@ -1350,20 +1767,31 @@ def _execute_qu_plan(
     entities = qu_plan.get("entities") or []
     rows = _apply_qu_entity_filters(rows, entities)
 
+    question = _clean_text(message).casefold()
+    date_count_evidence = _build_date_count_evidence(
+        qu_plan,
+        question,
+        rows,
+        source_rows,
+    )
     if not rows:
+        if date_count_evidence:
+            return _clean_text(date_count_evidence.get("answer"))
         cond_label = _qu_conditions_label(conditions, condition_logic)
         scope_label = _qu_time_scope_label(time_scope)
         note_parts = [f"where {cond_label}" if cond_label else "", scope_label]
         note = " ".join(p for p in note_parts if p)
         return f"No rows match the specified filters{(' (' + note + ')') if note else ''}."
 
-    question = _clean_text(message).casefold()
-
     # 4. Compound question: run each sub-question and combine
     sub_questions = qu_plan.get("sub_questions") or []
     if sub_questions:
-        parts: list[str] = []
+        parts: list[str] = [
+            _clean_text(date_count_evidence.get("answer"))
+        ] if date_count_evidence else []
         for sub_q in sub_questions:
+            if date_count_evidence and _clean_text(sub_q.get("intent")).casefold() in {"count", "list"}:
+                continue
             result = _execute_qu_subquestion(sub_q, rows, source_key, context, question)
             if result:
                 parts.append(result)
@@ -1378,6 +1806,13 @@ def _execute_qu_plan(
             header = (" ".join(header_parts)).strip()
             combined = "\n\n".join(parts)
             return (header + ":\n\n" + combined) if header else combined
+
+    if date_count_evidence:
+        evidence_answer = _clean_text(date_count_evidence.get("answer"))
+        if _plan_wants_components_breakdown(question):
+            breakdown = _plan_components_breakdown(question, rows, context)
+            return evidence_answer + breakdown if breakdown else evidence_answer
+        return evidence_answer
 
     # 5. Single intent execution
     metric_fields = _qu_metric_fields(qu_plan, rows)
@@ -1966,6 +2401,9 @@ def _compact_chat_context_for_llm(
     question: str = "",
     qu_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if qu_plan:
+        return _focused_chat_context_for_llm(context, qu_plan, question)
+
     exact = context.get("exact_dashboard") or {}
     downtime_by_reason = context.get("downtime_by_reason") or {}
     tower_attribution = context.get("tower_downtime_reason_attribution") or {}
@@ -2193,6 +2631,83 @@ def _compact_chat_context_for_llm(
     }
 
 
+def _focused_chat_context_for_llm(
+    context: dict[str, Any],
+    qu_plan: dict[str, Any],
+    question: str = "",
+) -> dict[str, Any]:
+    """Serialize only plan-selected sources, filtered before tokenization.
+
+    This keeps the decomposer useful without making its required source expensive: a question
+    about one folder's GNP nights sends those matching folder-night rows, not every folder-night
+    plus dozens of unrelated tables.
+    """
+    primary_source = _clean_text(qu_plan.get("primary_source"))
+    source_keys: list[str] = []
+    for source in [
+        primary_source,
+        *(qu_plan.get("required_sources") or []),
+        *[
+            sub_question.get("primary_source")
+            for sub_question in (qu_plan.get("sub_questions") or [])
+            if isinstance(sub_question, dict)
+        ],
+    ]:
+        key = _clean_text(source)
+        if key and key not in source_keys:
+            source_keys.append(key)
+
+    conditions = qu_plan.get("conditions") or []
+    condition_logic = _clean_text(qu_plan.get("condition_logic") or "AND").upper()
+    time_scope = qu_plan.get("time_scope") or {}
+    entities = qu_plan.get("entities") or []
+    selected_sources: dict[str, list[dict[str, Any]]] = {}
+    source_selection: list[dict[str, Any]] = []
+
+    for source_key in source_keys[:6]:
+        source_rows = _rows_for_plan_source(source_key, context)
+        selected_rows = list(source_rows)
+        condition_status = "not_applicable"
+        if source_key.casefold() == primary_source.casefold():
+            conditioned = _apply_qu_conditions(selected_rows, conditions, condition_logic)
+            if conditioned is None:
+                # Keep the relevant source available to the answering model when the decomposer
+                # invents a field. An empty replacement would turn a recoverable planning error
+                # into a false "no data" answer. Entity/time filters below still keep this focused.
+                condition_status = "invalid_field_unapplied"
+            else:
+                selected_rows = conditioned
+                condition_status = "applied" if conditions else "none"
+        selected_rows = _apply_qu_time_scope(selected_rows, time_scope)
+        selected_rows = _apply_qu_entity_filters(selected_rows, entities)
+        selected_sources[source_key] = _compact_rows(selected_rows, limit=None)
+        source_selection.append({
+            "source": source_key,
+            "source_row_count": len(source_rows),
+            "selected_row_count": len(selected_rows),
+            "condition_status": condition_status,
+        })
+
+    focused_context = {
+        "scope": context.get("scope") or {},
+        "summary": context.get("summary") or {},
+        "context_note": (
+            "Token-optimized context. selected_sources contains every row matching the decomposer "
+            "plan; source_selection reports full and selected row counts."
+        ),
+        "source_selection": source_selection,
+        "selected_sources": selected_sources,
+    }
+    evidence = _date_count_evidence_for_plan(qu_plan, question, context)
+    if evidence:
+        focused_context["authoritative_result"] = {
+            key: value
+            for key, value in evidence.items()
+            if key not in {"answer", "required_values"}
+        }
+    return focused_context
+
+
 def _minimal_chat_context_for_llm(
     context: dict[str, Any],
     qu_plan: dict[str, Any] | None = None,
@@ -2204,14 +2719,22 @@ def _minimal_chat_context_for_llm(
     guarantee the request fits, so it must not inherit the "send every row/list item" behavior of
     the regular path.
     """
-    exact = context.get("exact_dashboard") or {}
     primary_source = _clean_text((qu_plan or {}).get("primary_source") or "")
-    source_rows = _rows_for_plan_source(primary_source, context) if primary_source else []
+    focused = _focused_chat_context_for_llm(context, qu_plan or {}) if primary_source else {}
+    source_rows = ((focused.get("selected_sources") or {}).get(primary_source) or [])
+    metric_aggregates = _aggregate_plan_metrics_for_context(source_rows, qu_plan or {})
+    exact = context.get("exact_dashboard") or {}
     return {
         "scope": context.get("scope") or {},
         "summary": context.get("summary") or {},
-        "context_note": "Large workbook context was reduced to stay under the model input limit.",
+        "context_note": (
+            "Large focused context was reduced to stay under the model input limit. "
+            "primary_source_aggregates were calculated from every selected row; "
+            "primary_source_rows is only a sample."
+        ),
         "primary_source": primary_source,
+        "primary_source_selected_row_count": len(source_rows),
+        "primary_source_aggregates": metric_aggregates,
         "primary_source_rows": _compact_rows(source_rows, limit=80, max_list_items=10),
         "exact_dashboard": {
             "summary": (exact.get("summary") or {}),
@@ -2225,6 +2748,40 @@ def _minimal_chat_context_for_llm(
             ),
         },
     }
+
+
+def _aggregate_plan_metrics_for_context(
+    rows: list[dict[str, Any]],
+    qu_plan: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    aggregates: dict[str, dict[str, Any]] = {}
+    for metric in qu_plan.get("metrics") or []:
+        if isinstance(metric, dict):
+            requested_field = _clean_text(metric.get("field"))
+            aggregation = _clean_text(metric.get("aggregation") or "sum").casefold()
+        else:
+            requested_field = _clean_text(metric)
+            aggregation = "sum"
+        field = _resolve_row_field(rows, requested_field)
+        if not field:
+            continue
+        values = [_number(row.get(field)) for row in rows]
+        if aggregation == "avg":
+            value = _average(values)
+        elif aggregation == "max":
+            value = max(values, default=0.0)
+        elif aggregation == "min":
+            value = min(values, default=0.0)
+        elif aggregation == "count":
+            value = len(values)
+        else:
+            value = sum(values)
+        aggregates[field] = {
+            "aggregation": aggregation,
+            "value": _clean_number(value),
+            "row_count": len(values),
+        }
+    return aggregates
 
 
 def _chat_context_to_toon(context: dict[str, Any]) -> str:
@@ -4205,11 +4762,19 @@ def _apply_plan_filters(rows: list[dict[str, Any]], filters: Any) -> list[dict[s
         # minutes" — the planner schema teaches the model to emit this shape for threshold
         # questions instead of the plain equality match below, which can't express ">"/"<" at all.
         if is_numeric_filter:
-            compare_fn = _COMPARATOR_FUNCS.get(_clean_text(expected.get("op")))
-            if compare_fn is None:
+            op = _clean_text(expected.get("op"))
+            if op not in _COMPARATOR_FUNCS:
                 return None
-            threshold = _number(expected.get("value"))
-            selected = [row for row in selected if compare_fn(_number(row.get(field_name)), threshold)]
+            selected = [
+                row
+                for row in selected
+                if _compare_condition_values(
+                    field_name,
+                    row.get(field_name),
+                    expected.get("value"),
+                    op,
+                )
+            ]
             continue
         expected_values = expected if isinstance(expected, list) else [expected]
         expected_texts = [_clean_text(value).casefold() for value in expected_values if _clean_text(value)]
@@ -4371,6 +4936,167 @@ def _plan_count_unit_field(question: str, rows: list[dict[str, Any]]) -> str:
             if resolved:
                 return resolved
     return ""
+
+
+def _date_count_unit(question: str) -> str:
+    if re.search(r"\b(?:night|nights)\b", question):
+        return "night" if re.search(r"\bnight\b", question) else "nights"
+    if re.search(r"\b(?:date|dates)\b", question) and not re.search(r"\b(?:day|days)\b", question):
+        return "date" if re.search(r"\bdate\b", question) else "dates"
+    return "day" if re.search(r"\bday\b", question) else "days"
+
+
+def _date_count_evidence_fields(
+    plan: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    fields: list[tuple[str, str]] = []
+
+    def add(candidate: str, label: str) -> None:
+        resolved = _resolve_row_field(rows, candidate)
+        if resolved and all(existing != resolved for existing, _ in fields):
+            fields.append((resolved, label))
+
+    source = _clean_text(plan.get("primary_source")).casefold()
+    entity_types = {
+        _clean_text(entity.get("type")).casefold()
+        for entity in (plan.get("entities") or [])
+        if isinstance(entity, dict)
+    }
+    if "plant" in entity_types:
+        add("plant", "Plant")
+        add("plant_name", "Plant")
+    if "machine" in entity_types or source in {
+        "exact_dashboard.folder_days",
+        "tower_days",
+    }:
+        add("machine", "Machine")
+    if "folder" in entity_types or source == "exact_dashboard.folder_days":
+        if _resolve_row_field(rows, "folder_name"):
+            add("folder_name", "Folder")
+        else:
+            add("folder", "Folder")
+    if "tower" in entity_types or source == "tower_days":
+        if _resolve_row_field(rows, "tower_name"):
+            add("tower_name", "Tower")
+        else:
+            add("tower", "Tower")
+
+    for condition in plan.get("conditions") or []:
+        if not isinstance(condition, dict):
+            continue
+        field = _clean_text(condition.get("field"))
+        if field and field not in {"run_date", "date"}:
+            add(field, _humanize_field(field))
+    for metric in plan.get("metrics") or []:
+        field = _clean_text(metric.get("field") if isinstance(metric, dict) else metric)
+        if field and field not in {"run_date", "date"}:
+            add(field, _humanize_field(field))
+    return fields
+
+
+def _build_date_count_evidence(
+    plan: dict[str, Any],
+    question: str,
+    selected_rows: list[dict[str, Any]],
+    source_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not _plan_counts_dates(plan, question):
+        return None
+    date_field = _resolve_row_field(source_rows or selected_rows, "run_date") or _resolve_row_field(
+        source_rows or selected_rows, "date"
+    )
+    if not date_field:
+        return None
+
+    evidence_fields = _date_count_evidence_fields(plan, source_rows or selected_rows)
+    projected_rows: list[list[str]] = []
+    seen_rows: set[tuple[str, ...]] = set()
+    for row in sorted(
+        selected_rows,
+        key=lambda item: (
+            _clean_text(item.get(date_field)),
+            *[_row_value_text(item.get(field)) for field, _ in evidence_fields],
+        ),
+    ):
+        date_value = _clean_text(row.get(date_field))
+        if not date_value:
+            continue
+        projected = [date_value, *[_row_value_text(row.get(field)) for field, _ in evidence_fields]]
+        row_key = tuple(projected)
+        if row_key not in seen_rows:
+            seen_rows.add(row_key)
+            projected_rows.append(projected)
+
+    dates = sorted({row[0] for row in projected_rows if row and row[0]})
+    unit = _date_count_unit(question)
+    singular = unit.rstrip("s")
+    display_unit = singular if len(dates) == 1 else singular + "s"
+    headline = f"**{len(dates)} distinct {display_unit}** matched the requested conditions."
+    headers = ["Date", *[label for _, label in evidence_fields]]
+    if projected_rows:
+        answer = _markdown_table(headers, projected_rows) + "\n\n" + headline
+    else:
+        answer = headline + "\n\nNo matching dates were found."
+
+    required_values = sorted({
+        value
+        for row in projected_rows
+        for value in row[1:]
+        if value
+    })
+    return {
+        "distinct_date_count": len(dates),
+        "unit": singular,
+        "dates": dates,
+        "columns": headers,
+        "rows": projected_rows,
+        "required_values": required_values,
+        "answer": answer,
+    }
+
+
+def _date_count_evidence_for_plan(
+    plan: dict[str, Any] | None,
+    question: str,
+    context: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(plan, dict) or not plan:
+        return None
+    source_rows = _rows_for_plan_source(_clean_text(plan.get("primary_source")), context)
+    if not source_rows or not _plan_counts_dates(plan, _clean_text(question).casefold()):
+        return None
+    selected_rows = _apply_qu_conditions(
+        source_rows,
+        plan.get("conditions") or [],
+        _clean_text(plan.get("condition_logic") or "AND").upper(),
+    )
+    if selected_rows is None:
+        return None
+    selected_rows = _apply_qu_time_scope(selected_rows, plan.get("time_scope") or {})
+    selected_rows = _apply_qu_entity_filters(selected_rows, plan.get("entities") or [])
+    return _build_date_count_evidence(
+        plan,
+        _clean_text(question).casefold(),
+        selected_rows,
+        source_rows,
+    )
+
+
+def _date_count_answer_is_complete(answer: str, evidence: dict[str, Any]) -> bool:
+    expected_dates = set(evidence.get("dates") or [])
+    answer_dates = set(re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", answer))
+    if answer_dates != expected_dates:
+        return False
+    count = int(evidence.get("distinct_date_count") or 0)
+    unit = re.escape(_clean_text(evidence.get("unit") or "day"))
+    count_pattern = re.compile(
+        rf"(?:\*\*)?{count}(?:\*\*)?\s+(?:distinct\s+)?{unit}s?\b",
+        flags=re.IGNORECASE,
+    )
+    if not count_pattern.search(answer):
+        return False
+    return all(value in answer for value in (evidence.get("required_values") or []))
 
 
 def _plan_components_breakdown(question: str, rows: list[dict[str, Any]], context: dict[str, Any]) -> str:
@@ -4561,7 +5287,16 @@ def _normalize_field_name(value: str) -> str:
 
 
 def _field_has_numeric_values(rows: list[dict[str, Any]], field: str) -> bool:
-    return any(_number(row.get(field)) != 0 for row in rows)
+    for row in rows:
+        value = row.get(field)
+        if isinstance(value, bool) or value is None or value == "":
+            continue
+        try:
+            if isfinite(float(value)):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _row_value_text(value: Any) -> str:
@@ -5648,13 +6383,13 @@ def _exact_folder_day_row(
     reflong_time = _number(row.get("reflong_related_downtime"))
     utilized_time = runtime + downtime + loss_time
     runtime_segments = _runtime_segment_rows(row)
+    product_flags = _folder_product_flags(runtime_segments)
     machine, folder_name = _split_machine_folder(_clean_text(row.get("folder")))
     overrun = _number(row.get("overrun_minutes"))
     cutoff_minutes = _pf_compliance_minutes(row.get("plant_name"))
     run_date = _clean_text(row.get("run_date"))
-    # Plant-wide GNP/UV night classification (same definition as delayed_pf and exact_dashboard.daily,
-    # via _gnp_night_lookup) — attached per row so GNP-vs-SNP-night filters/group-bys on a per-folder
-    # basis don't need a join the deterministic plan executor can't perform across two source tables.
+    # Preserve the separate plant-wide classification for questions explicitly about the plant.
+    # Product flags for this folder-night are derived independently from runtime_segments above.
     is_gnp_night = (gnp_night_lookup or {}).get(run_date, False)
     return {
         "run_date": run_date,
@@ -5665,8 +6400,9 @@ def _exact_folder_day_row(
         "folder_name": folder_name,
         "folder": _display_resource_name(row.get("folder")),
         "active_night": _is_active_folder_row(row),
-        "night_type": "GNP/UV" if is_gnp_night else "SNP/non-UV",
-        "gnp_night": is_gnp_night,
+        "plant_night_type": "GNP/UV" if is_gnp_night else "SNP/non-UV",
+        "plant_gnp_night": is_gnp_night,
+        **product_flags,
         "available_capacity_min": _clean_number(available),
         "runtime_min": _clean_number(runtime),
         "loss_time_min": _clean_number(loss_time),
@@ -5674,6 +6410,7 @@ def _exact_folder_day_row(
         "late_start_time_min": _clean_number(late_start_time),
         "reflong_time_min": _clean_number(reflong_time),
         "waiting_time_min": _clean_number(row.get("waiting_time")),
+        "waiting_time_pct": _percentage(_number(row.get("waiting_time")), available),
         "downtime_min": _clean_number(downtime),
         "spare_time_min": _clean_number(spare_time),
         "unplanned_time_min": _clean_number(unplanned_time),
@@ -6132,6 +6869,36 @@ def _complexity_categories_for_segments(segments: list[dict[str, Any]]) -> list[
     ]
 
 
+def _folder_product_flags(segments: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return product flags derived only from this folder-night's own runtime segments."""
+    code_numbers = [
+        int(code)
+        for code in (re_fullmatch_complexity(segment.get("complexity_code")) for segment in segments)
+        if code
+    ]
+    has_gnp = any(5 <= code <= 15 for code in code_numbers) or any(
+        _is_gnp_segment(segment) for segment in segments
+    )
+    has_gnp_complex = any(9 <= code <= 15 for code in code_numbers)
+    has_snp = any(1 <= code <= 4 for code in code_numbers) or any(
+        _is_snp_segment(segment) for segment in segments
+    )
+    product_types = []
+    if has_snp:
+        product_types.append("SNP")
+    if has_gnp:
+        product_types.append("GNP")
+    if has_gnp_complex:
+        product_types.append("GNP Complex")
+    return {
+        "folder_has_gnp": has_gnp,
+        "folder_has_gnp_complex": has_gnp_complex,
+        "folder_has_snp": has_snp,
+        "folder_has_snp_only": has_snp and not has_gnp,
+        "folder_product_types": product_types,
+    }
+
+
 def _has_gnp_runtime(rows: list[dict[str, Any]]) -> bool:
     return any(_is_gnp_segment(segment) for row in rows for segment in _runtime_segment_rows(row))
 
@@ -6476,6 +7243,7 @@ def _build_delayed_pf_rows(folder_rows: list[dict[str, Any]]) -> list[dict[str, 
         if overrun <= 0:
             continue
         runtime_segments = _runtime_segment_rows(row)
+        product_flags = _folder_product_flags(runtime_segments)
         plant = _clean_text(row.get("plant_name"))
         cutoff_minutes = _pf_compliance_minutes(plant)
         machine, folder_name = _split_machine_folder(_clean_text(row.get("folder")))
@@ -6488,6 +7256,7 @@ def _build_delayed_pf_rows(folder_rows: list[dict[str, Any]]) -> list[dict[str, 
             # plan-answering path can actually perform across two source tables.
             "night_type": "GNP/UV" if is_gnp_night else "SNP/non-UV",
             "gnp_night": is_gnp_night,
+            **product_flags,
             "plant": plant,
             "machine": machine,
             "folder_name": folder_name,
