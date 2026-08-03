@@ -953,7 +953,7 @@ function filterCapacityDataByScope(result, selectedPlant, selectedFolders) {
   const towerDetails = selectedFolderSet.size > 0
     ? plantTowerDetails.filter((row) => selectedFolderSet.has(row.folder))
     : plantTowerDetails;
-  const daily = buildDailyRowsFromTowerDetails(towerDetails, dateUniverse);
+  const daily = buildDailyRowsFromDetails(details, dateUniverse);
 
   // Collect all tower profiles (name + UV status) from the full pre-timeframe plant dataset.
   // Used by the drilldown to inject idle rows for towers absent in the selected period.
@@ -1008,7 +1008,6 @@ function buildDailyRowsFromTowerDetails(towerRows, dateUniverse) {
       idle_time: sumBy(towerDayRows, "idle_time"),
     };
     const values = normalizeCapacityBucketValues(rawValues, availableCapacity);
-    const utilizedTime = values.runtime + values.downtime + values.loss_time;
     const activeTowersCount = towerDayRows.filter((row) => row.active).length;
 
     return {
@@ -1023,9 +1022,6 @@ function buildDailyRowsFromTowerDetails(towerRows, dateUniverse) {
       buffer_time: cleanNumber(values.buffer_time),
       idle_time: cleanNumber(values.idle_time),
       runtime_segments: aggregateRuntimeSegmentsForCapacity(towerDayRows, values.runtime),
-      utilization_percentage: cleanNumber(
-        availableCapacity > 0 ? Math.min((utilizedTime / availableCapacity) * 100, 100) : 0
-      )
     };
   });
 }
@@ -1209,24 +1205,29 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
     const activeAvailableCapacity = sumBy(rows, "available_capacity");
     const availableCapacity = capacityFoldersCount * CAPACITY_WINDOW_MINUTES;
     const runtime = sumBy(rows, "runtime");
+    const waitingTime = sumBy(rows, "waiting_time");
     const lostTime = sumBy(rows, "lost_time");
     const downtime = sumBy(rows, "downtime");
-    const utilizedTime = runtime + downtime + lostTime;
+    const overrunMinutes = sumBy(rows, "overrun_minutes");
     const bufferTime = sumBy(rows, "buffer_time");
     const activeIdleTime = sumBy(rows, "idle_time");
     const idleTime = Math.max(availableCapacity - activeAvailableCapacity, 0) + activeIdleTime;
+    const actualCapacity = Math.max(availableCapacity - waitingTime - lostTime - idleTime, 0);
+    const utilizedTime = runtime + overrunMinutes;
     return {
       run_date: runDate,
       active_folders_count: activeFoldersCount,
       capacity_folders_count: capacityFoldersCount,
       available_capacity: cleanNumber(availableCapacity),
       runtime: cleanNumber(runtime),
+      waiting_time: cleanNumber(waitingTime),
       lost_time: cleanNumber(lostTime),
       downtime: cleanNumber(downtime),
+      overrun_minutes: cleanNumber(overrunMinutes),
       buffer_time: cleanNumber(bufferTime),
       idle_time: cleanNumber(idleTime),
       utilization_percentage: cleanNumber(
-        availableCapacity > 0 ? Math.min((utilizedTime / availableCapacity) * 100, 100) : 0
+        actualCapacity > 0 ? Math.min((utilizedTime / actualCapacity) * 100, 100) : 0
       )
     };
   });
@@ -1361,18 +1362,22 @@ function calculateSummary(dailyRows) {
   const totalDowntime = sumBy(dailyRows, "downtime");
   const totalBufferTime = sumBy(dailyRows, "buffer_time");
   const totalIdleTime = sumBy(dailyRows, "idle_time");
+  const totalOverrunMinutes = sumBy(dailyRows, "overrun_minutes");
   const plannedAvailableTime = Math.max(totalAvailable - totalIdleTime, 0);
-  const utilizedTime = totalRuntime + totalDowntime + totalLostTime;
+  const actualCapacity = Math.max(totalAvailable - totalWaitingTime - totalLostTime - totalIdleTime, 0);
+  const utilizedTime = totalRuntime + totalOverrunMinutes;
   return {
     total_available_capacity: cleanNumber(totalAvailable),
     total_waiting_time: cleanNumber(totalWaitingTime),
     total_runtime: cleanNumber(totalRuntime),
     total_lost_time: cleanNumber(totalLostTime),
     total_downtime: cleanNumber(totalDowntime),
+    total_overrun_minutes: cleanNumber(totalOverrunMinutes),
+    total_actual_capacity: cleanNumber(actualCapacity),
     total_utilized_time: cleanNumber(utilizedTime),
     total_buffer_time: cleanNumber(totalBufferTime),
     total_idle_time: cleanNumber(totalIdleTime),
-    average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.min((utilizedTime / totalAvailable) * 100, 100) : 0),
+    average_utilization_percentage: cleanNumber(actualCapacity > 0 ? Math.min((utilizedTime / actualCapacity) * 100, 100) : 0),
     spare_capacity_percentage: cleanNumber(plannedAvailableTime > 0 ? Math.min((totalBufferTime / plannedAvailableTime) * 100, 100) : 0),
     idle_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalIdleTime / totalAvailable) * 100, 100) : 0),
     active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count")),

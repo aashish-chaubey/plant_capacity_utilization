@@ -372,7 +372,7 @@ async def build_chat_response(
             "2. Apply any filters from the plan (folder name, date, complexity, etc.)\n"
             "3. Perform the computation described step by step, quoting exact values\n"
             "4. Self-validate internally before answering: check values are non-negative where expected; "
-            "verify Utilized Time = Runtime (SNP + GNP) + Lost Time + Downtime; "
+            "verify Utilized Time = Runtime (SNP + GNP) + Overrun; "
             "spot-check that runtime + loss + downtime + wait + spare ≈ available_capacity. "
             "Do not reveal private reasoning; only return the answer.\n"
             "5. Format your response as specified in output_format. For day/night/date counts, "
@@ -474,9 +474,12 @@ async def build_chat_response(
         "Never divide waiting time by runtime + waiting time.\n"
         "- 'average spare time per folder' or 'spare time for each folder': use exact_dashboard.folders[].spare_time_min / active_nights. "
         "List every folder with its average spare time per active night in minutes.\n"
-        "- 'utilized time' / 'utilised time' / 'utilization' with no qualifier: "
-        "Utilized Time = Runtime (SNP + GNP) + Lost Time + Downtime. "
-        "Waiting time, spare time, and unplanned time are excluded.\n"
+        "- 'utilized time' / 'utilised time' with no qualifier: Utilized Time = Runtime (SNP + GNP) + Overrun "
+        "(delayed print-finish minutes). Lost time, downtime, wait time, spare time, and unplanned time are excluded.\n"
+        "- 'utilization' / 'utilisation' / 'capacity utilization' with no qualifier: "
+        "Capacity Utilization % = Utilized Time ÷ Actual Capacity × 100, where Actual Capacity (Effective Time) = "
+        "Available Time − Wait Time − Lost Time − Unplanned Time. Calculated at folder level only — towers do not "
+        "have a utilization percentage.\n"
         "- 'downtime': mechanical stoppage time, not lost time and not waiting time.\n"
         "- Tower questions: always check towers, tower_runtime_mix, tower_availability, "
         "tower_downtime_reason_attribution, and editions_by_tower before saying data is unavailable. "
@@ -512,8 +515,11 @@ async def build_chat_response(
         "- Spare Time: unused capacity inside the reference window after all other components are accounted for. "
         "Formula: Spare Time = 240 - (Wait + Loss + Downtime + Run). It cannot be negative.\n"
         "- Unplanned Time: periods where the folder or tower was not scheduled or available for production.\n"
-        "- Utilized Time / Utilisation: Runtime (SNP + GNP) + Lost Time + Downtime. "
-        "Do not include Wait Time, Spare Time, or Unplanned Time.\n"
+        "- Utilized Time: Runtime (SNP + GNP) + Overrun (delayed print-finish minutes). "
+        "Do not include Lost Time, Downtime, Wait Time, Spare Time, or Unplanned Time.\n"
+        "- Actual Capacity (Effective Time): Available Time − Wait Time − Lost Time − Unplanned Time.\n"
+        "- Capacity Utilization % / Utilisation: Utilized Time ÷ Actual Capacity × 100. Folder level only — "
+        "there is no tower-level utilization percentage.\n"
         "- Spare Capacity: (Spare Time / (Total Available Time - Unplanned Time)) * 100.\n"
         "- Speed Efficiency / Efficiency %: measures how fast the machine actually ran relative to its committed speed. "
         "Calculated in four steps:\n"
@@ -562,8 +568,9 @@ async def build_chat_response(
 
         "Schema key:\n"
         "- resource: 'Machine / Folder' display name\n"
-        "- utilization_pct / utilization_percentage: (Runtime (SNP + GNP) + Lost Time + Downtime) ÷ total possible capacity (incl. unplanned nights)\n"
-        "- active_day_utilization_pct: (Runtime (SNP + GNP) + Lost Time + Downtime) ÷ capacity only on nights the folder was active\n"
+        "- utilization_pct / utilization_percentage: (Runtime (SNP + GNP) + Overrun) ÷ Actual Capacity "
+        "(possible capacity, incl. unplanned nights, minus Wait Time, Lost Time, and Unplanned Time). Folder level only.\n"
+        "- active_day_utilization_pct: same formula, but capacity/Wait/Lost/Unplanned are scoped to nights the folder was active only\n"
         "- runtime_minutes / runtime_min: actual print runtime (all complexity types combined)\n"
         "- lost_time_min / lost_time_minutes: Lost Time = changeover + late-start + reflong ONLY. "
         "WAITING TIME IS NOT INCLUDED IN LOSS TIME.\n"
@@ -604,25 +611,26 @@ async def build_chat_response(
         "Use for 'what editions ran on folder X' or 'which folder printed edition Y'.\n"
         "- towers: per-tower totals across the full period. Fields: tower, machine, tower_name, runtime_min, "
         "downtime_min, loss_time_min (changeover + late-start + reflong), waiting_time_min, change_over_time_min, "
-        "late_start_time_min, reflong_downtime_min, spare_time_min, active_nights, utilization_pct, "
+        "late_start_time_min, reflong_downtime_min, spare_time_min, active_nights, "
         "downtime_run_count, loss_time_run_count, waiting_time_run_count, uv_tower, active_dates, folders, "
-        "editions, complexity_codes. USE THIS for any per-tower metric totals or averages "
+        "editions, complexity_codes. Towers have NO utilization percentage — capacity utilization is folder-level only "
+        "(see exact_dashboard.folders/folder_days). USE THIS for any per-tower metric totals or averages "
         "(e.g. 'average lost time per tower' = loss_time_min / active_nights).\n"
         "- tower_days: per-tower PER-DATE rows. Fields: run_date, weekday (Monday-Sunday, precomputed — never "
         "compute weekday yourself from run_date), month (YYYY-MM, precomputed), plant, machine, tower, "
         "tower_name, folder, uv_tower, runtime_min, downtime_min, loss_time_min, waiting_time_min, "
-        "spare_time_min, change_over_time_min, late_start_time_min, reflong_time_min, utilization_pct, "
+        "spare_time_min, change_over_time_min, late_start_time_min, reflong_time_min, "
         "complexity_codes, complexity_categories, editions. "
         "Use this for a specific-date or per-tower-per-night tower question. On large datasets this table "
         "is row-capped and may not include every tower/date — for weekday or month PATTERN questions use "
         "tower_weekday_summary / tower_month_summary instead, which are small, always-complete pre-aggregated tables.\n"
         "- tower_weekday_summary: per-tower per-weekday AVERAGES, already aggregated (at most towers x 7 rows, "
         "always complete regardless of dataset size). Fields: tower, tower_name, weekday, night_count, "
-        "avg_runtime_min, avg_downtime_min, avg_loss_time_min, avg_waiting_time_min, avg_utilization_pct. "
+        "avg_runtime_min, avg_downtime_min, avg_loss_time_min, avg_waiting_time_min. "
         "USE THIS for ANY weekday-wise/day-of-week tower pattern question — do not group tower_days yourself.\n"
         "- tower_month_summary: per-tower per-month TOTALS/AVERAGES, already aggregated (towers x number of "
         "months, always complete regardless of dataset size). Fields: tower, tower_name, month, night_count, "
-        "total_runtime_min, total_downtime_min, total_loss_time_min, total_waiting_time_min, avg_utilization_pct. "
+        "total_runtime_min, total_downtime_min, total_loss_time_min, total_waiting_time_min. "
         "USE THIS for ANY tower-level month-on-month or monthly trend question — do not group tower_days yourself.\n"
         "- tower_availability: total_towers, total_days, active_towers_by_day, and percent-threshold summaries. "
         "Use this for 'how many towers', 'how many days at least X% towers were utilised', or tower availability questions.\n"
@@ -835,10 +843,11 @@ loss_time.all_days — per-date plant-level loss breakdown (use for month-on-mon
   lost_time_min (= loss_time_min), waiting_time_min, available_capacity_min, loss_pct, dominant_driver,
   loss_components (dict keyed by component name with minutes for that date), top_folders_by_loss
 
-towers — per-tower aggregated totals across all dates
+towers — per-tower aggregated totals across all dates. Towers have NO utilization percentage — capacity
+  utilization is calculated at folder level only (see exact_dashboard.folders/folder_days above).
   Fields: tower, machine, tower_name, runtime_min, downtime_min, loss_time_min, waiting_time_min,
   change_over_time_min, late_start_time_min, reflong_downtime_min, spare_time_min,
-  active_nights, utilization_pct, downtime_run_count, loss_time_run_count, waiting_time_run_count,
+  active_nights, downtime_run_count, loss_time_run_count, waiting_time_run_count,
   uv_tower, folders, editions, complexity_codes
 
 	tower_days — per-tower per-date rows (use for specific-date or per-tower-per-night questions; for
@@ -847,7 +856,7 @@ towers — per-tower aggregated totals across all dates
 	  Fields: tower, run_date, weekday (Monday-Sunday, ALREADY PRECOMPUTED — use this field directly,
 	  never derive weekday from run_date yourself), month (YYYY-MM, ALREADY PRECOMPUTED), plant, machine,
 	  tower_name, folder, uv_tower, runtime_min, downtime_min, loss_time_min, waiting_time_min,
-	  spare_time_min, change_over_time_min, late_start_time_min, reflong_time_min, utilization_pct,
+	  spare_time_min, change_over_time_min, late_start_time_min, reflong_time_min,
 	  complexity_codes, complexity_categories, editions
 
 	tower_runtime_segments — segment-level runtime rows included only when the question needs tower/product runtime math
@@ -859,13 +868,13 @@ tower_weekday_summary — per-tower per-weekday AVERAGES, already aggregated (to
   always complete regardless of dataset size). Use this for any "weekday wise" / day-of-week tower
   pattern question instead of grouping tower_days yourself.
   Fields: tower, tower_name, weekday (Monday-Sunday), night_count, avg_runtime_min, avg_downtime_min,
-  avg_loss_time_min, avg_waiting_time_min, avg_utilization_pct
+  avg_loss_time_min, avg_waiting_time_min
 
 tower_month_summary — per-tower per-month TOTALS/AVERAGES, already aggregated (towers x number of
   months, always complete regardless of dataset size). Use this for any tower-level month-on-month or
   monthly trend question instead of grouping tower_days yourself, which is row-capped on large datasets.
   Fields: tower, tower_name, month (YYYY-MM), night_count, total_runtime_min, total_downtime_min,
-  total_loss_time_min, total_waiting_time_min, avg_utilization_pct
+  total_loss_time_min, total_waiting_time_min
 
 downtime_by_reason — downtime events by reason and folder
   Fields: reason, machine, folder, count (event count), total_minutes
@@ -1015,8 +1024,8 @@ exact_dashboard.folders     — per-folder period totals; fields: resource (fold
 exact_dashboard.folder_days — exactly one row per folder per date; fields: plant, machine, folder_name, folder, run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, waiting_time_pct (= waiting_time_min / available_capacity_min * 100), spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, complexity_codes, complexity_categories, folder_has_gnp (bool: this folder ran any C5-C15), folder_has_gnp_complex (bool: this folder ran any C9-C15), folder_has_snp (bool: this folder ran any C1-C4), folder_has_snp_only (bool), folder_product_types, plant_night_type, plant_gnp_night, delayed_print_finish, overrun_minutes, print_finish_time. For what a specific folder printed, use folder_has_*; plant_night_type is only the whole-plant classification. For an arbitrary clock threshold such as "after 03:30", compare print_finish_time here; do not use delayed_pf unless the question asks about the compliance cutoff.
 loss_time.all_days          — per-date loss breakdown; fields: run_date, weekday, month, runtime_min, lost_time_min, waiting_time_min, loss_pct, loss_components (dict), dominant_driver
 delayed_pf                  — late-night folder rows only; fields: run_date, folder, overrun_minutes, loss_time_min, downtime_min, waiting_time_min, runtime_min, night_type, editions
-towers                      — per-tower period totals; fields: tower, machine, runtime_min, downtime_min, loss_time_min, waiting_time_min, spare_time_min, active_nights, utilization_pct, uv_tower
-tower_days                  — per-tower per-date; fields: tower, run_date, weekday, month, runtime_min, downtime_min, loss_time_min, waiting_time_min, utilization_pct, uv_tower
+towers                      — per-tower period totals; fields: tower, machine, runtime_min, downtime_min, loss_time_min, waiting_time_min, spare_time_min, active_nights, uv_tower. No utilization_pct — utilization is folder-level only.
+tower_days                  — per-tower per-date; fields: tower, run_date, weekday, month, runtime_min, downtime_min, loss_time_min, waiting_time_min, uv_tower. No utilization_pct — utilization is folder-level only.
 tower_runtime_mix           — runtime split by tower TYPE × product TYPE (use this for any question about SNP/GNP products running on UV/GNP or non-UV towers); fields: tower_type_key ("gnp_uv" or "non_uv"), tower_type (human label), product_type ("SNP", "GNP", or "Unknown"), runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count
 tower_runtime_segments      — segment-level runtime rows (most granular; use when tower_runtime_mix is not precise enough); fields: run_date, tower, tower_type_key, tower_type, uv_tower, product_type, complexity_code, category, minutes, print_order, committed_speed_cph, actual_speed_cph, efficiency_pct
 gnp_snp_folder_analysis     — precomputed GNP vs SNP folder-night comparisons. Use for GNP/SNP questions about average spare, loss, wait, LPR-to-start, reflong, downtime, delayed finish, and web break. Subtables include comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, delayed_finish_complexity, web_break_gnp_snp_tower_comparison.
@@ -2074,7 +2083,6 @@ def _build_chat_context(
         unplanned_nights = max(int(production_days) - active_nights, 0) if production_days > 0 else 0
         unplanned_capacity_min = unplanned_nights * CAPACITY_MINUTES_PER_FOLDER_DAY
         non_wait_lost_time = v["change_over_time"] + v["late_start_time"] + v["reflong_related_downtime"]
-        utilized_time = v["runtime"] + v["downtime"] + non_wait_lost_time
         runtime_segments = _runtime_segments_for_rows(v["rows"])
         tower_rows.append({
             "tower": t,
@@ -2102,9 +2110,8 @@ def _build_chat_context(
             "downtime_run_count": v["downtime_run_count"],
             "loss_time_run_count": v["loss_time_run_count"],
             "waiting_time_run_count": v["waiting_time_run_count"],
-            "utilization_pct": _percentage(utilized_time, v["available"]),
         })
-    tower_rows.sort(key=lambda r: -r["utilization_pct"])
+    tower_rows.sort(key=lambda r: -r["runtime_min"])
 
     def _slim_day(row: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -3066,10 +3073,19 @@ def _build_exact_dashboard_context(
     total_loss_time = sum(_number(row.get("loss_time_min")) for row in exact_daily_rows)
     total_waiting_time = sum(_number(row.get("waiting_time_min")) for row in exact_daily_rows)
     total_downtime = sum(_number(row.get("downtime_min")) for row in exact_daily_rows)
-    total_utilized_time = total_runtime + total_downtime + total_loss_time
+    total_overrun_minutes = sum(_number(row.get("overrun_minutes")) for row in folder_rows)
     total_spare_time = sum(_number(row.get("spare_time_min")) for row in exact_daily_rows)
     total_unplanned_time = sum(_number(row.get("unplanned_time_min")) for row in exact_daily_rows)
     planned_available = max(total_available - total_unplanned_time, 0)
+    total_actual_capacity = _actual_capacity(
+        total_available or _number(summary.get("total_available_capacity")),
+        total_waiting_time or _number(summary.get("total_waiting_time")),
+        total_loss_time or _number(summary.get("total_lost_time")),
+        total_unplanned_time or _number(summary.get("total_idle_time")),
+    )
+    total_utilized_time = total_runtime + total_overrun_minutes or (
+        _number(summary.get("total_runtime")) + _number(summary.get("total_overrun_minutes"))
+    )
 
     return {
         "source": "current filtered dashboard rows",
@@ -3085,17 +3101,12 @@ def _build_exact_dashboard_context(
             "total_loss_time_min": _clean_number(total_loss_time or summary.get("total_lost_time")),
             "total_waiting_time_min": _clean_number(total_waiting_time),
             "total_downtime_min": _clean_number(total_downtime or summary.get("total_downtime")),
+            "total_overrun_minutes": _clean_number(total_overrun_minutes or summary.get("total_overrun_minutes")),
+            "total_actual_capacity_min": _clean_number(total_actual_capacity),
             "total_utilized_time_min": _clean_number(total_utilized_time),
             "total_spare_time_min": _clean_number(total_spare_time or summary.get("total_buffer_time")),
             "total_unplanned_time_min": _clean_number(total_unplanned_time or summary.get("total_idle_time")),
-            "average_utilization_pct": _percentage(
-                total_utilized_time or (
-                    _number(summary.get("total_runtime"))
-                    + _number(summary.get("total_downtime"))
-                    + _number(summary.get("total_lost_time"))
-                ),
-                total_available or _number(summary.get("total_available_capacity")),
-            ),
+            "average_utilization_pct": _percentage(total_utilized_time, total_actual_capacity),
             "spare_capacity_pct": _percentage(
                 total_spare_time or _number(summary.get("total_buffer_time")),
                 planned_available or max(
@@ -3108,6 +3119,7 @@ def _build_exact_dashboard_context(
                 total_available or _number(summary.get("total_available_capacity")),
             ),
             "spare_capacity_formula": "(Spare Time / (Available Time - Unplanned Time)) * 100",
+            "utilization_formula": "(Runtime + Overrun) / (Available Time - Wait Time - Lost Time - Unplanned Time) * 100",
         },
         "daily": exact_daily_rows,
         "folders": exact_folder_rows,
@@ -3914,8 +3926,7 @@ def _answer_night_type_time_comparison_question(question: str, context: dict[str
             if metric_key == "utilized_time_min":
                 value = (
                     _number(row.get("runtime_min"))
-                    + _number(row.get("loss_time_min"))
-                    + _number(row.get("downtime_min"))
+                    + _number(row.get("overrun_minutes_min"))
                 )
             else:
                 value = _number(row.get(metric_key))
@@ -4025,8 +4036,7 @@ def _answer_base_category_comparison_question(question: str, context: dict[str, 
                 elif metric_key == "utilized_time_min":
                     utilized = (
                         _number(row.get("runtime_min"))
-                        + _number(row.get("loss_time_min"))
-                        + _number(row.get("downtime_min"))
+                        + _number(row.get("overrun_minutes"))
                     )
                     bucket[metric_key] += utilized * share
                 else:
@@ -5645,12 +5655,11 @@ def _answer_summary_metric_question(question: str, context: dict[str, Any]) -> s
         utilized_time = (
             _number(summary.get("total_utilized_time_min"))
             or _number(summary.get("total_runtime_min"))
-            + _number(summary.get("total_loss_time_min"))
-            + _number(summary.get("total_downtime_min"))
+            + _number(summary.get("total_overrun_minutes"))
         )
         parts.append(
             f"Utilized Time: {_format_chat_minutes(utilized_time)} "
-            "(Runtime (SNP + GNP) + Lost Time + Downtime)"
+            "(Runtime + Overrun)"
         )
     elif "utilization" in question or "utilisation" in question:
         parts.append(f"Utilisation: {summary.get('average_utilization_pct')}%")
@@ -6219,6 +6228,7 @@ def _exact_daily_rows(
             unplanned_time = _number(daily.get("idle_time"))
             if unplanned_time <= 0:
                 unplanned_time = sum(_number(row.get("idle_time")) for row in details)
+            overrun_total = sum(_number(row.get("overrun_minutes")) for row in details)
         else:
             active_folders = _number(daily.get("active_folders_count"))
             capacity_folders = _number(daily.get("capacity_folders_count"))
@@ -6229,7 +6239,7 @@ def _exact_daily_rows(
             downtime = _number(daily.get("downtime"))
             spare_time = _number(daily.get("buffer_time"))
             unplanned_time = _number(daily.get("idle_time"))
-        utilized_time = runtime + downtime + loss_time
+            overrun_total = _number(daily.get("overrun_minutes"))
         runtime_segments = _runtime_segments_for_rows(details)
         is_gnp_night = any(_is_gnp_segment(segment) for segment in runtime_segments)
         delayed_rows = [row for row in details if _number(row.get("overrun_minutes")) > 0]
@@ -6259,9 +6269,10 @@ def _exact_daily_rows(
             "downtime_min": _clean_number(downtime),
             "spare_time_min": _clean_number(spare_time),
             "unplanned_time_min": _clean_number(unplanned_time),
-            "utilization_pct": _percentage(utilized_time, available),
+            "utilization_pct": _utilization_pct(runtime, overrun_total, available, waiting_time, loss_time, unplanned_time),
             "spare_capacity_pct": _percentage(spare_time, max(available - unplanned_time, 0)),
             "delayed_pf_count": len(delayed_rows),
+            "overrun_minutes_min": _clean_number(overrun_total),
             "max_overrun_minutes": _clean_number(max_overrun),
             "delayed_pf_folders": [_display_resource_name(row.get("folder")) for row in delayed_rows],
             "complexity_codes": _complexity_codes_for_segments(runtime_segments),
@@ -6295,9 +6306,14 @@ def _exact_folder_rows(folder_rows: list[dict[str, Any]], dates: list[str]) -> l
         waiting_time = sum(_number(row.get("waiting_time")) for row in details)
         loss_time = sum(_loss_time_minutes(row) for row in details)
         downtime = sum(_number(row.get("downtime")) for row in details)
-        utilized_time = runtime + downtime + loss_time
+        overrun_total = sum(_number(row.get("overrun_minutes")) for row in details)
         spare_time = sum(_number(row.get("buffer_time")) for row in details)
         unplanned_time = sum(_number(row.get("idle_time")) for row in details) + missing_days * CAPACITY_MINUTES_PER_FOLDER_DAY
+        active_runtime = sum(_number(row.get("runtime")) for row in active_rows)
+        active_waiting_time = sum(_number(row.get("waiting_time")) for row in active_rows)
+        active_loss_time = sum(_loss_time_minutes(row) for row in active_rows)
+        active_overrun = sum(_number(row.get("overrun_minutes")) for row in active_rows)
+        active_unplanned_time = sum(_number(row.get("idle_time")) for row in active_rows)
         active_nights = len({_clean_text(row.get("run_date")) for row in active_rows if row.get("run_date")})
         unplanned_nights = max(production_days - active_nights, 0)
         runtime_segments = _runtime_segments_for_rows(details)
@@ -6318,8 +6334,10 @@ def _exact_folder_rows(folder_rows: list[dict[str, Any]], dates: list[str]) -> l
             "unplanned_nights": unplanned_nights,
             "folder_nights": f"{active_nights}/{production_days}" if production_days else "0/0",
             "active_dates": active_dates,
-            "utilization_pct": _percentage(utilized_time, possible_capacity),
-            "active_day_utilization_pct": _percentage(utilized_time, active_capacity),
+            "utilization_pct": _utilization_pct(runtime, overrun_total, possible_capacity, waiting_time, loss_time, unplanned_time),
+            "active_day_utilization_pct": _utilization_pct(
+                active_runtime, active_overrun, active_capacity, active_waiting_time, active_loss_time, active_unplanned_time
+            ),
             "spare_capacity_pct": _percentage(spare_time, max(possible_capacity - unplanned_time, 0)),
             "complexity_codes": _complexity_codes_for_segments(runtime_segments),
             "complexity_categories": _complexity_categories_for_segments(runtime_segments),
@@ -6381,11 +6399,11 @@ def _exact_folder_day_row(
     changeover_time = _number(row.get("change_over_time"))
     late_start_time = _number(row.get("late_start_time"))
     reflong_time = _number(row.get("reflong_related_downtime"))
-    utilized_time = runtime + downtime + loss_time
+    waiting_time = _number(row.get("waiting_time"))
+    overrun = _number(row.get("overrun_minutes"))
     runtime_segments = _runtime_segment_rows(row)
     product_flags = _folder_product_flags(runtime_segments)
     machine, folder_name = _split_machine_folder(_clean_text(row.get("folder")))
-    overrun = _number(row.get("overrun_minutes"))
     cutoff_minutes = _pf_compliance_minutes(row.get("plant_name"))
     run_date = _clean_text(row.get("run_date"))
     # Preserve the separate plant-wide classification for questions explicitly about the plant.
@@ -6414,7 +6432,7 @@ def _exact_folder_day_row(
         "downtime_min": _clean_number(downtime),
         "spare_time_min": _clean_number(spare_time),
         "unplanned_time_min": _clean_number(unplanned_time),
-        "utilization_pct": _percentage(utilized_time, available),
+        "utilization_pct": _utilization_pct(runtime, overrun, available, waiting_time, loss_time, unplanned_time),
         "spare_capacity_pct": _percentage(spare_time, max(available - unplanned_time, 0)),
         "delayed_print_finish": overrun > 0,
         "overrun_minutes": _clean_number(overrun),
@@ -6591,10 +6609,9 @@ def _tower_weekday_summary(tower_day_rows: list[dict[str, Any]]) -> list[dict[st
             "downtime_min": 0.0,
             "loss_time_min": 0.0,
             "waiting_time_min": 0.0,
-            "utilization_pct": 0.0,
         })
         bucket["night_count"] += 1
-        for key_name in ("runtime_min", "downtime_min", "loss_time_min", "waiting_time_min", "utilization_pct"):
+        for key_name in ("runtime_min", "downtime_min", "loss_time_min", "waiting_time_min"):
             bucket[key_name] += _number(row.get(key_name))
 
     summary = []
@@ -6609,7 +6626,6 @@ def _tower_weekday_summary(tower_day_rows: list[dict[str, Any]]) -> list[dict[st
             "avg_downtime_min": _clean_number(bucket["downtime_min"] / count) if count else 0,
             "avg_loss_time_min": _clean_number(bucket["loss_time_min"] / count) if count else 0,
             "avg_waiting_time_min": _clean_number(bucket["waiting_time_min"] / count) if count else 0,
-            "avg_utilization_pct": _clean_number(bucket["utilization_pct"] / count) if count else 0,
         })
 
     summary.sort(key=lambda r: (
@@ -6644,10 +6660,9 @@ def _tower_month_summary(tower_day_rows: list[dict[str, Any]]) -> list[dict[str,
             "downtime_min": 0.0,
             "loss_time_min": 0.0,
             "waiting_time_min": 0.0,
-            "utilization_pct": 0.0,
         })
         bucket["night_count"] += 1
-        for key_name in ("runtime_min", "downtime_min", "loss_time_min", "waiting_time_min", "utilization_pct"):
+        for key_name in ("runtime_min", "downtime_min", "loss_time_min", "waiting_time_min"):
             bucket[key_name] += _number(row.get(key_name))
 
     summary = []
@@ -6662,7 +6677,6 @@ def _tower_month_summary(tower_day_rows: list[dict[str, Any]]) -> list[dict[str,
             "total_downtime_min": _clean_number(bucket["downtime_min"]),
             "total_loss_time_min": _clean_number(bucket["loss_time_min"]),
             "total_waiting_time_min": _clean_number(bucket["waiting_time_min"]),
-            "avg_utilization_pct": _clean_number(bucket["utilization_pct"] / count) if count else 0,
         })
 
     summary.sort(key=lambda r: (r["tower"], r["month"]))
@@ -7374,7 +7388,6 @@ def _tower_day_context_rows(tower_details: list[dict[str, Any]]) -> list[dict[st
             "change_over_time_min": _clean_number(row.get("change_over_time")),
             "late_start_time_min": _clean_number(row.get("late_start_time")),
             "reflong_time_min": _clean_number(row.get("reflong_related_downtime")),
-            "utilization_pct": _percentage(runtime + downtime + loss_time, _available_minutes(row)),
             "complexity_codes": _complexity_codes_for_segments(runtime_segments),
             "complexity_categories": _complexity_categories_for_segments(runtime_segments),
             "runtime_segments": runtime_segments,
@@ -7978,7 +7991,8 @@ def _build_folder_utilization_analysis(
         waiting_time = sum(_number(row.get("waiting_time")) for row in rows)
         non_wait_lost_time = sum(_loss_time_minutes(row) for row in rows)
         downtime = sum(_number(row.get("downtime")) for row in rows)
-        utilized_time = runtime + downtime + non_wait_lost_time
+        overrun_total = sum(_number(row.get("overrun_minutes")) for row in rows)
+        idle_time_sum = sum(_number(row.get("idle_time")) for row in rows)
         buffer_time = sum(_number(row.get("buffer_time")) for row in rows)
         if buffer_time <= 0 and rows:
             buffer_time = max(active_capacity - runtime - waiting_time - lost_time_raw - downtime, 0)
@@ -7987,8 +8001,8 @@ def _build_folder_utilization_analysis(
         unplanned_time = max(possible_capacity - active_capacity, 0)
         daily_utilization_percentages = _daily_folder_utilization_percentages(rows, dates)
         variability = pstdev(daily_utilization_percentages) if len(daily_utilization_percentages) > 1 else 0.0
-        utilization = _percentage(utilized_time, possible_capacity)
-        active_day_utilization = _percentage(utilized_time, active_capacity)
+        utilization = _utilization_pct(runtime, overrun_total, possible_capacity, waiting_time, non_wait_lost_time, idle_time_sum)
+        active_day_utilization = _utilization_pct(runtime, overrun_total, active_capacity, waiting_time, non_wait_lost_time, idle_time_sum)
         loss_share = _percentage(non_wait_lost_time, runtime + non_wait_lost_time) if runtime + non_wait_lost_time > 0 else 0
 
         folder_summaries.append(
@@ -8374,12 +8388,16 @@ def _daily_folder_utilization_percentages(rows: list[dict[str, Any]], dates: lis
     percentages = []
     for day in dates:
         row = rows_by_day.get(day, {})
-        utilization_minutes = (
-            _number(row.get("runtime"))
-            + _number(row.get("downtime"))
-            + _loss_time_minutes(row)
+        percentages.append(
+            _utilization_pct(
+                _number(row.get("runtime")),
+                _number(row.get("overrun_minutes")),
+                CAPACITY_MINUTES_PER_FOLDER_DAY,
+                _number(row.get("waiting_time")),
+                _loss_time_minutes(row),
+                _number(row.get("idle_time")),
+            )
         )
-        percentages.append(_percentage(utilization_minutes, CAPACITY_MINUTES_PER_FOLDER_DAY))
     return percentages
 
 
@@ -8563,6 +8581,18 @@ def _percentage(numerator: float, denominator: float) -> float:
     if denominator <= 0:
         return 0.0
     return _clean_number(min(max((float(numerator) / float(denominator)) * 100, 0.0), 100.0))
+
+
+def _actual_capacity(available: float, waiting: float, loss: float, unplanned: float) -> float:
+    """Effective Time = Available Time - Wait Time - Lost Time - Unplanned Time."""
+    return max(float(available) - float(waiting) - float(loss) - float(unplanned), 0.0)
+
+
+def _utilization_pct(runtime: float, overrun: float, available: float, waiting: float, loss: float, unplanned: float) -> float:
+    """Capacity Utilization % = (Runtime + Overrun) / Actual Capacity * 100, folder-level only."""
+    actual_capacity = _actual_capacity(available, waiting, loss, unplanned)
+    utilized_time = float(runtime) + float(overrun)
+    return _percentage(utilized_time, actual_capacity)
 
 
 def _number(value: Any) -> float:

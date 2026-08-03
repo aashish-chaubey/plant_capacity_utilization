@@ -3,11 +3,10 @@ import { Clock } from "lucide-react";
 export default function KpiCard({
   label,
   value,
-  valuePlanned,
-  valueAvailable,
+  valueLabel = "",
   detail = "",
   tone = "slate",
-  plannedDetail = "",
+  effectiveDetail = "",
   availableDetail = ""
 }) {
   const tones = {
@@ -27,7 +26,7 @@ export default function KpiCard({
   };
   const selectedTone = tones[tone] || tones.slate;
   const isUnplanned = tone === "unplanned";
-  const showCapacityDetails = Boolean(plannedDetail && availableDetail);
+  const showCapacityDetails = Boolean(effectiveDetail && availableDetail);
   const style = selectedTone.bg
     ? {
         backgroundColor: selectedTone.bg,
@@ -38,7 +37,7 @@ export default function KpiCard({
   const valueStyle = { fontSize: "clamp(1.25rem, 1.6vw, 1.675rem)" };
   const secondaryStyle = { fontSize: "clamp(0.65rem, 0.75vw, 0.875rem)" };
   const unplannedAvailablePercentStyle = { fontSize: "clamp(0.8rem, 0.95vw, 1rem)" };
-  const plannedCapacityDetail = splitDurationDetail(plannedDetail);
+  const effectiveCapacityDetail = splitDurationDetail(effectiveDetail);
   const availableCapacityDetail = splitDurationDetail(availableDetail);
 
   return (
@@ -46,31 +45,14 @@ export default function KpiCard({
       {!showCapacityDetails && (
         <p className={`text-xs font-bold uppercase leading-snug tracking-normal ${isUnplanned ? "text-slate-950" : "opacity-75"}`}>{label}</p>
       )}
-      {valuePlanned != null ? (
-        <>
-          <p className="mt-3 whitespace-nowrap">
-            <span className="font-bold leading-none tracking-tight" style={valueStyle}>{valuePlanned}</span>
-            <span className="ml-1 font-medium leading-snug opacity-60" style={secondaryStyle}>of Planned Time</span>
-          </p>
-          {detail && (
-            <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs font-semibold opacity-75">
-              <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              <span className="truncate">{detail}</span>
-            </p>
-          )}
-          <p className="mt-3 whitespace-nowrap">
-            <span className="font-bold leading-snug opacity-75" style={secondaryStyle}>{valueAvailable}</span>
-            <span className="ml-1 font-medium leading-snug opacity-55" style={secondaryStyle}>of Available Time</span>
-          </p>
-        </>
-      ) : showCapacityDetails ? (
+      {showCapacityDetails ? (
         <>
           <div>
-            <p className="text-xs font-bold uppercase leading-snug tracking-normal opacity-75">Planned Time</p>
+            <p className="text-xs font-bold uppercase leading-snug tracking-normal opacity-75">Effective Time</p>
             <p className="mt-2 whitespace-nowrap text-slate-950">
-              <span className="font-bold leading-none tracking-tight" style={valueStyle}>{plannedCapacityDetail.amount}</span>
+              <span className="font-bold leading-none tracking-tight" style={valueStyle}>{effectiveCapacityDetail.amount}</span>
               <span className="ml-1 font-medium leading-snug text-slate-800 opacity-75" style={secondaryStyle}>
-                {plannedCapacityDetail.unit}
+                {effectiveCapacityDetail.unit}
               </span>
             </p>
           </div>
@@ -105,7 +87,12 @@ export default function KpiCard({
             </>
           ) : (
             <>
-              <p className="mt-3 font-bold leading-none tracking-tight" style={valueStyle}>{value}</p>
+              <p className="mt-3 whitespace-nowrap">
+                <span className="font-bold leading-none tracking-tight" style={valueStyle}>{value}</span>
+                {valueLabel && (
+                  <span className="ml-1 font-medium leading-snug opacity-60" style={secondaryStyle}>{valueLabel}</span>
+                )}
+              </p>
               {detail && (
                 <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs font-semibold opacity-75">
                   <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />

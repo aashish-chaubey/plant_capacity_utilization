@@ -2590,10 +2590,12 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
             capacity_folder_units=("Folder", "count"),
             available_capacity=("available_capacity", "sum"),
             runtime=("runtime", "sum"),
+            waiting_time=("waiting_time", "sum"),
             lost_time=("lost_time", "sum"),
             downtime=("downtime", "sum"),
             buffer_time=("buffer_time", "sum"),
             active_idle_time=("idle_time", "sum"),
+            overrun_minutes=("overrun_minutes", "sum"),
         )
         .reset_index()
         .rename(columns={REPORT_DATE_COLUMN: "Run Date"})
@@ -2612,10 +2614,13 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     daily["idle_time"] = idle_time + daily["active_idle_time"]
     daily = daily.drop(columns=["active_idle_time", "capacity_folder_units"])
 
+    daily["actual_capacity"] = (
+        daily["available_capacity"] - daily["waiting_time"] - daily["lost_time"] - daily["idle_time"]
+    ).clip(lower=0)
     daily["utilization_percentage"] = daily.apply(
         lambda row: _percentage(
-            row["runtime"] + row["downtime"] + row["lost_time"],
-            row["available_capacity"],
+            row["runtime"] + row["overrun_minutes"],
+            row["actual_capacity"],
         ),
         axis=1,
     )
@@ -2887,23 +2892,29 @@ def calculate_tower_day_metrics(
 def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_available = float(daily_df["available_capacity"].sum()) if not daily_df.empty else 0.0
     total_runtime = float(daily_df["runtime"].sum()) if not daily_df.empty else 0.0
+    total_waiting_time = float(daily_df["waiting_time"].sum()) if not daily_df.empty and "waiting_time" in daily_df else 0.0
     total_lost_time = float(daily_df["lost_time"].sum()) if not daily_df.empty else 0.0
     total_downtime = float(daily_df["downtime"].sum()) if not daily_df.empty else 0.0
-    total_utilized_time = total_runtime + total_lost_time + total_downtime
     total_buffer_time = float(daily_df["buffer_time"].sum()) if not daily_df.empty else 0.0
     total_idle_time = float(daily_df["idle_time"].sum()) if not daily_df.empty and "idle_time" in daily_df else 0.0
+    total_overrun_minutes = float(daily_df["overrun_minutes"].sum()) if not daily_df.empty and "overrun_minutes" in daily_df else 0.0
+    total_actual_capacity = max(total_available - total_waiting_time - total_lost_time - total_idle_time, 0.0)
+    total_utilized_time = total_runtime + total_overrun_minutes
     planned_available_time = max(total_available - total_idle_time, 0.0)
 
     return {
         "total_available_capacity": _clean_number(total_available),
         "total_runtime": _clean_number(total_runtime),
+        "total_waiting_time": _clean_number(total_waiting_time),
         "total_lost_time": _clean_number(total_lost_time),
         "total_downtime": _clean_number(total_downtime),
+        "total_overrun_minutes": _clean_number(total_overrun_minutes),
+        "total_actual_capacity": _clean_number(total_actual_capacity),
         "total_utilized_time": _clean_number(total_utilized_time),
         "total_buffer_time": _clean_number(total_buffer_time),
         "total_idle_time": _clean_number(total_idle_time),
         "average_utilization_percentage": _clean_number(
-            _percentage(total_utilized_time, total_available)
+            _percentage(total_utilized_time, total_actual_capacity)
         ),
         "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, planned_available_time)),
         "idle_capacity_percentage": _clean_number(_percentage(total_idle_time, total_available)),
@@ -3951,10 +3962,13 @@ def _empty_daily_metrics() -> pd.DataFrame:
             "capacity_folders_count",
             "available_capacity",
             "runtime",
+            "waiting_time",
             "lost_time",
             "downtime",
             "buffer_time",
             "idle_time",
+            "overrun_minutes",
+            "actual_capacity",
             "utilization_percentage",
         ]
     )

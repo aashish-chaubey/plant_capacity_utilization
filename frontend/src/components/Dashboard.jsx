@@ -40,7 +40,8 @@ const CAPACITY_SPLIT_COLORS = {
   idle_time: "#E5E7EB",
   idle_stripe: "#B4BBC7",
   window_line: "#234775",
-  twin_folder: "#2563eb"
+  twin_folder: "#2563eb",
+  overrun: "#dc2626"
 };
 
 const CAPACITY_SPLIT_LEGEND = [
@@ -52,6 +53,7 @@ const CAPACITY_SPLIT_LEGEND = [
   { key: "spare_time", label: "Spare Time", color: CAPACITY_SPLIT_COLORS.spare_time },
   { key: "idle_time", label: "Unplanned Capacity", color: CAPACITY_SPLIT_COLORS.idle_time, pattern: "idle" },
   { key: "complex_prints", label: "Complex prints", marker: "triangle" },
+  { key: "overrun", label: "Overrun", marker: "overrun" },
   { key: "twin_folder", label: "Twin folders", marker: "twin" }
 ];
 
@@ -372,15 +374,15 @@ export default function Dashboard({
 
   const totalAvailableCapacity = Number(data.summary.total_available_capacity || 0);
   const totalActiveTowerCapacity = Number(data.summary.active_tower_days || 0);
-  const plannedAvailableCapacity = Math.max(totalAvailableCapacity - Number(data.summary.total_idle_time || 0), 0);
+  const totalActualCapacity = Number(data.summary.total_actual_capacity || 0);
   const kpis = [
-    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity), plannedDetail: formatKpiDuration(plannedAvailableCapacity), availableDetail: formatKpiDuration(totalAvailableCapacity) },
-    { label: "Runtime",            valuePlanned: formatPercent(calculatePercentage(data.summary.total_runtime,      plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_runtime,      totalAvailableCapacity)), tone: "green",     detail: formatKpiDuration(data.summary.total_runtime) },
-    { label: "Wait Time",          valuePlanned: formatPercent(calculatePercentage(data.summary.total_waiting_time, plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), tone: "wait",      detail: formatKpiDuration(data.summary.total_waiting_time) },
-    { label: "Lost Time",          valuePlanned: formatPercent(calculatePercentage(data.summary.total_lost_time,    plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_lost_time,    totalAvailableCapacity)), tone: "amber",     detail: formatKpiDuration(data.summary.total_lost_time) },
-    { label: "Downtime",           valuePlanned: formatPercent(calculatePercentage(data.summary.total_downtime,     plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_downtime,     totalAvailableCapacity)), tone: "red",       detail: formatKpiDuration(data.summary.total_downtime) },
-    { label: "Spare Time",         valuePlanned: formatPercent(calculatePercentage(data.summary.total_buffer_time,  plannedAvailableCapacity)), valueAvailable: formatPercent(calculatePercentage(data.summary.total_buffer_time,  totalAvailableCapacity)), tone: "spare",     detail: formatKpiDuration(data.summary.total_buffer_time) },
-    { label: "Unplanned Capacity", value: formatPercent(calculatePercentage(data.summary.total_idle_time,          totalAvailableCapacity)),                                                                                                                 tone: "unplanned", detail: formatKpiDuration(data.summary.total_idle_time) },
+    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity), effectiveDetail: formatKpiDuration(totalActualCapacity), availableDetail: formatKpiDuration(totalAvailableCapacity) },
+    { label: "Runtime",            value: formatPercent(calculatePercentage(data.summary.total_runtime,      totalAvailableCapacity)), valueLabel: "of Available Time", tone: "green",     detail: formatKpiDuration(data.summary.total_runtime) },
+    { label: "Wait Time",          value: formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), valueLabel: "of Available Time", tone: "wait",      detail: formatKpiDuration(data.summary.total_waiting_time) },
+    { label: "Lost Time",          value: formatPercent(calculatePercentage(data.summary.total_lost_time,    totalAvailableCapacity)), valueLabel: "of Available Time", tone: "amber",     detail: formatKpiDuration(data.summary.total_lost_time) },
+    { label: "Downtime",           value: formatPercent(calculatePercentage(data.summary.total_downtime,     totalAvailableCapacity)), valueLabel: "of Available Time", tone: "red",       detail: formatKpiDuration(data.summary.total_downtime) },
+    { label: "Spare Time",         value: formatPercent(calculatePercentage(data.summary.total_buffer_time,  totalAvailableCapacity)), valueLabel: "of Available Time", tone: "spare",     detail: formatKpiDuration(data.summary.total_buffer_time) },
+    { label: "Capacity Utilization", value: formatPercent(data.summary.average_utilization_percentage), tone: "slate" },
   ];
 
   const latestEditableUserIndex = chatLoading
@@ -399,7 +401,7 @@ export default function Dashboard({
         <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h2 className="text-base font-semibold text-slate-950">Daily capacity split</h2>
-            <p className="mt-1 text-sm text-slate-500">Tower-based plant capacity by Run Date</p>
+            <p className="mt-1 text-sm text-slate-500">Folder capacity by Run Date</p>
           </div>
           {focusedDay && (
             <button
@@ -1054,7 +1056,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
   if (!days.length || (isPlantView ? !capacityPeriods.rows.length : !folders.length)) {
     return (
       <div className="flex h-80 items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
-        No tower capacity data found for this selection.
+        No folder capacity data found for this selection.
       </div>
     );
   }
@@ -1069,6 +1071,12 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
             <div key={item.key} className="inline-flex items-center gap-1.5">
               {item.marker === "triangle" ? (
                 <span className="text-[11px] font-black leading-none text-slate-950">▲</span>
+              ) : item.marker === "overrun" ? (
+                <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 14 14" aria-hidden="true">
+                  <circle cx="7" cy="7" r="6" fill={CAPACITY_SPLIT_COLORS.overrun} opacity="0.95" />
+                  <rect x="6.3" y="3.2" width="1.4" height="4.5" rx="0.7" fill="#ffffff" />
+                  <circle cx="7" cy="10" r="1" fill="#ffffff" />
+                </svg>
               ) : item.marker === "twin" ? (
                 <svg className="h-4 w-8 shrink-0" viewBox="0 0 32 16" aria-hidden="true">
                   <path
@@ -1099,7 +1107,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
           {isPlantView ? (
             <div className="inline-flex items-center gap-1.5">
               <span className="h-3 w-3 rounded-sm border border-slate-300 bg-white" />
-              <span>Plant capacity: {formatNumber(totalTowerCount)} towers × 240 min</span>
+              <span>Plant capacity: {formatNumber(folders.length)} folders × 240 min</span>
             </div>
           ) : (
             <div className="inline-flex items-center gap-1.5">
@@ -1328,6 +1336,8 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                 };
               })
               .filter((layout) => Number(layout.segment.value || 0) > 0 && layout.segmentHeight > 0);
+            const barTopY = cursorY;
+            const hasOverrun = Number(row.overrun_minutes || 0) > 0;
             const externalComplexMarkers = layoutExternalComplexMarkers(
               segmentLayouts.filter((layout) => layout.segment.runtimeSegment && layout.segment.isComplex && !layout.canShowRuntimeLabel),
               {
@@ -1446,6 +1456,13 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                     color={marker.segment.textColor || "#0f172a"}
                   />
                 ))}
+                {hasOverrun && (
+                  <OverrunMarker
+                    x={x + barWidth / 2}
+                    y={barTopY - 7}
+                    color={CAPACITY_SPLIT_COLORS.overrun}
+                  />
+                )}
               </g>
             );
           })}
@@ -1639,11 +1656,17 @@ function CapacityDaySummary({ summary, style, onClose, onZoomIn }) {
           </span>
         </div>
         <div className="flex items-center justify-between gap-3">
-          <span className="font-medium text-slate-600">Utilized time</span>
+          <span className="font-medium text-slate-600">Capacity Utilization</span>
           <span className="font-semibold text-slate-950">
-            {formatCapacitySummaryValue(summary.utilization, summary.totalCapacity)}
+            {formatCapacitySummaryValue(summary.utilizedMinutes, summary.actualCapacity)}
           </span>
         </div>
+        {summary.overrunMinutes > 0 && (
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-medium text-red-700">Overrun</span>
+            <span className="font-semibold text-red-700">{formatMinutes(summary.overrunMinutes)}</span>
+          </div>
+        )}
       </div>
 
       {onZoomIn && (
@@ -1902,6 +1925,16 @@ function ComplexPrintStackIcon({ x, y, color }) {
   );
 }
 
+function OverrunMarker({ x, y, color }) {
+  return (
+    <g pointerEvents="none">
+      <circle cx={x} cy={y} r="4.5" fill={color} opacity="0.95" />
+      <rect x={x - 0.6} y={y - 2.6} width="1.2" height="3" rx="0.6" fill="#ffffff" />
+      <circle cx={x} cy={y + 2} r="0.8" fill="#ffffff" />
+    </g>
+  );
+}
+
 function ComplexPrintMarker({ x, y, side, label, color }) {
   const anchor = side === "left" ? "end" : "start";
   const badgeWidth = 48;
@@ -2077,6 +2110,7 @@ function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = []) {
           isIdle: true,
           twin_folder_mode: false,
           twin_folder_group: "",
+          overrun_minutes: 0,
           ...idleValues,
           segments: buildCapacitySegments(idleValues)
         });
@@ -2092,6 +2126,7 @@ function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = []) {
         isIdle: false,
         twin_folder_mode: Boolean(detail.twin_folder_mode),
         twin_folder_group: detail.twin_folder_group || "",
+        overrun_minutes: cleanNumber(Math.max(Number(detail.overrun_minutes || 0), 0)),
         ...values,
         segments: buildCapacitySegments(values)
       });
@@ -2105,7 +2140,7 @@ function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = []) {
     days,
     folders,
     rows,
-    plantRows: towerPlantRows.length > 0 ? towerPlantRows : folderPlantRows,
+    plantRows: folderPlantRows,
     totalTowerCount: calculateCapacityTowerCount(dailyRows, towerDetailRows, folders.length)
   };
 }
@@ -2204,6 +2239,7 @@ function buildMonthlyCapacityPeriodRow(monthKey, monthRows) {
     activeFolders: sumCapacityRows(sortedRows, "activeFolders"),
     totalFolders: sumCapacityRows(sortedRows, "totalFolders"),
     total_capacity: totalCapacity,
+    overrun_minutes: sumCapacityRows(sortedRows, "overrun_minutes"),
     ...values,
     runtime_segments: runtimeSegments,
     segments: buildCapacitySegments({ ...values, runtime_segments: runtimeSegments }, totalCapacity),
@@ -2302,6 +2338,7 @@ function buildPlantCapacityRows(days, rows, folderCount) {
       activeFolders: dayRows.filter((row) => !row.isIdle).length,
       totalFolders,
       total_capacity: totalCapacity,
+      overrun_minutes: sumCapacityRows(dayRows, "overrun_minutes"),
       ...values,
       runtime_segments: runtimeSegments,
       segments: buildCapacitySegments({ ...values, runtime_segments: runtimeSegments }, totalCapacity)
@@ -2544,6 +2581,8 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
   const downtime = sumCapacityRows(activeRows, "downtime");
   const spareTime = sumCapacityRows(activeRows, "spare_time");
   const idleTime = sumCapacityRows(dayRows, "idle_time");
+  const overrunMinutes = sumCapacityRows(activeRows, "overrun_minutes");
+  const actualCapacity = Math.max(totalCapacity - waitingTime - lossTime - idleTime, 0);
 
   return {
     run_date: selectedDay,
@@ -2554,7 +2593,9 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
     activeFolders: activeRows.length,
     totalFolders: folderCount,
     totalCapacity,
-    utilization: cleanNumber(runtime + lossTime + downtime),
+    overrunMinutes,
+    actualCapacity,
+    utilizedMinutes: cleanNumber(runtime + overrunMinutes),
     runtimeDetails: buildRuntimeTooltipDetails(activeRows),
     components: [
       {
@@ -2611,19 +2652,23 @@ function buildPlantCapacityPeriodSummary(selectedPeriod, periodRows) {
   const downtime = Number(row.downtime || 0);
   const spareTime = Number(row.spare_time || 0);
   const idleTime = Number(row.idle_time || 0);
+  const overrunMinutes = Number(row.overrun_minutes || 0);
+  const actualCapacity = Math.max(totalCapacity - waitingTime - lossTime - idleTime, 0);
 
   return {
     run_date: row.run_date,
     dayLabel: isMonth ? formatMonthYearLabel(row.month_key) : formatDayLabel(row.run_date),
-    capacityUnitLabel: isMonth ? "Active tower-days" : "Active towers",
-    activeUnits: Number(row.activeTowers || 0),
-    totalUnits: Number(row.totalTowers || 0),
-    activeFolders: Number(row.activeTowers || 0),
-    totalFolders: Number(row.totalTowers || 0),
+    capacityUnitLabel: isMonth ? "Active folder-days" : "Active folders",
+    activeUnits: Number(row.activeFolders || 0),
+    totalUnits: Number(row.totalFolders || 0),
+    activeFolders: Number(row.activeFolders || 0),
+    totalFolders: Number(row.totalFolders || 0),
     totalCapacity,
     canZoom: Boolean(row.canZoom),
     zoomMonthKey: row.month_key || "",
-    utilization: cleanNumber(runtime + lossTime + downtime),
+    overrunMinutes,
+    actualCapacity,
+    utilizedMinutes: cleanNumber(runtime + overrunMinutes),
     runtimeDetails: buildPlantRuntimeTooltipDetails(row),
     components: [
       {
