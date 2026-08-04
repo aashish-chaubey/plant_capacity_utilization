@@ -8120,7 +8120,7 @@ def _build_loss_time_analysis(
                 "waiting_time_minutes": _clean_number(waiting_time),
                 "available_capacity_minutes": _clean_number(available),
                 "loss_percentage": _percentage(lost_time, available),
-                "loss_per_runtime_percentage": _percentage(lost_time, runtime),
+                "loss_per_runtime_percentage": min(_percentage(lost_time, runtime), 100.0),
                 "dominant_driver": _driver_row(dominant_key, dominant_value),
                 "components": [_driver_row(key, value) for key, value in component_values.items()],
                 "top_folders": top_folders[:3],
@@ -8588,7 +8588,7 @@ def _speed_from_print_order(print_order: float, runtime_minutes: float) -> float
 def _percentage(numerator: float, denominator: float) -> float:
     if denominator <= 0:
         return 0.0
-    return _clean_number(min(max((float(numerator) / float(denominator)) * 100, 0.0), 100.0))
+    return _clean_number(max((float(numerator) / float(denominator)) * 100, 0.0))
 
 
 def _utilization_pct(runtime: float, overrun: float, available: float, waiting: float, loss: float, downtime: float) -> float:

@@ -3671,7 +3671,7 @@ def _percentage(numerator: float, denominator: float) -> float:
     if denominator <= 0:
         return 0.0
     percentage = numerator / denominator * 100
-    return min(percentage, 100.0)
+    return max(percentage, 0.0)
 
 
 def _pf_compliance_minutes(plant_name: Any) -> float:

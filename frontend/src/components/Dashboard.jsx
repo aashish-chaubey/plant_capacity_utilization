@@ -3614,7 +3614,7 @@ function calculatePercentage(numerator, denominator) {
   if (capacity <= 0) return 0;
 
   const percentage = (Number(numerator || 0) / capacity) * 100;
-  return cleanNumber(Math.min(Math.max(percentage, 0), 100));
+  return cleanNumber(Math.max(percentage, 0));
 }
 
 function calculateRawPercentage(numerator, denominator) {
@@ -3807,7 +3807,7 @@ function formatCompactQuantity(value) {
 }
 
 function formatFixedPercent(value) {
-  const numeric = Math.min(Math.max(Number(value || 0), 0), 100);
+  const numeric = Math.max(Number(value || 0), 0);
   return `${numeric.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
@@ -3815,5 +3815,5 @@ function formatFixedPercent(value) {
 }
 
 function formatPercent(value) {
-  return `${formatNumber(Math.min(Math.max(Number(value || 0), 0), 100))}%`;
+  return `${formatNumber(Math.max(Number(value || 0), 0))}%`;
 }

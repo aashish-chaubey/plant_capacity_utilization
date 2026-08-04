@@ -1226,7 +1226,7 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
       buffer_time: cleanNumber(bufferTime),
       idle_time: cleanNumber(idleTime),
       utilization_percentage: cleanNumber(
-        availableCapacity > 0 ? Math.min((utilizedTime / availableCapacity) * 100, 100) : 0
+        availableCapacity > 0 ? Math.max((utilizedTime / availableCapacity) * 100, 0) : 0
       )
     };
   });
@@ -1374,9 +1374,9 @@ function calculateSummary(dailyRows) {
     total_utilized_time: cleanNumber(utilizedTime),
     total_buffer_time: cleanNumber(totalBufferTime),
     total_idle_time: cleanNumber(totalIdleTime),
-    average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.min((utilizedTime / totalAvailable) * 100, 100) : 0),
-    spare_capacity_percentage: cleanNumber(plannedAvailableTime > 0 ? Math.min((totalBufferTime / plannedAvailableTime) * 100, 100) : 0),
-    idle_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.min((totalIdleTime / totalAvailable) * 100, 100) : 0),
+    average_utilization_percentage: cleanNumber(totalAvailable > 0 ? Math.max((utilizedTime / totalAvailable) * 100, 0) : 0),
+    spare_capacity_percentage: cleanNumber(plannedAvailableTime > 0 ? Math.max((totalBufferTime / plannedAvailableTime) * 100, 0) : 0),
+    idle_capacity_percentage: cleanNumber(totalAvailable > 0 ? Math.max((totalIdleTime / totalAvailable) * 100, 0) : 0),
     active_folder_days: cleanNumber(sumBy(dailyRows, "active_folders_count")),
     active_tower_days: cleanNumber(sumBy(dailyRows, "active_towers_count")),
     capacity_tower_days: cleanNumber(sumBy(dailyRows, "capacity_towers_count"))
