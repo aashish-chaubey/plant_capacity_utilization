@@ -2614,13 +2614,10 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     daily["idle_time"] = idle_time + daily["active_idle_time"]
     daily = daily.drop(columns=["active_idle_time", "capacity_folder_units"])
 
-    daily["actual_capacity"] = (
-        daily["available_capacity"] - daily["waiting_time"] - daily["lost_time"] - daily["idle_time"]
-    ).clip(lower=0)
     daily["utilization_percentage"] = daily.apply(
         lambda row: _percentage(
-            row["runtime"] + row["overrun_minutes"],
-            row["actual_capacity"],
+            row["runtime"] + row["overrun_minutes"] + row["lost_time"] + row["waiting_time"] + row["downtime"],
+            row["available_capacity"],
         ),
         axis=1,
     )
@@ -2898,8 +2895,7 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
     total_buffer_time = float(daily_df["buffer_time"].sum()) if not daily_df.empty else 0.0
     total_idle_time = float(daily_df["idle_time"].sum()) if not daily_df.empty and "idle_time" in daily_df else 0.0
     total_overrun_minutes = float(daily_df["overrun_minutes"].sum()) if not daily_df.empty and "overrun_minutes" in daily_df else 0.0
-    total_actual_capacity = max(total_available - total_waiting_time - total_lost_time - total_idle_time, 0.0)
-    total_utilized_time = total_runtime + total_overrun_minutes
+    total_utilized_time = total_runtime + total_overrun_minutes + total_lost_time + total_waiting_time + total_downtime
     planned_available_time = max(total_available - total_idle_time, 0.0)
 
     return {
@@ -2909,12 +2905,11 @@ def calculate_summary_metrics(daily_df: pd.DataFrame) -> dict[str, float | int]:
         "total_lost_time": _clean_number(total_lost_time),
         "total_downtime": _clean_number(total_downtime),
         "total_overrun_minutes": _clean_number(total_overrun_minutes),
-        "total_actual_capacity": _clean_number(total_actual_capacity),
         "total_utilized_time": _clean_number(total_utilized_time),
         "total_buffer_time": _clean_number(total_buffer_time),
         "total_idle_time": _clean_number(total_idle_time),
         "average_utilization_percentage": _clean_number(
-            _percentage(total_utilized_time, total_actual_capacity)
+            _percentage(total_utilized_time, total_available)
         ),
         "spare_capacity_percentage": _clean_number(_percentage(total_buffer_time, planned_available_time)),
         "idle_capacity_percentage": _clean_number(_percentage(total_idle_time, total_available)),
@@ -3968,7 +3963,6 @@ def _empty_daily_metrics() -> pd.DataFrame:
             "buffer_time",
             "idle_time",
             "overrun_minutes",
-            "actual_capacity",
             "utilization_percentage",
         ]
     )

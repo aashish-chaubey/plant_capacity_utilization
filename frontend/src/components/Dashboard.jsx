@@ -374,15 +374,14 @@ export default function Dashboard({
 
   const totalAvailableCapacity = Number(data.summary.total_available_capacity || 0);
   const totalActiveTowerCapacity = Number(data.summary.active_tower_days || 0);
-  const totalActualCapacity = Number(data.summary.total_actual_capacity || 0);
   const kpis = [
-    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity), effectiveDetail: formatKpiDuration(totalActualCapacity), availableDetail: formatKpiDuration(totalAvailableCapacity) },
+    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity), utilizationDetail: formatPercent(data.summary.average_utilization_percentage), availableDetail: formatKpiDuration(totalAvailableCapacity) },
     { label: "Runtime",            value: formatPercent(calculatePercentage(data.summary.total_runtime,      totalAvailableCapacity)), valueLabel: "of Available Time", tone: "green",     detail: formatKpiDuration(data.summary.total_runtime) },
     { label: "Wait Time",          value: formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), valueLabel: "of Available Time", tone: "wait",      detail: formatKpiDuration(data.summary.total_waiting_time) },
     { label: "Lost Time",          value: formatPercent(calculatePercentage(data.summary.total_lost_time,    totalAvailableCapacity)), valueLabel: "of Available Time", tone: "amber",     detail: formatKpiDuration(data.summary.total_lost_time) },
     { label: "Downtime",           value: formatPercent(calculatePercentage(data.summary.total_downtime,     totalAvailableCapacity)), valueLabel: "of Available Time", tone: "red",       detail: formatKpiDuration(data.summary.total_downtime) },
     { label: "Spare Time",         value: formatPercent(calculatePercentage(data.summary.total_buffer_time,  totalAvailableCapacity)), valueLabel: "of Available Time", tone: "spare",     detail: formatKpiDuration(data.summary.total_buffer_time) },
-    { label: "Capacity Utilization", value: formatPercent(data.summary.average_utilization_percentage), tone: "slate" },
+    { label: "Unplanned Capacity", value: formatPercent(calculatePercentage(data.summary.total_idle_time,    totalAvailableCapacity)), valueLabel: "of Available Time", tone: "unplanned", detail: formatKpiDuration(data.summary.total_idle_time) },
   ];
 
   const latestEditableUserIndex = chatLoading
@@ -1658,7 +1657,7 @@ function CapacityDaySummary({ summary, style, onClose, onZoomIn }) {
         <div className="flex items-center justify-between gap-3">
           <span className="font-medium text-slate-600">Capacity Utilization</span>
           <span className="font-semibold text-slate-950">
-            {formatCapacitySummaryValue(summary.utilizedMinutes, summary.actualCapacity)}
+            {formatCapacitySummaryValue(summary.utilizedMinutes, summary.totalCapacity)}
           </span>
         </div>
         {summary.overrunMinutes > 0 && (
@@ -1862,9 +1861,11 @@ function UtilizationBreakdownChart({
                     barSize={barSize}
                     radius={index === selectedStacks.length - 1 ? [0, 4, 4, 0] : [0, 0, 0, 0]}
                     shape={
-                      patternedUnplanned && option.key === "idle_time"
-                        ? <PatternedUtilizationBar patternId={idlePatternId} />
-                        : undefined
+                      <UtilizationStackedBarShape
+                        laterKeys={selectedStacks.slice(index + 1).map((s) => s.key)}
+                        patternId={patternedUnplanned && option.key === "idle_time" ? idlePatternId : undefined}
+                        showOverrun={!isTowerChart}
+                      />
                     }
                   />
                 ))}
@@ -1907,6 +1908,58 @@ function PatternedUtilizationBar(props) {
       strokeWidth="1.25"
       vectorEffect="non-scaling-stroke"
     />
+  );
+}
+
+function UtilizationStackedBarShape({ x, y, width, height, fill, patternId, laterKeys, showOverrun, payload }) {
+  const barX = Number(x || 0);
+  const barY = Number(y || 0);
+  const barWidth = Number(width || 0);
+  const barHeight = Number(height || 0);
+
+  if (barWidth <= 0 || barHeight <= 0) return null;
+
+  // The stack order is fixed, but any later category can legitimately be 0% for a given
+  // row (e.g. "Unplanned Capacity" is usually 0 for an active folder) — so the visually
+  // rightmost segment isn't always the last entry in the stacks array. Round this
+  // segment's right edge, and consider drawing the overrun marker on it, only when every
+  // category stacked after it has no width for this row.
+  const isRightmostVisible = laterKeys.every((key) => Number(payload?.[`${key}_percentage`] || 0) <= 0);
+
+  const radius = isRightmostVisible ? Math.min(4, barWidth / 2, barHeight / 2) : 0;
+  const right = barX + barWidth;
+  const bottom = barY + barHeight;
+  const path = radius > 0
+    ? [
+        `M ${barX} ${barY}`,
+        `H ${right - radius}`,
+        `Q ${right} ${barY} ${right} ${barY + radius}`,
+        `V ${bottom - radius}`,
+        `Q ${right} ${bottom} ${right - radius} ${bottom}`,
+        `H ${barX}`,
+        "Z"
+      ].join(" ")
+    : `M ${barX} ${barY} H ${right} V ${bottom} H ${barX} Z`;
+
+  const hasOverrun = showOverrun && isRightmostVisible && Number(payload?.overrun_minutes || 0) > 0;
+
+  return (
+    <g>
+      <path
+        d={path}
+        fill={patternId ? `url(#${patternId})` : fill}
+        stroke="#f8fafc"
+        strokeWidth="1.25"
+        vectorEffect="non-scaling-stroke"
+      />
+      {hasOverrun && (
+        <OverrunMarker
+          x={right + 9}
+          y={barY + barHeight / 2}
+          color={CAPACITY_SPLIT_COLORS.overrun}
+        />
+      )}
+    </g>
   );
 }
 
@@ -2038,6 +2091,12 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
           <div className="flex justify-between border-t border-slate-200 pt-2 text-slate-700">
             <span>{nightsLabel}</span>
             <span className="font-semibold text-slate-950">{formatNumber(row.planned_nights)}/{formatNumber(row.total_nights)}</span>
+          </div>
+        )}
+        {nameKey === "folder" && Number(row.overrun_minutes || 0) > 0 && (
+          <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-2">
+            <span className="font-medium text-red-700">Overrun</span>
+            <span className="font-semibold text-red-700">{formatMinutes(row.overrun_minutes)}</span>
           </div>
         )}
       </div>
@@ -2582,7 +2641,6 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
   const spareTime = sumCapacityRows(activeRows, "spare_time");
   const idleTime = sumCapacityRows(dayRows, "idle_time");
   const overrunMinutes = sumCapacityRows(activeRows, "overrun_minutes");
-  const actualCapacity = Math.max(totalCapacity - waitingTime - lossTime - idleTime, 0);
 
   return {
     run_date: selectedDay,
@@ -2594,8 +2652,7 @@ function buildCapacityDaySummary(selectedDay, rows, totalFolders) {
     totalFolders: folderCount,
     totalCapacity,
     overrunMinutes,
-    actualCapacity,
-    utilizedMinutes: cleanNumber(runtime + overrunMinutes),
+    utilizedMinutes: cleanNumber(runtime + overrunMinutes + lossTime + waitingTime + downtime),
     runtimeDetails: buildRuntimeTooltipDetails(activeRows),
     components: [
       {
@@ -2653,7 +2710,6 @@ function buildPlantCapacityPeriodSummary(selectedPeriod, periodRows) {
   const spareTime = Number(row.spare_time || 0);
   const idleTime = Number(row.idle_time || 0);
   const overrunMinutes = Number(row.overrun_minutes || 0);
-  const actualCapacity = Math.max(totalCapacity - waitingTime - lossTime - idleTime, 0);
 
   return {
     run_date: row.run_date,
@@ -2667,8 +2723,7 @@ function buildPlantCapacityPeriodSummary(selectedPeriod, periodRows) {
     canZoom: Boolean(row.canZoom),
     zoomMonthKey: row.month_key || "",
     overrunMinutes,
-    actualCapacity,
-    utilizedMinutes: cleanNumber(runtime + overrunMinutes),
+    utilizedMinutes: cleanNumber(runtime + overrunMinutes + lossTime + waitingTime + downtime),
     runtimeDetails: buildPlantRuntimeTooltipDetails(row),
     components: [
       {
@@ -3266,6 +3321,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
       change_over_time: 0,
       reflong_related_downtime: 0,
       late_start_time: 0,
+      overrun_minutes: 0,
       uv_tower: false,
       observedDates: new Set(),
       plannedDates: new Set()
@@ -3280,6 +3336,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
     current.change_over_time += rowValues.change_over_time;
     current.reflong_related_downtime += rowValues.reflong_related_downtime;
     current.late_start_time += rowValues.late_start_time;
+    current.overrun_minutes += Number(row.overrun_minutes || 0);
     current.uv_tower = current.uv_tower || Boolean(row.uv_tower);
 
     if (row.run_date) {
@@ -3332,6 +3389,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
         change_over_time: cleanNumber(finalNonWaitLoss.change_over_time),
         reflong_related_downtime: cleanNumber(finalNonWaitLoss.reflong_related_downtime),
         late_start_time: cleanNumber(finalNonWaitLoss.late_start_time),
+        overrun_minutes: cleanNumber(row.overrun_minutes),
         available_capacity: cleanNumber(selectedCapacity),
         planned_capacity: cleanNumber(plannedCapacity),
         planned_nights: row.plannedDates.size,
