@@ -76,7 +76,7 @@ export default function DelayedPrintFinishWidget({ details }) {
             Summary of Print Finish Delay in Selected Period
           </h3>
           <p className="mt-1 text-sm text-slate-500">
-            {formatNumber(analysis.folderBreaches.length)} breach{analysis.folderBreaches.length === 1 ? "" : "es"}
+            {formatNumber(analysis.folderBreaches.length)} folder breach{analysis.folderBreaches.length === 1 ? "" : "es"}
           </p>
         </div>
       </div>

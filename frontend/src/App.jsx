@@ -49,7 +49,15 @@ const METRIC_DEFINITIONS = [
   },
   {
     term: "Unplanned Capacity",
-    definition: "Periods where the folder or tower was not scheduled or available for production."
+    definition: "Periods when the folder or tower was not scheduled or available for production, including Press Holidays (No Issue Days)."
+  },
+  {
+    term: "Overrun Time",
+    definition: "Overrun time is the period when the press continues actively running beyond the scheduled print finish time."
+  },
+  {
+    term: "Capacity Utilization",
+    definition: "Capacity Utilization = (Utilized Time ÷ Available Time) × 100. Utilized Time includes Runtime, Overrun Time, Wait Time, Lost Time and Downtime."
   },
 ];
 

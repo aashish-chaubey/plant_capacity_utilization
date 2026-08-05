@@ -41,7 +41,7 @@ const CAPACITY_SPLIT_COLORS = {
   idle_stripe: "#B4BBC7",
   window_line: "#234775",
   twin_folder: "#2563eb",
-  overrun: "#dc2626"
+  overrun: "#9333ea"
 };
 
 const CAPACITY_SPLIT_LEGEND = [
@@ -345,6 +345,10 @@ export default function Dashboard({
     () => aggregateResourceCapacitySplit(breakdownDetails, "folder", breakdownProductionDays),
     [breakdownDetails, breakdownProductionDays]
   );
+  const monthlyOverrunDays = useMemo(() => {
+    if (focusedDay || shouldUseDailyCapacityGrain(data.daily || [], timeframeMode, timeframeRange)) return 0;
+    return (data.daily || []).filter((row) => Number(row.overrun_minutes || 0) > 0).length;
+  }, [data.daily, focusedDay, timeframeMode, timeframeRange]);
   const totalTowerCapacity = useMemo(
     () => calculateTotalTowerCapacity(data.daily),
     [data.daily]
@@ -375,13 +379,13 @@ export default function Dashboard({
   const totalAvailableCapacity = Number(data.summary.total_available_capacity || 0);
   const totalActiveTowerCapacity = Number(data.summary.active_tower_days || 0);
   const kpis = [
-    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity), utilizationDetail: formatPercent(data.summary.average_utilization_percentage), availableDetail: formatKpiDuration(totalAvailableCapacity) },
-    { label: "Runtime",            value: formatPercent(calculatePercentage(data.summary.total_runtime,      totalAvailableCapacity)), valueLabel: "of Available Time", tone: "green",     detail: formatKpiDuration(data.summary.total_runtime) },
-    { label: "Wait Time",          value: formatPercent(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity)), valueLabel: "of Available Time", tone: "wait",      detail: formatKpiDuration(data.summary.total_waiting_time) },
-    { label: "Lost Time",          value: formatPercent(calculatePercentage(data.summary.total_lost_time,    totalAvailableCapacity)), valueLabel: "of Available Time", tone: "amber",     detail: formatKpiDuration(data.summary.total_lost_time) },
-    { label: "Downtime",           value: formatPercent(calculatePercentage(data.summary.total_downtime,     totalAvailableCapacity)), valueLabel: "of Available Time", tone: "red",       detail: formatKpiDuration(data.summary.total_downtime) },
-    { label: "Spare Time",         value: formatPercent(calculatePercentage(data.summary.total_buffer_time,  totalAvailableCapacity)), valueLabel: "of Available Time", tone: "spare",     detail: formatKpiDuration(data.summary.total_buffer_time) },
-    { label: "Unplanned Capacity", value: formatPercent(calculatePercentage(data.summary.total_idle_time,    totalAvailableCapacity)), valueLabel: "of Available Time", tone: "unplanned", detail: formatKpiDuration(data.summary.total_idle_time) },
+    { label: "Available Time",     value: formatPercent(totalAvailableCapacity > 0 ? 100 : 0), tone: "blue", detail: formatKpiDuration(totalAvailableCapacity), utilizationDetail: formatPercent(Math.round(data.summary.average_utilization_percentage)), availableDetail: formatKpiDuration(totalAvailableCapacity) },
+    { label: "Runtime",            value: formatPercent(Math.round(calculatePercentage(data.summary.total_runtime,      totalAvailableCapacity))), valueLabel: "of Available Time", tone: "green",     detail: formatKpiDuration(data.summary.total_runtime) },
+    { label: "Wait Time",          value: formatPercent(Math.round(calculatePercentage(data.summary.total_waiting_time, totalAvailableCapacity))), valueLabel: "of Available Time", tone: "wait",      detail: formatKpiDuration(data.summary.total_waiting_time) },
+    { label: "Lost Time",          value: formatPercent(Math.round(calculatePercentage(data.summary.total_lost_time,    totalAvailableCapacity))), valueLabel: "of Available Time", tone: "amber",     detail: formatKpiDuration(data.summary.total_lost_time) },
+    { label: "Downtime",           value: formatPercent(Math.round(calculatePercentage(data.summary.total_downtime,     totalAvailableCapacity))), valueLabel: "of Available Time", tone: "red",       detail: formatKpiDuration(data.summary.total_downtime) },
+    { label: "Spare Time",         value: formatPercent(Math.round(calculatePercentage(data.summary.total_buffer_time,  totalAvailableCapacity))), valueLabel: "of Available Time", tone: "spare",     detail: formatKpiDuration(data.summary.total_buffer_time) },
+    { label: "Unplanned Capacity", value: formatPercent(Math.round(calculatePercentage(data.summary.total_idle_time,    totalAvailableCapacity))), valueLabel: "of Available Time", tone: "unplanned", detail: formatKpiDuration(data.summary.total_idle_time) },
   ];
 
   const latestEditableUserIndex = chatLoading
@@ -474,6 +478,7 @@ export default function Dashboard({
             rowHeight={54}
             emptyMessage="No folder usage found for this selection."
             showPlannedNights={!focusedDay}
+            overrunDaysCount={monthlyOverrunDays}
             patternedUnplanned
           />
         </div>
@@ -1063,13 +1068,13 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
   return (
     <div className="space-y-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-700">
+        <div className="flex flex-wrap gap-x-4 gap-y-2 text-[13px] text-slate-700">
           {CAPACITY_SPLIT_LEGEND
             .filter((item) => DAILY_CAPACITY_FOLDER_VIEW_ENABLED || item.key !== "twin_folder")
             .map((item) => (
             <div key={item.key} className="inline-flex items-center gap-1.5">
               {item.marker === "triangle" ? (
-                <span className="text-[11px] font-black leading-none text-slate-950">▲</span>
+                <span className="text-[12px] font-black leading-none text-slate-950">▲</span>
               ) : item.marker === "overrun" ? (
                 <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 14 14" aria-hidden="true">
                   <circle cx="7" cy="7" r="6" fill={CAPACITY_SPLIT_COLORS.overrun} opacity="0.95" />
@@ -1185,7 +1190,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
       </div>
 
       {!isPlantView && DAILY_CAPACITY_FOLDER_VIEW_ENABLED && (
-        <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-700">
+        <div className="flex flex-wrap gap-x-4 gap-y-2 text-[13px] text-slate-700">
           {folders.map((folder) => (
             <span
               key={folder.key}
@@ -1233,7 +1238,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                 x={margins.left - 8}
                 y={yFor(tick) + 4}
                 textAnchor="end"
-                fontSize="12"
+                fontSize="13"
                 fill="#334155"
               >
                   {isPlantView ? formatPercent(tick) : formatHourTick(tick)}
@@ -1291,7 +1296,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
             x={yAxisTitleX}
             y={margins.top + plotHeight / 2}
             textAnchor="middle"
-            fontSize="12"
+            fontSize="13"
             fill="#0f172a"
             transform={`rotate(-90 ${yAxisTitleX} ${margins.top + plotHeight / 2})`}
           >
@@ -1436,7 +1441,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                           x={labelX}
                           y={labelY}
                           textAnchor="middle"
-                          fontSize={showSpareLabelAboveBar ? "10" : "11"}
+                          fontSize={showSpareLabelAboveBar ? "11" : "12"}
                           fontWeight="700"
                           fill="#1e3a5f"
                         >
@@ -1460,6 +1465,8 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                     x={x + barWidth / 2}
                     y={barTopY - 7}
                     color={CAPACITY_SPLIT_COLORS.overrun}
+                    dayCount={row.overrun_days}
+                    labelPosition="right"
                   />
                 )}
               </g>
@@ -1482,7 +1489,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                     x={xFor(dayIndex, folderIndex) + barWidth / 2}
                     y={margins.top + plotHeight + 18}
                     textAnchor="middle"
-                    fontSize="11"
+                    fontSize="12"
                     fontWeight="700"
                     fill={folder.color}
                   >
@@ -1538,7 +1545,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                   x={groupCenter}
                   y={dayLabelY}
                   textAnchor="middle"
-                  fontSize="12"
+                  fontSize="13"
                   fontWeight="800"
                   fill={axisLabelColor}
                 >
@@ -1548,7 +1555,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                   x={groupCenter}
                   y={monthLabelY}
                   textAnchor="middle"
-                  fontSize="10"
+                  fontSize="11"
                   fontWeight="700"
                   fill="#64748b"
                 >
@@ -1559,7 +1566,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
                     x={groupCenter}
                     y={weekdayLabelY}
                     textAnchor="middle"
-                    fontSize="10"
+                    fontSize="11"
                     fontWeight="800"
                     fill={axisLabelColor}
                   >
@@ -1663,7 +1670,10 @@ function CapacityDaySummary({ summary, style, onClose, onZoomIn }) {
         {summary.overrunMinutes > 0 && (
           <div className="flex items-center justify-between gap-3">
             <span className="font-medium text-red-700">Overrun</span>
-            <span className="font-semibold text-red-700">{formatMinutes(summary.overrunMinutes)}</span>
+            <span className="font-semibold text-red-700">
+              {formatMinutes(summary.overrunMinutes)}
+              {summary.overrunDays > 0 && ` (${summary.overrunDays} ${summary.overrunDays === 1 ? "day" : "days"})`}
+            </span>
           </div>
         )}
       </div>
@@ -1740,7 +1750,8 @@ function UtilizationBreakdownChart({
   rowHeight,
   emptyMessage,
   showPlannedNights,
-  patternedUnplanned = false
+  patternedUnplanned = false,
+  overrunDaysCount = 0
 }) {
   const isTowerChart = nameKey === "tower";
   const effectiveRowHeight = isTowerChart ? Math.max(rowHeight, 44) : rowHeight;
@@ -1749,7 +1760,7 @@ function UtilizationBreakdownChart({
     data.length * effectiveRowHeight + (isTowerChart ? 52 : 72)
   );
   const yAxisLabelOffset = -6;
-  const chartMargin = { top: 8, right: 16, left: 4, bottom: 8 };
+  const chartMargin = { top: 8, right: 44, left: 4, bottom: 8 };
   const idlePatternId = `${nameKey}-utilization-idle-pattern`;
 
   const machineColors = useMemo(() => {
@@ -1848,7 +1859,7 @@ function UtilizationBreakdownChart({
                   tickLine={false}
                   axisLine={{ stroke: "#cbd5e1" }}
                 />
-                <Tooltip content={<UtilizationTooltip nameKey={nameKey} selectedStacks={selectedStacks} showPlannedNights={showPlannedNights} />} cursor={{ fill: "rgba(15, 23, 42, 0.06)" }} />
+                <Tooltip content={<UtilizationTooltip nameKey={nameKey} selectedStacks={selectedStacks} showPlannedNights={showPlannedNights} overrunDaysCount={overrunDaysCount} />} cursor={{ fill: "rgba(15, 23, 42, 0.06)" }} />
                 {selectedStacks.map((option, index) => (
                   <Bar
                     key={option.key}
@@ -1865,6 +1876,7 @@ function UtilizationBreakdownChart({
                         laterKeys={selectedStacks.slice(index + 1).map((s) => s.key)}
                         patternId={patternedUnplanned && option.key === "idle_time" ? idlePatternId : undefined}
                         showOverrun={!isTowerChart}
+                        overrunDaysCount={overrunDaysCount}
                       />
                     }
                   />
@@ -1911,7 +1923,7 @@ function PatternedUtilizationBar(props) {
   );
 }
 
-function UtilizationStackedBarShape({ x, y, width, height, fill, patternId, laterKeys, showOverrun, payload }) {
+function UtilizationStackedBarShape({ x, y, width, height, fill, patternId, laterKeys, showOverrun, payload, overrunDaysCount }) {
   const barX = Number(x || 0);
   const barY = Number(y || 0);
   const barWidth = Number(width || 0);
@@ -1954,9 +1966,12 @@ function UtilizationStackedBarShape({ x, y, width, height, fill, patternId, late
       />
       {hasOverrun && (
         <OverrunMarker
-          x={right + 9}
+          x={right + 10}
           y={barY + barHeight / 2}
           color={CAPACITY_SPLIT_COLORS.overrun}
+          dayCount={overrunDaysCount}
+          labelPosition="right"
+          size="lg"
         />
       )}
     </g>
@@ -1978,12 +1993,34 @@ function ComplexPrintStackIcon({ x, y, color }) {
   );
 }
 
-function OverrunMarker({ x, y, color }) {
+function OverrunMarker({ x, y, color, dayCount = 0, labelPosition = "below", size = "lg" }) {
+  const isSmall = size === "sm";
+  const radius = isSmall ? 4.5 : 6;
+  const stemWidth = isSmall ? 1.2 : 1.6;
+  const stemHeight = isSmall ? 3 : 4;
+  const stemRx = isSmall ? 0.6 : 0.8;
+  const stemY = isSmall ? y - 2.6 : y - 3.5;
+  const dotY = isSmall ? y + 2 : y + 2.7;
+  const dotR = isSmall ? 0.8 : 1.1;
+  const fontSize = isSmall ? 10 : 12;
+  const rightOffset = isSmall ? 9 : 11;
+  const belowOffset = isSmall ? 15 : 19;
+
   return (
     <g pointerEvents="none">
-      <circle cx={x} cy={y} r="4.5" fill={color} opacity="0.95" />
-      <rect x={x - 0.6} y={y - 2.6} width="1.2" height="3" rx="0.6" fill="#ffffff" />
-      <circle cx={x} cy={y + 2} r="0.8" fill="#ffffff" />
+      <circle cx={x} cy={y} r={radius} fill={color} opacity="0.95" />
+      <rect x={x - stemWidth / 2} y={stemY} width={stemWidth} height={stemHeight} rx={stemRx} fill="#ffffff" />
+      <circle cx={x} cy={dotY} r={dotR} fill="#ffffff" />
+      {dayCount > 0 && labelPosition === "right" && (
+        <text x={x + rightOffset} y={y + fontSize / 2.5} textAnchor="start" fontSize={fontSize} fontWeight="700" fill={color}>
+          {dayCount}
+        </text>
+      )}
+      {dayCount > 0 && labelPosition === "below" && (
+        <text x={x} y={y + belowOffset} textAnchor="middle" fontSize={fontSize} fontWeight="700" fill={color}>
+          {dayCount}
+        </text>
+      )}
     </g>
   );
 }
@@ -2023,7 +2060,7 @@ function ComplexPrintMarker({ x, y, side, label, color }) {
   );
 }
 
-function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlannedNights }) {
+function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlannedNights, overrunDaysCount = 0 }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload;
   const nightsLabel = nameKey === "folder" ? "Folder nights:" : "Planned nights:";
@@ -2096,7 +2133,10 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
         {nameKey === "folder" && Number(row.overrun_minutes || 0) > 0 && (
           <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-2">
             <span className="font-medium text-red-700">Overrun</span>
-            <span className="font-semibold text-red-700">{formatMinutes(row.overrun_minutes)}</span>
+            <span className="font-semibold text-red-700">
+              {formatMinutes(row.overrun_minutes)}
+              {overrunDaysCount > 0 && ` (${overrunDaysCount} ${overrunDaysCount === 1 ? "day" : "days"})`}
+            </span>
           </div>
         )}
       </div>
@@ -2299,6 +2339,7 @@ function buildMonthlyCapacityPeriodRow(monthKey, monthRows) {
     totalFolders: sumCapacityRows(sortedRows, "totalFolders"),
     total_capacity: totalCapacity,
     overrun_minutes: sumCapacityRows(sortedRows, "overrun_minutes"),
+    overrun_days: sortedRows.filter((row) => Number(row.overrun_minutes || 0) > 0).length,
     ...values,
     runtime_segments: runtimeSegments,
     segments: buildCapacitySegments({ ...values, runtime_segments: runtimeSegments }, totalCapacity),
@@ -2723,6 +2764,7 @@ function buildPlantCapacityPeriodSummary(selectedPeriod, periodRows) {
     canZoom: Boolean(row.canZoom),
     zoomMonthKey: row.month_key || "",
     overrunMinutes,
+    overrunDays: isMonth ? Number(row.overrun_days || 0) : 0,
     utilizedMinutes: cleanNumber(runtime + overrunMinutes + lossTime + waitingTime + downtime),
     runtimeDetails: buildPlantRuntimeTooltipDetails(row),
     components: [
@@ -3764,7 +3806,7 @@ function calculateRuntimeLabelFontSize(label, segmentHeight, barWidth) {
   const availableWidth = Math.max(barWidth - 4, 0);
   const lengthLimitedSize = availableLength / Math.max(label.length * 0.56, 1);
   const widthLimitedSize = availableWidth;
-  const fontSize = Math.min(11, lengthLimitedSize, widthLimitedSize);
+  const fontSize = Math.min(12, lengthLimitedSize, widthLimitedSize);
 
   return fontSize >= 8 ? Math.floor(fontSize * 10) / 10 : 0;
 }
