@@ -5,6 +5,7 @@ export default function KpiCard({
   value,
   valueLabel = "",
   detail = "",
+  subDetail = "",
   tone = "slate",
   utilizationDetail = "",
   availableDetail = ""
@@ -77,6 +78,12 @@ export default function KpiCard({
             <p className="mt-3 flex min-w-0 items-center gap-1.5 text-xs font-semibold opacity-75">
               <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               <span className="truncate">{detail}</span>
+            </p>
+          )}
+          {subDetail && (
+            <p className="mt-1.5 flex min-w-0 items-center gap-1.5 text-xs font-semibold opacity-75">
+              <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">{subDetail}</span>
             </p>
           )}
         </>
