@@ -238,9 +238,7 @@ function CausePill({ cause, minutes, showMinutes = false }) {
 function buildDelayedFinishAnalysis(details) {
   const sourceRows = details.filter((row) => row.run_date && row.folder);
   const folderBaselines = buildBaselines(sourceRows, (row) => row.folder);
-  const delayedRows = dedupeTwinFolderBreaches(
-    sourceRows.filter((row) => Number(row.overrun_minutes || 0) > 0)
-  );
+  const delayedRows = sourceRows.filter((row) => Number(row.overrun_minutes || 0) > 0);
   const folderBreaches = delayedRows
     .map((row) => buildFolderBreach(row, folderBaselines[row.folder]))
     .sort(compareBreachRows);
@@ -260,47 +258,6 @@ function buildDelayedFinishAnalysis(details) {
   };
 }
 
-function dedupeTwinFolderBreaches(rows) {
-  const grouped = new Map();
-
-  for (const row of rows) {
-    const key = delayedPrintFinishKey(row);
-    const current = grouped.get(key);
-
-    if (!current || compareTwinDuplicateRows(row, current) < 0) {
-      grouped.set(key, row);
-    }
-  }
-
-  return Array.from(grouped.values());
-}
-
-function delayedPrintFinishKey(row) {
-  const plant = row.plant_name || "";
-
-  if (row.twin_folder_mode && row.twin_folder_group) {
-    return [
-      row.run_date || "",
-      plant,
-      row.twin_folder_group,
-      Math.round(Number(row.overrun_minutes || 0)),
-    ].join("||");
-  }
-
-  return [
-    row.run_date || "",
-    plant,
-    row.folder || "",
-    Math.round(Number(row.overrun_minutes || 0)),
-  ].join("||");
-}
-
-function compareTwinDuplicateRows(first, second) {
-  const folderDiff = String(first.folder || "").localeCompare(String(second.folder || ""));
-  if (folderDiff !== 0) return folderDiff;
-
-  return formatEditions(first.cutoff_started_editions).localeCompare(formatEditions(second.cutoff_started_editions));
-}
 
 function buildFolderBreach(row, baseline) {
   const causeScores = calculateCauseScores(row, baseline || {});

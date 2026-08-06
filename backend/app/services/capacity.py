@@ -913,6 +913,16 @@ def _twin_folder_group_key(row: pd.Series, target_folders: list[str]) -> str:
     )
 
 
+def _twin_folder_group_divisor(row: pd.Series) -> float:
+    if not bool(row.get(TWIN_FOLDER_MODE_COLUMN)):
+        return 1.0
+    group_key = _clean_text(row.get(TWIN_FOLDER_GROUP_COLUMN))
+    if not group_key:
+        return 1.0
+    folder_count = max(len(group_key.split("||")) - 2, 1)
+    return float(folder_count)
+
+
 def _build_issue_twin_targets(
     book_df: pd.DataFrame,
     twin_lookup: dict[str, dict[str, list[str]]],
@@ -2059,17 +2069,18 @@ def _effective_runtime_minutes(row: pd.Series) -> float:
 
 
 def _effective_print_order(row: pd.Series) -> float:
+    divisor = _twin_folder_group_divisor(row)
     print_order = _parse_count_value(row.get(EFFECTIVE_PRINT_ORDER_COLUMN))
     if print_order > 0:
-        return print_order
+        return print_order / divisor
 
     source_print_order = _parse_count_value(row.get("Print Order"))
     source_runtime = _parse_minutes_value(row.get("Total Run Time (mnts)"))
     effective_runtime = _effective_runtime_minutes(row)
     if source_print_order > 0 and source_runtime > 0 and effective_runtime < source_runtime:
-        return source_print_order * min(max(effective_runtime / source_runtime, 0.0), 1.0)
+        return (source_print_order * min(max(effective_runtime / source_runtime, 0.0), 1.0)) / divisor
 
-    return source_print_order
+    return source_print_order / divisor
 
 
 def _speed_lookup_text(value: Any) -> str:
@@ -2265,7 +2276,7 @@ def _apportioned_print_order(row: pd.Series, runtime_minutes: float) -> float:
         if column in row:
             actual_speed = _parse_count_value(row.get(column))
             if actual_speed > 0 and runtime_minutes > 0:
-                return (actual_speed / 60.0) * runtime_minutes
+                return (actual_speed / 60.0) * runtime_minutes / _twin_folder_group_divisor(row)
     return _effective_print_order(row)
 
 

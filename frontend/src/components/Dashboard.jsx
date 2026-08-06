@@ -117,6 +117,7 @@ export default function Dashboard({
   timeframeRange,
 }) {
   const [focusedDay, setFocusedDay] = useState("");
+  const [zoomedMonth, setZoomedMonth] = useState("");
   const [selectedBreakdownKeys, setSelectedBreakdownKeys] = useState(DEFAULT_BREAKDOWN_KEYS);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
@@ -312,20 +313,24 @@ export default function Dashboard({
     }
   }, [data.daily, focusedDay]);
 
-  const breakdownDetails = useMemo(
-    () =>
-      focusedDay
-        ? data.details.filter((row) => row.run_date === focusedDay)
-        : data.details,
-    [data.details, focusedDay]
-  );
+  const breakdownDetails = useMemo(() => {
+    if (focusedDay) return data.details.filter((row) => row.run_date === focusedDay);
+    if (zoomedMonth) return data.details.filter((row) => getMonthKey(row.run_date) === zoomedMonth);
+    return data.details;
+  }, [data.details, focusedDay, zoomedMonth]);
 
-  const breakdownTowerDetails = useMemo(
-    () => buildTowerBreakdownSourceRows(data.tower_details || [], focusedDay, data.all_tower_profiles || []),
-    [data.tower_details, data.all_tower_profiles, focusedDay]
-  );
+  const breakdownTowerDetails = useMemo(() => {
+    const sourceTowerDetails = !focusedDay && zoomedMonth
+      ? (data.tower_details || []).filter((row) => getMonthKey(row.run_date) === zoomedMonth)
+      : (data.tower_details || []);
+    return buildTowerBreakdownSourceRows(sourceTowerDetails, focusedDay, data.all_tower_profiles || []);
+  }, [data.tower_details, data.all_tower_profiles, focusedDay, zoomedMonth]);
 
-  const breakdownProductionDays = focusedDay ? 1 : data.daily.length;
+  const breakdownProductionDays = focusedDay
+    ? 1
+    : zoomedMonth
+      ? data.daily.filter((row) => getMonthKey(row.run_date) === zoomedMonth).length
+      : data.daily.length;
 
   const towerBreakdown = useMemo(() => {
     const rows = aggregateResourceCapacitySplit(breakdownTowerDetails, "tower", breakdownProductionDays);
@@ -345,10 +350,12 @@ export default function Dashboard({
     () => aggregateResourceCapacitySplit(breakdownDetails, "folder", breakdownProductionDays),
     [breakdownDetails, breakdownProductionDays]
   );
-  const monthlyOverrunDays = useMemo(() => {
-    if (focusedDay || shouldUseDailyCapacityGrain(data.daily || [], timeframeMode, timeframeRange)) return 0;
-    return (data.daily || []).filter((row) => Number(row.overrun_minutes || 0) > 0).length;
-  }, [data.daily, focusedDay, timeframeMode, timeframeRange]);
+  const showFolderOverrunDays = useMemo(() => {
+    if (focusedDay) return false;
+    if (zoomedMonth) return true;
+    if (String(timeframeMode || "").toLowerCase() === "month") return true;
+    return !shouldUseDailyCapacityGrain(data.daily || [], timeframeMode, timeframeRange);
+  }, [data.daily, focusedDay, zoomedMonth, timeframeMode, timeframeRange]);
   const totalTowerCapacity = useMemo(
     () => calculateTotalTowerCapacity(data.daily),
     [data.daily]
@@ -426,6 +433,8 @@ export default function Dashboard({
           timeframeRange={timeframeRange}
           selectedDay={focusedDay}
           onSelectDay={setFocusedDay}
+          zoomedMonth={zoomedMonth}
+          onZoomedMonthChange={setZoomedMonth}
         />
       </section>
 
@@ -434,7 +443,11 @@ export default function Dashboard({
           <div>
             <h2 className="text-base font-semibold text-slate-950">Drilldown charts</h2>
             <p className="mt-1 text-sm text-slate-500">
-              {focusedDay ? `Showing ${focusedDay}` : "Showing selected timeframe"}
+              {focusedDay
+                ? `Showing ${focusedDay}`
+                : zoomedMonth
+                  ? `Showing ${formatMonthYearLabel(zoomedMonth)}`
+                  : "Showing selected timeframe"}
             </p>
           </div>
           {focusedDay && (
@@ -478,7 +491,7 @@ export default function Dashboard({
             rowHeight={54}
             emptyMessage="No folder usage found for this selection."
             showPlannedNights={!focusedDay}
-            overrunDaysCount={monthlyOverrunDays}
+            showOverrunDays={showFolderOverrunDays}
             patternedUnplanned
           />
         </div>
@@ -856,10 +869,9 @@ function ChatMessageContent({ content, role }) {
   );
 }
 
-function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timeframeRange, selectedDay, onSelectDay }) {
+function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timeframeRange, selectedDay, onSelectDay, zoomedMonth, onZoomedMonthChange }) {
   const [pageStart, setPageStart] = useState(0);
   const [viewMode, setViewMode] = useState("plant");
-  const [zoomedMonth, setZoomedMonth] = useState("");
   const [summaryPopover, setSummaryPopover] = useState(null);
   const chartFrameRef = useRef(null);
   const returnPageStartRef = useRef(0);
@@ -902,7 +914,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
   useEffect(() => {
     if (!zoomedMonth) return;
     if (plantRows.some((row) => getMonthKey(row.run_date) === zoomedMonth)) return;
-    setZoomedMonth("");
+    onZoomedMonthChange("");
   }, [plantRows, zoomedMonth]);
 
   const width = isPlantView ? 1800 : 1380;
@@ -963,7 +975,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
   }, [selectedDay]);
 
   useEffect(() => {
-    setZoomedMonth("");
+    onZoomedMonthChange("");
     setSummaryPopover(null);
     setPageStart(0);
     returnPageStartRef.current = 0;
@@ -1009,14 +1021,14 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
   function zoomIntoMonth(monthKey) {
     if (!monthKey) return;
     returnPageStartRef.current = safePageStart;
-    setZoomedMonth(monthKey);
+    onZoomedMonthChange(monthKey);
     setPageStart(0);
     setSummaryPopover(null);
     onSelectDay("");
   }
 
   function zoomOutMonth() {
-    setZoomedMonth("");
+    onZoomedMonthChange("");
     setPageStart(returnPageStartRef.current || 0);
     setSummaryPopover(null);
     onSelectDay("");
@@ -1751,7 +1763,7 @@ function UtilizationBreakdownChart({
   emptyMessage,
   showPlannedNights,
   patternedUnplanned = false,
-  overrunDaysCount = 0
+  showOverrunDays = false
 }) {
   const isTowerChart = nameKey === "tower";
   const effectiveRowHeight = isTowerChart ? Math.max(rowHeight, 44) : rowHeight;
@@ -1859,7 +1871,7 @@ function UtilizationBreakdownChart({
                   tickLine={false}
                   axisLine={{ stroke: "#cbd5e1" }}
                 />
-                <Tooltip content={<UtilizationTooltip nameKey={nameKey} selectedStacks={selectedStacks} showPlannedNights={showPlannedNights} overrunDaysCount={overrunDaysCount} />} cursor={{ fill: "rgba(15, 23, 42, 0.06)" }} />
+                <Tooltip content={<UtilizationTooltip nameKey={nameKey} selectedStacks={selectedStacks} showPlannedNights={showPlannedNights} showOverrunDays={showOverrunDays} />} cursor={{ fill: "rgba(15, 23, 42, 0.06)" }} />
                 {selectedStacks.map((option, index) => (
                   <Bar
                     key={option.key}
@@ -1876,7 +1888,7 @@ function UtilizationBreakdownChart({
                         laterKeys={selectedStacks.slice(index + 1).map((s) => s.key)}
                         patternId={patternedUnplanned && option.key === "idle_time" ? idlePatternId : undefined}
                         showOverrun={!isTowerChart}
-                        overrunDaysCount={overrunDaysCount}
+                        showOverrunDays={showOverrunDays}
                       />
                     }
                   />
@@ -1923,7 +1935,7 @@ function PatternedUtilizationBar(props) {
   );
 }
 
-function UtilizationStackedBarShape({ x, y, width, height, fill, patternId, laterKeys, showOverrun, payload, overrunDaysCount }) {
+function UtilizationStackedBarShape({ x, y, width, height, fill, patternId, laterKeys, showOverrun, payload, showOverrunDays }) {
   const barX = Number(x || 0);
   const barY = Number(y || 0);
   const barWidth = Number(width || 0);
@@ -1969,7 +1981,7 @@ function UtilizationStackedBarShape({ x, y, width, height, fill, patternId, late
           x={right + 10}
           y={barY + barHeight / 2}
           color={CAPACITY_SPLIT_COLORS.overrun}
-          dayCount={overrunDaysCount}
+          dayCount={showOverrunDays ? payload?.overrun_days : 0}
           labelPosition="right"
           size="lg"
         />
@@ -2060,7 +2072,7 @@ function ComplexPrintMarker({ x, y, side, label, color }) {
   );
 }
 
-function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlannedNights, overrunDaysCount = 0 }) {
+function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlannedNights, showOverrunDays = false }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload;
   const nightsLabel = nameKey === "folder" ? "Folder nights:" : "Planned nights:";
@@ -2135,7 +2147,7 @@ function UtilizationTooltip({ active, payload, nameKey, selectedStacks, showPlan
             <span className="font-medium text-red-700">Overrun</span>
             <span className="font-semibold text-red-700">
               {formatMinutes(row.overrun_minutes)}
-              {overrunDaysCount > 0 && ` (${overrunDaysCount} ${overrunDaysCount === 1 ? "day" : "days"})`}
+              {showOverrunDays && row.overrun_days > 0 && ` (${row.overrun_days} ${row.overrun_days === 1 ? "day" : "days"})`}
             </span>
           </div>
         )}
@@ -3366,7 +3378,8 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
       overrun_minutes: 0,
       uv_tower: false,
       observedDates: new Set(),
-      plannedDates: new Set()
+      plannedDates: new Set(),
+      overrunDates: new Set()
     };
 
     current.runtime_snp += rowValues.runtime_snp;
@@ -3387,6 +3400,10 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
 
     if (row.run_date && isActiveCapacityDetailRow(row)) {
       current.plannedDates.add(row.run_date);
+    }
+
+    if (row.run_date && Number(row.overrun_minutes || 0) > 0) {
+      current.overrunDates.add(row.run_date);
     }
 
     grouped.set(name, current);
@@ -3432,6 +3449,7 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
         reflong_related_downtime: cleanNumber(finalNonWaitLoss.reflong_related_downtime),
         late_start_time: cleanNumber(finalNonWaitLoss.late_start_time),
         overrun_minutes: cleanNumber(row.overrun_minutes),
+        overrun_days: row.overrunDates.size,
         available_capacity: cleanNumber(selectedCapacity),
         planned_capacity: cleanNumber(plannedCapacity),
         planned_nights: row.plannedDates.size,
@@ -3785,7 +3803,7 @@ function formatRuntimeSegmentShortType(segment) {
 function formatRuntimeSegmentDetail(segment, isTwin = false) {
   const complexityText = formatRuntimeComplexityCode(segment);
   const speedText = formatEffectiveSpeed(segment?.effective_speed, isTwin);
-  const printOrderText = formatPrintOrderVolume(segment?.print_order, isTwin);
+  const printOrderText = formatPrintOrderVolume(segment?.print_order);
   return [complexityText, printOrderText, speedText].filter(Boolean).join(" | ");
 }
 
@@ -3818,11 +3836,10 @@ function formatEffectiveSpeed(value, isTwin = false) {
   return `Speed: ${formatCompactQuantity(speed)} CPH`;
 }
 
-function formatPrintOrderVolume(value, isTwin = false) {
+function formatPrintOrderVolume(value) {
   const raw = Number(value || 0);
   if (raw <= 0) return "";
-  const volume = isTwin ? raw / 2 : raw;
-  return `PO: ${formatCompactQuantity(volume)}`;
+  return `PO: ${formatCompactQuantity(raw)}`;
 }
 
 function formatCompactQuantity(value) {
