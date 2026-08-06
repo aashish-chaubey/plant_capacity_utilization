@@ -359,7 +359,14 @@ export default function Dashboard({
   const showFolderOverrunDays = useMemo(() => {
     if (focusedDay) return false;
     if (zoomedMonth) return true;
-    if (String(timeframeMode || "").toLowerCase() === "month") return true;
+    const mode = String(timeframeMode || "").toLowerCase();
+    if (mode === "month") return true;
+    if (mode === "custom") {
+      const rows = data.daily || [];
+      const start = timeframeRange?.start || rows[0]?.run_date || "";
+      const end = timeframeRange?.end || rows[rows.length - 1]?.run_date || "";
+      return countDaysInclusive(start, end) > 1;
+    }
     return !shouldUseDailyCapacityGrain(data.daily || [], timeframeMode, timeframeRange);
   }, [data.daily, focusedDay, zoomedMonth, timeframeMode, timeframeRange]);
   const totalTowerCapacity = useMemo(
