@@ -25,6 +25,11 @@ import LossTimeThresholdWidget from "./LossTimeThresholdWidget.jsx";
 import KpiCard from "./KpiCard.jsx";
 
 const CAPACITY_WINDOW_MINUTES = 240;
+const PF_COMPLIANCE_MINUTES_BY_PLANT = { baroda: 180, manesar: 180, trivandrum: 150 };
+function pfComplianceMinutes(plantName) {
+  const key = String(plantName || "").toLowerCase().trim();
+  return PF_COMPLIANCE_MINUTES_BY_PLANT[key] ?? CAPACITY_WINDOW_MINUTES;
+}
 const CAPACITY_PAGE_SIZE = 7;
 const PLANT_CAPACITY_PAGE_SIZE = 31;
 const DAILY_CAPACITY_FOLDER_VIEW_ENABLED = false;
@@ -116,6 +121,7 @@ export default function Dashboard({
   timeframeMode,
   timeframeRange,
 }) {
+  const plantCapacityWindowMinutes = pfComplianceMinutes(selectedPlant);
   const [focusedDay, setFocusedDay] = useState("");
   const [zoomedMonth, setZoomedMonth] = useState("");
   const [selectedBreakdownKeys, setSelectedBreakdownKeys] = useState(DEFAULT_BREAKDOWN_KEYS);
@@ -323,8 +329,8 @@ export default function Dashboard({
     const sourceTowerDetails = !focusedDay && zoomedMonth
       ? (data.tower_details || []).filter((row) => getMonthKey(row.run_date) === zoomedMonth)
       : (data.tower_details || []);
-    return buildTowerBreakdownSourceRows(sourceTowerDetails, focusedDay, data.all_tower_profiles || []);
-  }, [data.tower_details, data.all_tower_profiles, focusedDay, zoomedMonth]);
+    return buildTowerBreakdownSourceRows(sourceTowerDetails, focusedDay, data.all_tower_profiles || [], plantCapacityWindowMinutes);
+  }, [data.tower_details, data.all_tower_profiles, focusedDay, zoomedMonth, plantCapacityWindowMinutes]);
 
   const breakdownProductionDays = focusedDay
     ? 1
@@ -333,7 +339,7 @@ export default function Dashboard({
       : data.daily.length;
 
   const towerBreakdown = useMemo(() => {
-    const rows = aggregateResourceCapacitySplit(breakdownTowerDetails, "tower", breakdownProductionDays);
+    const rows = aggregateResourceCapacitySplit(breakdownTowerDetails, "tower", breakdownProductionDays, plantCapacityWindowMinutes);
     return rows.map((row) => {
       if (row.uv_tower) return row;
       // GNP production runs only on UV towers — absorb GNP minutes into SNP for non-UV rows
@@ -345,10 +351,10 @@ export default function Dashboard({
         runtime_gnp_percentage: 0,
       };
     });
-  }, [breakdownTowerDetails, breakdownProductionDays]);
+  }, [breakdownTowerDetails, breakdownProductionDays, plantCapacityWindowMinutes]);
   const folderBreakdown = useMemo(
-    () => aggregateResourceCapacitySplit(breakdownDetails, "folder", breakdownProductionDays),
-    [breakdownDetails, breakdownProductionDays]
+    () => aggregateResourceCapacitySplit(breakdownDetails, "folder", breakdownProductionDays, plantCapacityWindowMinutes),
+    [breakdownDetails, breakdownProductionDays, plantCapacityWindowMinutes]
   );
   const showFolderOverrunDays = useMemo(() => {
     if (focusedDay) return false;
@@ -435,6 +441,7 @@ export default function Dashboard({
           onSelectDay={setFocusedDay}
           zoomedMonth={zoomedMonth}
           onZoomedMonthChange={setZoomedMonth}
+          capacityWindowMinutes={plantCapacityWindowMinutes}
         />
       </section>
 
@@ -869,7 +876,7 @@ function ChatMessageContent({ content, role }) {
   );
 }
 
-function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timeframeRange, selectedDay, onSelectDay, zoomedMonth, onZoomedMonthChange }) {
+function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timeframeRange, selectedDay, onSelectDay, zoomedMonth, onZoomedMonthChange, capacityWindowMinutes = CAPACITY_WINDOW_MINUTES }) {
   const [pageStart, setPageStart] = useState(0);
   const [viewMode, setViewMode] = useState("plant");
   const [summaryPopover, setSummaryPopover] = useState(null);
@@ -878,8 +885,8 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
   const effectiveViewMode = DAILY_CAPACITY_FOLDER_VIEW_ENABLED ? viewMode : "plant";
 
   const chartModel = useMemo(
-    () => buildCapacitySplitModel(daily, details, towerDetails),
-    [daily, details, towerDetails]
+    () => buildCapacitySplitModel(daily, details, towerDetails, capacityWindowMinutes),
+    [daily, details, towerDetails, capacityWindowMinutes]
   );
 
   const { days, folders, rows, plantRows, totalTowerCount } = chartModel;
@@ -1123,7 +1130,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
           {isPlantView ? (
             <div className="inline-flex items-center gap-1.5">
               <span className="h-3 w-3 rounded-sm border border-slate-300 bg-white" />
-              <span>Plant capacity: {formatNumber(folders.length)} folders × 240 min</span>
+              <span>Plant capacity: {formatNumber(folders.length)} folders × {formatNumber(capacityWindowMinutes)} min</span>
             </div>
           ) : (
             <div className="inline-flex items-center gap-1.5">
@@ -1320,7 +1327,7 @@ function CapacitySplitChart({ daily, details, towerDetails, timeframeMode, timef
             const dayIndex = visibleDays.indexOf(rowKey);
             const folder = isPlantView ? { alias: "Plant", color: "#334155" } : folders[row.folderIndex];
             const x = xFor(dayIndex, isPlantView ? 0 : row.folderIndex);
-            const rowCapacity = Math.max(Number(row.total_capacity || CAPACITY_WINDOW_MINUTES), 1);
+            const rowCapacity = Math.max(Number(row.total_capacity || capacityWindowMinutes), 1);
             let cursorY = yFor(0);
             const segmentLayouts = (row.segments || [])
               .map((segment) => {
@@ -2181,7 +2188,7 @@ function TooltipRow({ label, value, color }) {
   );
 }
 
-function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = []) {
+function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = [], capacityWindowMinutes = CAPACITY_WINDOW_MINUTES) {
   const days = [...(dailyRows || [])]
     .map((day) => day.run_date)
     .filter(Boolean)
@@ -2211,7 +2218,7 @@ function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = []) {
           downtime: 0,
           runtime: 0,
           spare_time: 0,
-          idle_time: CAPACITY_WINDOW_MINUTES
+          idle_time: capacityWindowMinutes
         };
 
         rows.push({
@@ -2223,12 +2230,12 @@ function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = []) {
           twin_folder_group: "",
           overrun_minutes: 0,
           ...idleValues,
-          segments: buildCapacitySegments(idleValues)
+          segments: buildCapacitySegments(idleValues, capacityWindowMinutes)
         });
         return;
       }
 
-      const values = normalizeCapacityValues(detail);
+      const values = normalizeCapacityValues(detail, capacityWindowMinutes);
 
       rows.push({
         run_date: runDate,
@@ -2239,12 +2246,12 @@ function buildCapacitySplitModel(dailyRows, detailRows, towerDetailRows = []) {
         twin_folder_group: detail.twin_folder_group || "",
         overrun_minutes: cleanNumber(Math.max(Number(detail.overrun_minutes || 0), 0)),
         ...values,
-        segments: buildCapacitySegments(values)
+        segments: buildCapacitySegments(values, capacityWindowMinutes)
       });
     });
   }
 
-  const folderPlantRows = buildPlantCapacityRows(days, rows, folders.length);
+  const folderPlantRows = buildPlantCapacityRows(days, rows, folders.length, capacityWindowMinutes);
   const towerPlantRows = buildTowerPlantCapacityRows(days, dailyRows, towerDetailRows);
 
   return {
@@ -2416,7 +2423,7 @@ function buildTowerPlantCapacityRows(days, dailyRows, towerDetailRows = []) {
     .filter(Boolean);
 }
 
-function buildPlantCapacityRows(days, rows, folderCount) {
+function buildPlantCapacityRows(days, rows, folderCount, capacityWindowMinutes = CAPACITY_WINDOW_MINUTES) {
   const rowsByDay = new Map();
 
   for (const row of rows) {
@@ -2428,7 +2435,7 @@ function buildPlantCapacityRows(days, rows, folderCount) {
   return days.map((runDate) => {
     const dayRows = rowsByDay.get(runDate) || [];
     const totalFolders = Math.max(folderCount, dayRows.length, 1);
-    const totalCapacity = totalFolders * CAPACITY_WINDOW_MINUTES;
+    const totalCapacity = totalFolders * capacityWindowMinutes;
     const values = normalizePlantCapacityValues({
       waiting_time: sumCapacityRows(dayRows, "waiting_time"),
       loss_time: sumCapacityRows(dayRows, "loss_time"),
@@ -3060,11 +3067,11 @@ function normalizeRuntimeSegments(runtimeSegments, targetRuntime, capacityLimit 
   return finalizeRuntimeSegmentMetrics(normalized, downtime);
 }
 
-function normalizeCapacityValues(detail) {
-  const waitingTime = clampMinutes(detail.waiting_time);
-  const lossTime = clampMinutes(detail.lost_time);
-  const downtime = clampMinutes(detail.downtime);
-  const runtime = clampMinutes(detail.runtime);
+function normalizeCapacityValues(detail, capacityWindowMinutes = CAPACITY_WINDOW_MINUTES) {
+  const waitingTime = clampMinutes(detail.waiting_time, capacityWindowMinutes);
+  const lossTime = clampMinutes(detail.lost_time, capacityWindowMinutes);
+  const downtime = clampMinutes(detail.downtime, capacityWindowMinutes);
+  const runtime = clampMinutes(detail.runtime, capacityWindowMinutes);
   const nonSpareValues = {
     waiting_time: waitingTime,
     loss_time: lossTime,
@@ -3074,23 +3081,23 @@ function normalizeCapacityValues(detail) {
   const nonSpareTotal = Object.values(nonSpareValues).reduce((total, value) => total + value, 0);
   const hasProvidedSpare = Number.isFinite(Number(detail.buffer_time));
   const hasProvidedIdle = Number.isFinite(Number(detail.idle_time));
-  const idleTime = hasProvidedIdle ? clampMinutes(detail.idle_time) : 0;
+  const idleTime = hasProvidedIdle ? clampMinutes(detail.idle_time, capacityWindowMinutes) : 0;
   const spareTime = hasProvidedSpare
-    ? clampMinutes(detail.buffer_time)
-    : cleanNumber(Math.max(CAPACITY_WINDOW_MINUTES - nonSpareTotal - idleTime, 0));
+    ? clampMinutes(detail.buffer_time, capacityWindowMinutes)
+    : cleanNumber(Math.max(capacityWindowMinutes - nonSpareTotal - idleTime, 0));
   const values = {
     ...nonSpareValues,
     spare_time: spareTime,
     idle_time: idleTime,
-    runtime_segments: normalizeRuntimeSegments(detail.runtime_segments, runtime, CAPACITY_WINDOW_MINUTES, downtime)
+    runtime_segments: normalizeRuntimeSegments(detail.runtime_segments, runtime, capacityWindowMinutes, downtime)
   };
   const total = cleanNumber(nonSpareTotal + spareTime + idleTime);
 
-  if (total <= CAPACITY_WINDOW_MINUTES) {
+  if (total <= capacityWindowMinutes) {
     return values;
   }
 
-  let overage = cleanNumber(total - CAPACITY_WINDOW_MINUTES);
+  let overage = cleanNumber(total - capacityWindowMinutes);
   const normalized = { ...values };
 
   for (const key of ["spare_time", "idle_time", "runtime", "downtime", "loss_time", "waiting_time"]) {
@@ -3101,13 +3108,13 @@ function normalizeCapacityValues(detail) {
     overage = cleanNumber(overage - reduction);
   }
 
-  normalized.runtime_segments = normalizeRuntimeSegments(normalized.runtime_segments, normalized.runtime, CAPACITY_WINDOW_MINUTES, normalized.downtime);
+  normalized.runtime_segments = normalizeRuntimeSegments(normalized.runtime_segments, normalized.runtime, capacityWindowMinutes, normalized.downtime);
 
   return normalized;
 }
 
-function clampMinutes(value) {
-  return Math.min(Math.max(Number(value || 0), 0), CAPACITY_WINDOW_MINUTES);
+function clampMinutes(value, capacityWindowMinutes = CAPACITY_WINDOW_MINUTES) {
+  return Math.min(Math.max(Number(value || 0), 0), capacityWindowMinutes);
 }
 
 function getFolderShortName(folderKey) {
@@ -3292,7 +3299,7 @@ function normalizeResourceBreakdownValues(row) {
   };
 }
 
-function buildTowerBreakdownSourceRows(towerRows, focusedDay, allTowerProfiles = []) {
+function buildTowerBreakdownSourceRows(towerRows, focusedDay, allTowerProfiles = [], capacityWindowMinutes = CAPACITY_WINDOW_MINUTES) {
   const rows = Array.isArray(towerRows) ? towerRows : [];
 
   // Build a complete tower map: actual rows first, then fill in any towers from the
@@ -3346,15 +3353,15 @@ function buildTowerBreakdownSourceRows(towerRows, focusedDay, allTowerProfiles =
       downtime: 0,
       runtime: 0,
       buffer_time: 0,
-      idle_time: CAPACITY_WINDOW_MINUTES,
-      available_capacity: CAPACITY_WINDOW_MINUTES,
+      idle_time: capacityWindowMinutes,
+      available_capacity: capacityWindowMinutes,
       runtime_segments: [],
     }));
 
   return [...rowsForDay, ...idleTowerRows];
 }
 
-function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
+function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays, capacityWindowMinutes = CAPACITY_WINDOW_MINUTES) {
   if (!selectedProductionDays || rows.length === 0) return [];
 
   const grouped = new Map();
@@ -3411,9 +3418,9 @@ function aggregateResourceCapacitySplit(rows, nameKey, selectedProductionDays) {
 
   return Array.from(grouped.values())
     .map((row) => {
-      const selectedCapacity = selectedProductionDays * CAPACITY_WINDOW_MINUTES;
-      const plannedCapacity = row.plannedDates.size * CAPACITY_WINDOW_MINUTES;
-      const observedCapacity = row.observedDates.size * CAPACITY_WINDOW_MINUTES;
+      const selectedCapacity = selectedProductionDays * capacityWindowMinutes;
+      const plannedCapacity = row.plannedDates.size * capacityWindowMinutes;
+      const observedCapacity = row.observedDates.size * capacityWindowMinutes;
       const missingUnplannedTime = Math.max(selectedCapacity - observedCapacity, 0);
       const capacityBasis = selectedCapacity;
       const breakdownStacks = FOLDER_BREAKDOWN_STACKS;

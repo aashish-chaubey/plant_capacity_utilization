@@ -470,7 +470,9 @@ async def build_chat_response(
         "- 'unscheduled time' means Unplanned Time, not Lost Time. Unplanned Time is capacity where the folder/tower was not scheduled or available for production.\n"
         "- 'spare time' / 'spare capacity': always buffer_time (= spare_time_min in exact_dashboard.folders), never unplanned_time.\n"
         "- 'wait-time percentage' / 'waiting-time percentage': Waiting Time / Available Capacity * 100. "
-        "For a folder-night, use available_capacity_min (normally 240 minutes) as the denominator. "
+        "For a folder-night, use available_capacity_min as the denominator — normally 240 minutes, but some plants "
+        "(e.g. Baroda, Manesar, Trivandrum) have an earlier print-finish compliance cutoff, so their per-folder-night "
+        "capacity is smaller (180 or 150 minutes); always use the actual available_capacity_min value provided, never assume 240. "
         "Never divide waiting time by runtime + waiting time.\n"
         "- 'average spare time per folder' or 'spare time for each folder': use exact_dashboard.folders[].spare_time_min / active_nights. "
         "List every folder with its average spare time per active night in minutes.\n"
@@ -512,7 +514,8 @@ async def build_chat_response(
         "- Downtime: unplanned stoppages during an active run.\n"
         "- Run Time: net productive print time. For editions already printing before midnight, count only the portion from midnight to Print Finish.\n"
         "- Spare Time: unused capacity inside the reference window after all other components are accounted for. "
-        "Formula: Spare Time = 240 - (Wait + Loss + Downtime + Run). It cannot be negative.\n"
+        "Formula: Spare Time = Available Capacity - (Wait + Loss + Downtime + Run), where Available Capacity is "
+        "available_capacity_min (normally 240 minutes, but 180/150 for compliance-cutoff plants like Manesar/Trivandrum). It cannot be negative.\n"
         "- Unplanned Time: periods where the folder or tower was not scheduled or available for production.\n"
         "- Utilized Time: Runtime (SNP + GNP) + Overrun (delayed print-finish minutes) + Lost Time + Wait Time + Downtime. "
         "Do not include Spare Time or Unplanned Time.\n"
@@ -2079,7 +2082,8 @@ def _build_chat_context(
     for t, v in tower_buckets.items():
         active_nights = len(v["dates"])
         unplanned_nights = max(int(production_days) - active_nights, 0) if production_days > 0 else 0
-        unplanned_capacity_min = unplanned_nights * CAPACITY_MINUTES_PER_FOLDER_DAY
+        tower_plant = next(iter(v["plants"]), None)
+        unplanned_capacity_min = unplanned_nights * _pf_compliance_minutes(tower_plant)
         non_wait_lost_time = v["change_over_time"] + v["late_start_time"] + v["reflong_related_downtime"]
         runtime_segments = _runtime_segments_for_rows(v["rows"])
         tower_rows.append({
@@ -6228,7 +6232,9 @@ def _exact_daily_rows(
                 if _clean_text(row.get("folder")) and _is_active_folder_row(row)
             })
             capacity_folders = _number(daily.get("capacity_folders_count")) or len(folder_keys)
-            available = _number(daily.get("available_capacity")) or capacity_folders * CAPACITY_MINUTES_PER_FOLDER_DAY
+            available = _number(daily.get("available_capacity")) or capacity_folders * _pf_compliance_minutes(
+                details[0].get("plant_name")
+            )
             runtime = sum(_number(row.get("runtime")) for row in details)
             waiting_time = sum(_number(row.get("waiting_time")) for row in details)
             loss_time = sum(_loss_time_minutes(row) for row in details)
@@ -6307,7 +6313,8 @@ def _exact_folder_rows(folder_rows: list[dict[str, Any]], dates: list[str]) -> l
         active_rows = [row for row in details if _is_active_folder_row(row)]
         dates_with_rows = {_clean_text(row.get("run_date")) for row in details if row.get("run_date")}
         missing_days = max(production_days - len(dates_with_rows), 0)
-        possible_capacity = production_days * CAPACITY_MINUTES_PER_FOLDER_DAY if production_days else sum(
+        folder_plant = details[0].get("plant_name") if details else None
+        possible_capacity = production_days * _pf_compliance_minutes(folder_plant) if production_days else sum(
             _available_minutes(row) for row in details
         )
         active_capacity = sum(_available_minutes(row) for row in active_rows)
@@ -6317,7 +6324,7 @@ def _exact_folder_rows(folder_rows: list[dict[str, Any]], dates: list[str]) -> l
         downtime = sum(_number(row.get("downtime")) for row in details)
         overrun_total = sum(_number(row.get("overrun_minutes")) for row in details)
         spare_time = sum(_number(row.get("buffer_time")) for row in details)
-        unplanned_time = sum(_number(row.get("idle_time")) for row in details) + missing_days * CAPACITY_MINUTES_PER_FOLDER_DAY
+        unplanned_time = sum(_number(row.get("idle_time")) for row in details) + missing_days * _pf_compliance_minutes(folder_plant)
         active_runtime = sum(_number(row.get("runtime")) for row in active_rows)
         active_waiting_time = sum(_number(row.get("waiting_time")) for row in active_rows)
         active_loss_time = sum(_loss_time_minutes(row) for row in active_rows)
@@ -7991,7 +7998,8 @@ def _build_folder_utilization_analysis(
     for folder in folders:
         rows = grouped.get(folder, [])
         machine, folder_name = _split_machine_folder(folder)
-        possible_capacity = production_days * CAPACITY_MINUTES_PER_FOLDER_DAY if production_days else sum(
+        folder_plant = rows[0].get("plant_name") if rows else None
+        possible_capacity = production_days * _pf_compliance_minutes(folder_plant) if production_days else sum(
             _available_minutes(row) for row in rows
         )
         active_capacity = sum(_available_minutes(row) for row in rows)
@@ -8400,7 +8408,7 @@ def _daily_folder_utilization_percentages(rows: list[dict[str, Any]], dates: lis
             _utilization_pct(
                 _number(row.get("runtime")),
                 _number(row.get("overrun_minutes")),
-                CAPACITY_MINUTES_PER_FOLDER_DAY,
+                _available_minutes(row),
                 _number(row.get("waiting_time")),
                 _loss_time_minutes(row),
                 _number(row.get("downtime")),
@@ -8576,7 +8584,7 @@ def _split_machine_folder(value: str) -> tuple[str, str]:
 
 def _available_minutes(row: dict[str, Any]) -> float:
     available = _number(row.get("available_capacity"))
-    return available if available > 0 else CAPACITY_MINUTES_PER_FOLDER_DAY
+    return available if available > 0 else _pf_compliance_minutes(row.get("plant_name"))
 
 
 def _speed_from_print_order(print_order: float, runtime_minutes: float) -> float:

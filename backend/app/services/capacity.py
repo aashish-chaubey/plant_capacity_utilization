@@ -1156,7 +1156,8 @@ def calculate_folder_day_metrics(
             metrics[column] = 0.0
         metrics[column] = pd.to_numeric(metrics[column], errors="coerce").fillna(0.0)
 
-    metrics["available_capacity"] = CAPACITY_MINUTES_PER_FOLDER_DAY
+    compliance_minutes = metrics["Plant Name"].apply(_pf_compliance_minutes)
+    metrics["available_capacity"] = compliance_minutes
 
     # Normal downtime excludes reflong-related downtime.
     metrics["downtime"] = (
@@ -1177,7 +1178,6 @@ def calculate_folder_day_metrics(
         metrics["available_capacity"] - metrics["runtime"] - metrics["downtime"] - metrics["waiting_time"]
     ).clip(lower=0)
     metrics["lost_time"] = calculated_lost_time.clip(upper=remaining_capacity)
-    compliance_minutes = metrics["Plant Name"].apply(_pf_compliance_minutes)
 
     over_compliance_minutes = (
         metrics["runtime"]
@@ -1311,12 +1311,13 @@ def _add_unplanned_folder_day_rows(
 
 
 def _unplanned_folder_day_row(report_date: date, folder_reference: dict[str, str]) -> dict[str, Any]:
+    compliance_minutes = _pf_compliance_minutes(folder_reference["plant_name"])
     return {
         REPORT_DATE_COLUMN: report_date,
         "Plant Name": folder_reference["plant_name"],
         "Machine": folder_reference["machine"],
         "Folder": folder_reference["folder"],
-        "available_capacity": CAPACITY_MINUTES_PER_FOLDER_DAY,
+        "available_capacity": compliance_minutes,
         "gross_runtime": 0.0,
         "scheduled_runtime": 0.0,
         "overlap_minutes": 0.0,
@@ -1324,7 +1325,7 @@ def _unplanned_folder_day_row(report_date: date, folder_reference: dict[str, str
         "lost_time": 0.0,
         "downtime": 0.0,
         "buffer_time": 0.0,
-        "idle_time": CAPACITY_MINUTES_PER_FOLDER_DAY,
+        "idle_time": compliance_minutes,
         "change_over_time": 0.0,
         "waiting_time": 0.0,
         "reflong_related_downtime": 0.0,
@@ -2614,15 +2615,8 @@ def calculate_daily_metrics(folder_day_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     daily["active_folders_count"] = daily["active_folders_count"].astype(int)
-    capacity_folders_count = int(daily["capacity_folder_units"].max())
-    fixed_daily_capacity = capacity_folders_count * CAPACITY_MINUTES_PER_FOLDER_DAY
-    idle_time = (
-        fixed_daily_capacity - daily["available_capacity"]
-    ).clip(lower=0)
-
-    daily["capacity_folders_count"] = capacity_folders_count
-    daily["available_capacity"] = fixed_daily_capacity
-    daily["idle_time"] = idle_time + daily["active_idle_time"]
+    daily["capacity_folders_count"] = int(daily["capacity_folder_units"].max())
+    daily["idle_time"] = daily["active_idle_time"]
     daily = daily.drop(columns=["active_idle_time", "capacity_folder_units"])
 
     daily["utilization_percentage"] = daily.apply(

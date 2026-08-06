@@ -18,6 +18,11 @@ import LandingPage from "./components/LandingPage.jsx";
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const FISCAL_YEAR_START_MONTH = 4;
 const CAPACITY_WINDOW_MINUTES = 240;
+const PF_COMPLIANCE_MINUTES_BY_PLANT = { baroda: 180, manesar: 180, trivandrum: 150 };
+function pfComplianceMinutes(plantName) {
+  const key = String(plantName || "").toLowerCase().trim();
+  return PF_COMPLIANCE_MINUTES_BY_PLANT[key] ?? CAPACITY_WINDOW_MINUTES;
+}
 const PERIOD_MODES = ["annual", "half", "quarter", "month"];
 const TIMEFRAME_TABS = [
   ["annual", "Fiscal yr"],
@@ -45,7 +50,7 @@ const METRIC_DEFINITIONS = [
   },
   {
     term: "Spare Time",
-    definition: "Unused capacity remaining within the 00:00-04:00 (Regardless of the early PF schedule of 3 plants) reference window after all other components have been accounted for. Formula: Spare Time = 240 min - (Wait time + Lost time + Downtime + Runtime). Spare Time cannot be negative in case of Print Finish delay after 4:00 am."
+    definition: "Unused capacity remaining within the 00:00 - Sch. Print Finish Reference window after all other components have been accounted for. Formula: Spare Time = Reference window - (Wait time + Lost time + Downtime + Runtime). Spare Time cannot be negative in case of Print Finish delay."
   },
   {
     term: "Unplanned Capacity",
@@ -961,7 +966,7 @@ function filterCapacityDataByScope(result, selectedPlant, selectedFolders) {
   const towerDetails = selectedFolderSet.size > 0
     ? plantTowerDetails.filter((row) => selectedFolderSet.has(row.folder))
     : plantTowerDetails;
-  const daily = buildDailyRowsFromDetails(details, dateUniverse);
+  const daily = buildDailyRowsFromDetails(details, dateUniverse, null, selectedPlant);
 
   // Collect all tower profiles (name + UV status) from the full pre-timeframe plant dataset.
   // Used by the drilldown to inject idle rows for towers absent in the selected period.
@@ -1183,7 +1188,7 @@ function getLossTime(row) {
   );
 }
 
-function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolders = null) {
+function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolders = null, selectedPlant = null) {
   const dates = (dateUniverse?.length ? dateUniverse : Array.from(
     new Set((detailRows || []).map((row) => row.run_date).filter(Boolean))
   )).sort();
@@ -1211,7 +1216,7 @@ function buildDailyRowsFromDetails(detailRows, dateUniverse, fixedCapacityFolder
       rows.filter(isActiveCapacityDetailRow).map((row) => row.folder)
     ).size;
     const activeAvailableCapacity = sumBy(rows, "available_capacity");
-    const availableCapacity = capacityFoldersCount * CAPACITY_WINDOW_MINUTES;
+    const availableCapacity = capacityFoldersCount * pfComplianceMinutes(selectedPlant);
     const runtime = sumBy(rows, "runtime");
     const waitingTime = sumBy(rows, "waiting_time");
     const lostTime = sumBy(rows, "lost_time");
