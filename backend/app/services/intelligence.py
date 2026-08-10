@@ -480,7 +480,8 @@ async def build_chat_response(
         "(delayed print-finish minutes) + Lost Time + Wait Time + Downtime. Spare time and unplanned time are excluded.\n"
         "- 'utilization' / 'utilisation' / 'capacity utilization' with no qualifier: "
         "Capacity Utilization % = Utilized Time ÷ Available Time × 100. Calculated at folder level only — towers do not "
-        "have a utilization percentage.\n"
+        "have a utilization percentage. Check exact_dashboard.folder_alternation_groups before characterizing a low "
+        "folder utilization figure — see OPERATIONAL MODEL below.\n"
         "- 'downtime': mechanical stoppage time, not lost time and not waiting time.\n"
         "- Tower questions: always check towers, tower_runtime_mix, tower_availability, "
         "tower_downtime_reason_attribution, and editions_by_tower before saying data is unavailable. "
@@ -505,7 +506,16 @@ async def build_chat_response(
         "edition attributes.\n"
         "- In book_details, the raw 'Total Downtime' field INCLUDES Reflong time. True mechanical downtime for "
         "that row = Total Downtime − Reflong time; don't quote book_details' Total Downtime as Downtime "
-        "without that adjustment (the dashboard's own downtime_min already applies it).\n\n"
+        "without that adjustment (the dashboard's own downtime_min already applies it).\n"
+        "- Some machines physically alternate which folder is fitted — e.g. F-1 and F-2 are swapped in and out, "
+        "so only one of them can run on a given night, rather than both being independently available every "
+        "night. This is detected from activity patterns, not configured, and shows up as "
+        "exact_dashboard.folder_alternation_groups (one row per affected machine) plus alternates_with / "
+        "alternation_note / group_pooled_utilization_pct on the affected rows in exact_dashboard.folders. "
+        "When answering a utilization question about a folder that carries this flag, don't describe its "
+        "individual utilization_pct alone as underperformance — explain that the low figure partly reflects "
+        "nights the sibling folder was fitted instead, and cite group_pooled_utilization_pct (or the group's "
+        "pooled_utilization_pct) as the fairer combined number for that machine.\n\n"
 
         "OPERATING DEFINITIONS:\n"
         "- Wait Time: idle time at the start of the 00:00 window where the press cannot operate because editorial LPR has not been issued. "
@@ -520,7 +530,7 @@ async def build_chat_response(
         "- Utilized Time: Runtime (SNP + GNP) + Overrun (delayed print-finish minutes) + Lost Time + Wait Time + Downtime. "
         "Do not include Spare Time or Unplanned Time.\n"
         "- Capacity Utilization % / Utilisation: Utilized Time ÷ Available Time × 100. Folder level only — "
-        "there is no tower-level utilization percentage.\n"
+        "there is no tower-level utilization percentage. See the folder-alternation caveat under OPERATIONAL MODEL.\n"
         "- Spare Capacity: (Spare Time / (Total Available Time - Unplanned Time)) * 100.\n"
         "- Speed Efficiency / Efficiency %: measures how fast the machine actually ran relative to its committed speed. "
         "Calculated in four steps:\n"
@@ -548,12 +558,19 @@ async def build_chat_response(
         "treat it as N separate sub-questions and answer each one in order under a clear heading. "
         "Do not collapse them into a single number. Structure: answer sub-question 1 fully → answer sub-question 2 → etc.\n"
         "For delayed print finish questions: use gnp_snp_folder_analysis.delayed_finish_complexity — it already has "
-        "run_date, folder, print_finish_time, overrun_minutes, complexity_codes, complexity_categories, largest_components, editions per delayed night. "
+        "run_date, folder, print_finish_time, overrun_minutes, complexity_codes, complexity_categories, largest_components, root_causes, editions per delayed night. "
         "List every delayed night as a table row, then summarise which complexity categories appear most in delayed nights.\n"
         "For 'average spare time when minimum N GNP folders are running': use gnp_snp_folder_analysis.nights_with_min_3_gnp_folders — "
         "it has one row per qualifying night with avg_spare_time_min already computed. Average that column across all rows.\n"
-        "For delay reasons on specific nights: match the run_date values from delayed_pf or delayed_finish_complexity against "
-        "loss_time.all_days (which has dominant_driver per date) and downtime_by_reason (overall top reasons).\n\n"
+        "For 'why was this folder/night delayed' or 'what caused the delay' questions: the matching delayed_pf or "
+        "delayed_finish_complexity row's root_causes field IS the answer — it is the exact same root-cause classification "
+        "(Low average speed, High complexity, High downtime, High wait time, High lost time) shown as pills on the "
+        "dashboard's Delayed Print Finish widget for that row, already correctly adjusted for Twin Folder Mode where "
+        "applicable. State every cause listed in root_causes (usually 1-2), not just the single largest time component. "
+        "'Low average speed' means that night's implied speed (print order ÷ runtime) fell short of that folder's own "
+        "period-average baseline speed by at least 10 minutes of run time — it is a comparison against the folder's own "
+        "history, not an absolute speed threshold. Use loss_time.all_days (dominant_driver) and downtime_by_reason only "
+        "for supporting detail underneath root_causes, never as a substitute for it.\n\n"
 
         "PREDICTION & EXTRAPOLATION RULES:\n"
         "When a question asks for a forecast, prediction, projection, or 'what will X be':\n"
@@ -1021,15 +1038,16 @@ def _call_planner(message: str, endpoint: str, api_key: str) -> dict[str, Any]:
 
 _QU_DECOMPOSER_SOURCES = """\
 exact_dashboard.daily       — per-date plant totals; fields: run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, night_type
-exact_dashboard.folders     — per-folder period totals; fields: resource (folder name), runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, active_nights, utilization_pct, spare_capacity_pct
+exact_dashboard.folders     — per-folder period totals; fields: resource (folder name), runtime_min, loss_time_min, downtime_min, waiting_time_min, spare_time_min, unplanned_time_min, active_nights, utilization_pct, spare_capacity_pct, alternates_with (list of sibling folder names, only present if this folder's machine alternates folders — see folder_alternation_groups), alternation_note, group_pooled_utilization_pct (combined utilization treating the alternating folders as one shared resource)
+exact_dashboard.folder_alternation_groups — one row per machine whose folders are alternately deployed (only one physically fitted/running at a time), detected from folder-day activity, not configured; fields: plant, machine, folders (list), exclusive_nights, concurrent_nights, idle_nights, engaged_nights, alternation_ratio_pct, pooled_utilization_pct, note. When this table has a row for a machine, that machine's individual folder utilization_pct figures understate real usage — always mention the pooled_utilization_pct alongside them for that machine.
 exact_dashboard.folder_days — exactly one row per folder per date; fields: plant, machine, folder_name, folder, run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, waiting_time_pct (= waiting_time_min / available_capacity_min * 100), spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, complexity_codes, complexity_categories, folder_has_gnp (bool: this folder ran any C5-C15), folder_has_gnp_complex (bool: this folder ran any C9-C15), folder_has_snp (bool: this folder ran any C1-C4), folder_has_snp_only (bool), folder_product_types, plant_night_type, plant_gnp_night, delayed_print_finish, overrun_minutes, print_finish_time. For what a specific folder printed, use folder_has_*; plant_night_type is only the whole-plant classification. For an arbitrary clock threshold such as "after 03:30", compare print_finish_time here; do not use delayed_pf unless the question asks about the compliance cutoff.
 loss_time.all_days          — per-date loss breakdown; fields: run_date, weekday, month, runtime_min, lost_time_min, waiting_time_min, loss_pct, loss_components (dict), dominant_driver
-delayed_pf                  — late-night folder rows only; fields: run_date, folder, overrun_minutes, loss_time_min, downtime_min, waiting_time_min, runtime_min, night_type, editions
+delayed_pf                  — late-night folder rows only; fields: run_date, folder, overrun_minutes, loss_time_min, downtime_min, waiting_time_min, runtime_min, night_type, editions, largest_components (top time components: run/loss/wait/downtime/spare), root_causes (list of {cause, label, minutes} — the SAME root-cause classification the dashboard's Delayed Print Finish widget shows, 1-2 ranked entries from low_speed="Low average speed", high_complexity="High complexity", high_downtime="High downtime", high_wait_time="High wait time", high_lost_time="High lost time"), cause_scores (score for all 5 causes, 0 if below threshold). For "why was this folder delayed" questions, use root_causes/cause_scores as the primary answer — they are twin-folder-aware and match the dashboard exactly. "low_speed" means that night's implied speed (print order ÷ runtime) fell short of this folder's own period-average baseline speed by >=10 minutes of run time; it is not a raw speed value.
 towers                      — per-tower period totals; fields: tower, machine, runtime_min, downtime_min, loss_time_min, waiting_time_min, spare_time_min, active_nights, uv_tower. No utilization_pct — utilization is folder-level only.
 tower_days                  — per-tower per-date; fields: tower, run_date, weekday, month, runtime_min, downtime_min, loss_time_min, waiting_time_min, uv_tower. No utilization_pct — utilization is folder-level only.
 tower_runtime_mix           — runtime split by tower TYPE × product TYPE (use this for any question about SNP/GNP products running on UV/GNP or non-UV towers); fields: tower_type_key ("gnp_uv" or "non_uv"), tower_type (human label), product_type ("SNP", "GNP", or "Unknown"), runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count
 tower_runtime_segments      — segment-level runtime rows (most granular; use when tower_runtime_mix is not precise enough); fields: run_date, tower, tower_type_key, tower_type, uv_tower, product_type, complexity_code, category, minutes, print_order, committed_speed_cph, actual_speed_cph, efficiency_pct
-gnp_snp_folder_analysis     — precomputed GNP vs SNP folder-night comparisons. Use for GNP/SNP questions about average spare, loss, wait, LPR-to-start, reflong, downtime, delayed finish, and web break. Subtables include comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, delayed_finish_complexity, web_break_gnp_snp_tower_comparison.
+gnp_snp_folder_analysis     — precomputed GNP vs SNP folder-night comparisons. Use for GNP/SNP questions about average spare, loss, wait, LPR-to-start, reflong, downtime, delayed finish, and web break. Subtables include comparison_by_product_type, gnp_loss_breakdown_by_folder, nights_with_min_3_gnp_folders, delayed_finish_complexity, web_break_gnp_snp_tower_comparison. delayed_finish_complexity rows also carry largest_components, root_causes, and cause_scores — same fields and meaning as delayed_pf (see above).
 daily_efficiency            — per-date plant-wide efficiency summary (one row per production night); fields: run_date, total_po, total_runtime_min, total_dt_min, actual_speed_cph, committed_speed_cph, efficiency_pct. USE THIS for any question about efficiency by date, days above/below an efficiency threshold, or efficiency trends over time.
 downtime_by_reason          — top reasons ranked by event count; fields: reason, count, total_minutes
 complexity_by_code          — runtime by C1-C15 code; fields: code, runtime_min, print_order
@@ -1900,7 +1918,8 @@ def _execute_qu_plan(
         limit = qu_plan.get("limit")
         if isinstance(limit, int) and limit > 0:
             grouped = grouped[:limit]
-        return _format_plan_grouped_answer(source_key, metric_fields, group_field, grouped, wants_average)
+        answer = _format_plan_grouped_answer(source_key, metric_fields, group_field, grouped, wants_average)
+        return answer + _folder_alternation_footnote(group_field, metric_fields, grouped, context)
 
     # Scalar total / average (ungrouped)
     totals = {
@@ -2514,6 +2533,7 @@ def _compact_chat_context_for_llm(
                 limit=_lim("exact_dashboard.folder_days", 120, 5),
             ),
             "complexity_downtime_by_code": _compact_rows(exact.get("complexity_downtime_by_code") or [], limit=None),
+            "folder_alternation_groups": _compact_rows(exact.get("folder_alternation_groups") or [], limit=None),
         },
         "folders": _compact_rows(context.get("folders") or [], limit=None),
         "unused_folders": context.get("unused_folders") or [],
@@ -2750,6 +2770,10 @@ def _minimal_chat_context_for_llm(
             "daily": _compact_rows(exact.get("daily") or [], limit=120, max_list_items=10),
             "folders": _compact_rows(exact.get("folders") or [], limit=80, max_list_items=10),
             "folder_days": _compact_rows(exact.get("folder_days") or [], limit=30, max_list_items=10),
+            "folder_alternation_notes": [
+                note for group in (exact.get("folder_alternation_groups") or [])
+                if (note := group.get("note"))
+            ][:5],
         },
         "downtime_by_reason": {
             "top_reasons": _compact_rows(
@@ -3063,10 +3087,11 @@ def _build_exact_dashboard_context(
     )
     folder_keys = _sorted_unique(row.get("folder") for row in folder_rows)
     exact_daily_rows = _exact_daily_rows(daily_rows, folder_rows, dates, folder_keys)
-    exact_folder_rows = _exact_folder_rows(folder_rows, dates)
-    exact_folder_day_rows, folder_day_note = _exact_folder_day_rows(folder_rows, question)
     gnp_night_lookup_all = _gnp_night_lookup(folder_rows)
     exact_folder_day_rows_all = [_exact_folder_day_row(row, gnp_night_lookup_all) for row in folder_rows]
+    folder_alternation_groups = _build_folder_alternation_groups(exact_folder_day_rows_all)
+    exact_folder_rows = _exact_folder_rows(folder_rows, dates, folder_alternation_groups)
+    exact_folder_day_rows, folder_day_note = _exact_folder_day_rows(folder_rows, question)
     night_classification = _build_gnp_night_classification(folder_rows, dates)
     delayed_pf_rows = _build_delayed_pf_rows(folder_rows)
     complexity_downtime_by_code = _complexity_downtime_by_code(folder_rows)
@@ -3127,6 +3152,7 @@ def _build_exact_dashboard_context(
         "folder_days": exact_folder_day_rows,
         "folder_days_all": exact_folder_day_rows_all,
         "folder_day_note": folder_day_note,
+        "folder_alternation_groups": folder_alternation_groups,
         "complexity_downtime_by_code": complexity_downtime_by_code,
         "night_classification": night_classification,
         "delayed_pf": delayed_pf_rows[:500],
@@ -4373,7 +4399,7 @@ def _answer_gnp_snp_folder_question(question: str, context: dict[str, Any]) -> s
         if not rows:
             return "No print-finish rows beyond the cutoff were found in the selected period."
         return _markdown_table(
-            ["Date", "Folder", "Finish", "Overrun", "Product mix", "Complexity", "Largest components"],
+            ["Date", "Folder", "Finish", "Overrun", "Product mix", "Complexity", "Root cause", "Largest components"],
             [
                 [
                     row.get("run_date"),
@@ -4382,6 +4408,7 @@ def _answer_gnp_snp_folder_question(question: str, context: dict[str, Any]) -> s
                     row.get("overrun_minutes"),
                     row.get("product_mix"),
                     ", ".join(row.get("complexity_codes") or []),
+                    ", ".join(f"{c.get('label')}: {c.get('minutes')} min" for c in (row.get("root_causes") or [])),
                     ", ".join(f"{c.get('label')}: {c.get('minutes')} min" for c in (row.get("largest_components") or [])[:3]),
                 ]
                 for row in rows[:80]
@@ -4689,7 +4716,8 @@ def _answer_from_plan(plan: dict[str, Any] | None, message: str, context: dict[s
         if wants_ranking and metric_fields:
             metric = metric_fields[0]
             grouped = sorted(grouped, key=lambda row: -_number(row.get(metric)))
-        return _format_plan_grouped_answer(source_key, metric_fields, group_field, grouped, wants_average)
+        answer = _format_plan_grouped_answer(source_key, metric_fields, group_field, grouped, wants_average)
+        return answer + _folder_alternation_footnote(group_field, metric_fields, grouped, context)
 
     totals = {
         metric: _clean_number(sum(_number(row.get(metric)) for row in rows))
@@ -4715,6 +4743,7 @@ def _rows_for_plan_source(source_key: str, context: dict[str, Any]) -> list[dict
         "exact_dashboard.folders": exact.get("folders"),
         "exact_dashboard.folder_days": exact.get("folder_days_all") or exact.get("folder_days"),
         "exact_dashboard.daily": exact.get("daily"),
+        "exact_dashboard.folder_alternation_groups": exact.get("folder_alternation_groups"),
         "folders": context.get("folders"),
         "towers": context.get("towers"),
         "tower_runtime_mix": context.get("tower_runtime_mix"),
@@ -5391,6 +5420,37 @@ def _format_plan_grouped_answer(
     if len(rows) > 20:
         lines.append(f"\n*... {len(rows) - 20} more groups omitted.*")
     return "\n".join(lines)
+
+
+def _folder_alternation_footnote(
+    group_field: str,
+    metric_fields: list[str],
+    grouped_rows: list[dict[str, Any]],
+    context: dict[str, Any],
+) -> str:
+    """Append the alternation caveat when a folder/resource-grouped utilization answer includes a
+    folder whose machine alternates folders (see _build_folder_alternation_groups). Mirrors the
+    attribution_note footnote pattern used for tower downtime attribution
+    (_answer_tower_downtime_frequency_question)."""
+    if _normalize_field_name(group_field) not in {"folder", "resource"}:
+        return ""
+    if not any("utiliz" in _normalize_field_name(m) or "utilis" in _normalize_field_name(m) for m in metric_fields):
+        return ""
+    alternation_groups = (context.get("exact_dashboard") or {}).get("folder_alternation_groups") or []
+    if not alternation_groups:
+        return ""
+    group_values = {_clean_text(row.get("group")) for row in grouped_rows}
+    notes: list[str] = []
+    for group in alternation_groups:
+        note = group.get("note")
+        folder_names = [name for name in (group.get("folders") or []) if name]
+        if not note or not folder_names or note in notes:
+            continue
+        if any(folder_name in value for folder_name in folder_names for value in group_values):
+            notes.append(note)
+    if not notes:
+        return ""
+    return "\n\n" + "\n\n".join(f"*Note: {note}*" for note in notes)
 
 
 def _format_plan_count_answer(source_key: str, group_field: str, counts: list[tuple[str, int]]) -> str:
@@ -6299,13 +6359,127 @@ def _exact_daily_rows(
     return rows
 
 
-def _exact_folder_rows(folder_rows: list[dict[str, Any]], dates: list[str]) -> list[dict[str, Any]]:
+_FOLDER_ALTERNATION_MIN_NIGHTS = 5
+_FOLDER_ALTERNATION_RATIO_THRESHOLD = 0.75
+
+
+def _build_folder_alternation_groups(folder_day_rows_all: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Detect machines whose folders are alternately deployed (only one physically fitted at a
+    time) rather than independently available every night, purely from folder-day activity
+    patterns — no plant/machine/folder names are hardcoded, so this applies wherever the pattern
+    actually shows up in the data.
+
+    _add_unplanned_folder_day_rows() in capacity.py synthesizes a fully-idle row for every
+    configured folder on every production night it had no activity — including a folder that
+    structurally couldn't have run because a sibling folder was fitted on the machine instead.
+    That drags the idle folder's standalone utilization_pct down even on nights the machine
+    itself was busy on its sibling. When that pattern is detected here, we also compute a pooled
+    utilization that treats the alternating folders as one shared resource, for a fairer number
+    to cite alongside the individual ones.
+
+    Requires both/all sibling folders to be present in folder_day_rows_all to detect a pair — if
+    the chat context has been scoped down to a single folder, alternation for that folder's
+    machine won't be detected (nothing to compare against), which is a safe no-op, not a false
+    negative in the data itself.
+    """
+    by_machine: dict[tuple[str, str], dict[str, list[dict[str, Any]]]] = {}
+    for row in folder_day_rows_all:
+        plant = _clean_text(row.get("plant"))
+        machine = _clean_text(row.get("machine"))
+        run_date = _clean_text(row.get("run_date"))
+        if not plant or not machine or not run_date:
+            continue
+        nights = by_machine.setdefault((plant, machine), {})
+        nights.setdefault(run_date, []).append(row)
+
+    groups: list[dict[str, Any]] = []
+    for (plant, machine), nights in by_machine.items():
+        folder_names = _sorted_unique(
+            row.get("folder_name") for night_rows in nights.values() for row in night_rows
+        )
+        if len(folder_names) < 2:
+            continue
+
+        exclusive_nights = 0
+        concurrent_nights = 0
+        idle_nights = 0
+        pooled_runtime = pooled_overrun = pooled_loss = pooled_waiting = 0.0
+        pooled_downtime = pooled_available = 0.0
+
+        for night_rows in nights.values():
+            active_rows = [row for row in night_rows if row.get("active_night")]
+            if len(active_rows) == 1:
+                exclusive_nights += 1
+                counted_rows = active_rows
+            elif len(active_rows) >= 2:
+                concurrent_nights += 1
+                counted_rows = active_rows
+            else:
+                idle_nights += 1
+                # No folder ran — count the machine's available capacity once, not once per
+                # sibling folder, since only one folder could have been fitted anyway.
+                counted_rows = night_rows[:1]
+
+            for row in counted_rows:
+                pooled_runtime += _number(row.get("runtime_min"))
+                pooled_overrun += _number(row.get("overrun_minutes"))
+                pooled_loss += _number(row.get("loss_time_min"))
+                pooled_waiting += _number(row.get("waiting_time_min"))
+                pooled_downtime += _number(row.get("downtime_min"))
+                pooled_available += _number(row.get("available_capacity_min"))
+
+        engaged_nights = exclusive_nights + concurrent_nights
+        if engaged_nights < _FOLDER_ALTERNATION_MIN_NIGHTS:
+            continue
+        alternation_ratio = exclusive_nights / engaged_nights
+        if alternation_ratio < _FOLDER_ALTERNATION_RATIO_THRESHOLD:
+            continue
+
+        pooled_utilization_pct = _utilization_pct(
+            pooled_runtime, pooled_overrun, pooled_available, pooled_waiting, pooled_loss, pooled_downtime
+        )
+        folder_list = " and ".join(folder_names) if len(folder_names) == 2 else ", ".join(folder_names)
+        note = (
+            f"{folder_list} on {machine} are used alternately — only one folder ran on "
+            f"{exclusive_nights} of {engaged_nights} active night(s) ({alternation_ratio * 100:.0f}%) "
+            "in this period. Each folder's individual utilization is measured against every night "
+            "in the period, so nights the sibling folder was fitted instead count as idle for this "
+            f"one. Combined {machine} utilization treating {folder_list} as one shared resource is "
+            f"{pooled_utilization_pct:g}%."
+        )
+
+        groups.append({
+            "plant": plant,
+            "machine": machine,
+            "folders": folder_names,
+            "exclusive_nights": exclusive_nights,
+            "concurrent_nights": concurrent_nights,
+            "idle_nights": idle_nights,
+            "engaged_nights": engaged_nights,
+            "alternation_ratio_pct": _clean_number(alternation_ratio * 100),
+            "pooled_utilization_pct": pooled_utilization_pct,
+            "note": note,
+        })
+
+    return groups
+
+
+def _exact_folder_rows(
+    folder_rows: list[dict[str, Any]],
+    dates: list[str],
+    alternation_groups: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     production_days = len(dates)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in folder_rows:
         folder = _clean_text(row.get("folder"))
         if folder:
             grouped.setdefault(folder, []).append(row)
+
+    alternation_lookup: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for group in alternation_groups or []:
+        for folder_name in group.get("folders") or []:
+            alternation_lookup[(_clean_text(group.get("plant")), _clean_text(group.get("machine")), folder_name)] = group
 
     rows = []
     for folder in _sorted_unique(grouped.keys()):
@@ -6334,8 +6508,10 @@ def _exact_folder_rows(folder_rows: list[dict[str, Any]], dates: list[str]) -> l
         unplanned_nights = max(production_days - active_nights, 0)
         runtime_segments = _runtime_segments_for_rows(details)
         active_dates = _sorted_unique(row.get("run_date") for row in active_rows)
+        machine, folder_name = _split_machine_folder(folder)
+        alternation = alternation_lookup.get((_clean_text(folder_plant), machine, folder_name))
 
-        rows.append({
+        row_out = {
             "resource": _display_resource_name(folder),
             "runtime_min": _clean_number(runtime),
             "loss_time_min": _clean_number(loss_time),
@@ -6359,7 +6535,15 @@ def _exact_folder_rows(folder_rows: list[dict[str, Any]], dates: list[str]) -> l
             "complexity_categories": _complexity_categories_for_segments(runtime_segments),
             "runtime_segments": runtime_segments,
             "editions": _editions_for_rows(details),
-        })
+        }
+        if alternation:
+            row_out["alternates_with"] = [
+                name for name in alternation.get("folders") or [] if name != folder_name
+            ]
+            row_out["shared_machine_alternation"] = True
+            row_out["alternation_note"] = alternation.get("note")
+            row_out["group_pooled_utilization_pct"] = alternation.get("pooled_utilization_pct")
+        rows.append(row_out)
 
     rows.sort(key=lambda row: (-_number(row.get("runtime_min")), row.get("resource", "")))
     return rows
@@ -6948,6 +7132,7 @@ def _build_gnp_snp_folder_analysis(
     gnp_folder_buckets: dict[str, dict[str, Any]] = {}
     gnp_dates: dict[str, dict[str, Any]] = {}
     delayed_complexity_rows: list[dict[str, Any]] = []
+    speed_baselines = _folder_speed_baselines(folder_rows)
 
     def product_bucket(product_type: str) -> dict[str, Any]:
         return product_buckets.setdefault(product_type, {
@@ -7035,6 +7220,7 @@ def _build_gnp_snp_folder_analysis(
             folder_bucket["reflong_time_min"] += reflong_time
 
         if overrun > 0:
+            delayed_cause_scores = _delayed_pf_cause_scores(row, speed_baselines.get(_clean_text(row.get("folder")), 0.0))
             delayed_complexity_rows.append({
                 "run_date": run_date,
                 "folder": folder,
@@ -7048,6 +7234,10 @@ def _build_gnp_snp_folder_analysis(
                 "complexity_categories": row_categories,
                 "editions": _editions_for_rows([row]),
                 "largest_components": _largest_delayed_pf_components(row),
+                "cause_scores": delayed_cause_scores,
+                "root_causes": _delayed_pf_root_causes(delayed_cause_scores),
+                "twin_folder_mode": bool(row.get("twin_folder_mode")),
+                "twin_folder_group": _clean_text(row.get("twin_folder_group")),
             })
 
     comparison_rows = []
@@ -7267,6 +7457,7 @@ def _build_gnp_night_classification(folder_rows: list[dict[str, Any]], dates: li
 
 def _build_delayed_pf_rows(folder_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     gnp_night_lookup = _gnp_night_lookup(folder_rows)
+    speed_baselines = _folder_speed_baselines(folder_rows)
     rows = []
     for row in folder_rows:
         overrun = _number(row.get("overrun_minutes"))
@@ -7279,6 +7470,7 @@ def _build_delayed_pf_rows(folder_rows: list[dict[str, Any]]) -> list[dict[str, 
         machine, folder_name = _split_machine_folder(_clean_text(row.get("folder")))
         run_date = _clean_text(row.get("run_date"))
         is_gnp_night = gnp_night_lookup.get(run_date, False)
+        cause_scores = _delayed_pf_cause_scores(row, speed_baselines.get(_clean_text(row.get("folder")), 0.0))
         rows.append({
             "run_date": run_date,
             # Attached directly so GNP-vs-SNP-night questions don't need a join against the
@@ -7305,6 +7497,8 @@ def _build_delayed_pf_rows(folder_rows: list[dict[str, Any]]) -> list[dict[str, 
             "runtime_segments": runtime_segments,
             "editions": _editions_for_rows([row]),
             "largest_components": _largest_delayed_pf_components(row),
+            "cause_scores": cause_scores,
+            "root_causes": _delayed_pf_root_causes(cause_scores),
             "twin_folder_mode": bool(row.get("twin_folder_mode")),
             "twin_folder_group": _clean_text(row.get("twin_folder_group")),
         })
@@ -7714,6 +7908,133 @@ def _largest_delayed_pf_components(row: dict[str, Any]) -> list[dict[str, Any]]:
         for key, label, minutes in sorted(components, key=lambda item: -item[2])
         if minutes > 0
     ][:3]
+
+
+# ── Delayed print-finish ROOT CAUSE classification ──────────────────────────────────────────
+# Mirrors frontend/src/components/DelayedPrintFinishWidget.jsx's calculateCauseScores/
+# getRootCauses/buildBaselines exactly (same causes, thresholds, and tie-break rules) so the
+# dashboard widget and the AI chat always agree on why a given night was delayed. Unlike the
+# widget, _row_average_speed/_row_total_print_order do NOT re-divide by a twin-folder divisor —
+# capacity.py already halves effective_speed/print_order upstream for Twin Folder Mode segments
+# (_effective_print_order/_apportioned_print_order), so re-dividing here would silently
+# under-count speed a second time.
+_ROOT_CAUSE_ORDER = ["low_speed", "high_complexity", "high_downtime", "high_wait_time", "high_lost_time"]
+_ROOT_CAUSE_LABELS = {
+    "low_speed": "Low average speed",
+    "high_complexity": "High complexity",
+    "high_downtime": "High downtime",
+    "high_wait_time": "High wait time",
+    "high_lost_time": "High lost time",
+}
+_ROOT_CAUSE_THRESHOLDS = {
+    "downtime_minutes": 30,
+    "waiting_time_minutes": 30,
+    "lost_time_minutes": 40,
+    "speed_loss_minutes": 10,
+    "complex_minutes": 30,
+    "complex_share_pct": 40,
+}
+
+
+def _row_average_speed(row: dict[str, Any]) -> float:
+    """Minutes-weighted average CPH across this folder-night's runtime segments. Segment
+    print_order/effective_speed are already twin-folder-divisor-adjusted upstream in capacity.py."""
+    weighted_total = 0.0
+    minutes_total = 0.0
+    for segment in _runtime_segment_rows(row):
+        minutes = max(_number(segment.get("minutes")), 0.0)
+        speed = max(_number(segment.get("speed_cph")), 0.0)
+        if minutes > 0 and speed > 0:
+            weighted_total += speed * minutes
+            minutes_total += minutes
+    return weighted_total / minutes_total if minutes_total > 0 else 0.0
+
+
+def _row_total_print_order(row: dict[str, Any]) -> float:
+    return sum(max(_number(segment.get("print_order")), 0.0) for segment in _runtime_segment_rows(row))
+
+
+def _row_complex_minutes(row: dict[str, Any]) -> float:
+    return sum(
+        max(_number(segment.get("minutes")), 0.0)
+        for segment in _runtime_segment_rows(row)
+        if segment.get("is_complex")
+    )
+
+
+def _folder_speed_baselines(folder_rows: list[dict[str, Any]]) -> dict[str, float]:
+    """Per-folder average night speed across every night in the current selection — the 'normal'
+    speed a delayed night is compared against. Mirrors buildBaselines/computeBaseline."""
+    speeds_by_folder: dict[str, list[float]] = {}
+    for row in folder_rows:
+        folder = _clean_text(row.get("folder"))
+        if not folder:
+            continue
+        speed = _row_average_speed(row)
+        if speed > 0:
+            speeds_by_folder.setdefault(folder, []).append(speed)
+    return {folder: _average(speeds) for folder, speeds in speeds_by_folder.items()}
+
+
+def _delayed_pf_cause_scores(row: dict[str, Any], baseline_speed: float) -> dict[str, float]:
+    """Mirrors DelayedPrintFinishWidget.jsx calculateCauseScores, including its fallback branch:
+    if no threshold is crossed, return raw magnitudes instead of all-zero so a root cause can
+    still be ranked/shown."""
+    waiting_time = max(_number(row.get("waiting_time")), 0.0)
+    downtime = max(_number(row.get("downtime")), 0.0)
+    non_wait_lost_time = _loss_time_minutes(row)
+    runtime = max(_number(row.get("runtime")), 0.0)
+    print_order = _row_total_print_order(row)
+    complex_minutes = _row_complex_minutes(row)
+    complex_share = (complex_minutes / runtime * 100) if runtime > 0 else 0.0
+    speed_loss_minutes = (
+        max(runtime - (print_order / baseline_speed) * 60, 0.0)
+        if baseline_speed > 0 and print_order > 0
+        else 0.0
+    )
+
+    scores = {
+        "low_speed": speed_loss_minutes if speed_loss_minutes >= _ROOT_CAUSE_THRESHOLDS["speed_loss_minutes"] else 0.0,
+        "high_complexity": (
+            complex_minutes
+            if complex_minutes >= _ROOT_CAUSE_THRESHOLDS["complex_minutes"]
+            or complex_share >= _ROOT_CAUSE_THRESHOLDS["complex_share_pct"]
+            else 0.0
+        ),
+        "high_downtime": downtime if downtime >= _ROOT_CAUSE_THRESHOLDS["downtime_minutes"] else 0.0,
+        "high_wait_time": waiting_time if waiting_time >= _ROOT_CAUSE_THRESHOLDS["waiting_time_minutes"] else 0.0,
+        "high_lost_time": non_wait_lost_time if non_wait_lost_time >= _ROOT_CAUSE_THRESHOLDS["lost_time_minutes"] else 0.0,
+    }
+    if any(value > 0 for value in scores.values()):
+        return {cause: _clean_number(value) for cause, value in scores.items()}
+    return {
+        "low_speed": _clean_number(speed_loss_minutes),
+        "high_complexity": _clean_number(complex_minutes),
+        "high_downtime": _clean_number(downtime),
+        "high_wait_time": _clean_number(waiting_time),
+        "high_lost_time": _clean_number(non_wait_lost_time),
+    }
+
+
+def _delayed_pf_root_causes(cause_scores: dict[str, float]) -> list[dict[str, Any]]:
+    """Mirrors getRootCauses: top cause by minutes (tie-broken by _ROOT_CAUSE_ORDER), plus at
+    most one secondary cause within 35% of the top (or >=10 min) — same pills the dashboard's
+    Delayed Print Finish widget shows for this row."""
+    entries = [
+        {
+            "cause": cause,
+            "label": _ROOT_CAUSE_LABELS[cause],
+            "minutes": _clean_number(cause_scores.get(cause, 0)),
+        }
+        for cause in _ROOT_CAUSE_ORDER
+    ]
+    entries = [entry for entry in entries if _number(entry["minutes"]) > 0]
+    entries.sort(key=lambda entry: (-_number(entry["minutes"]), _ROOT_CAUSE_ORDER.index(entry["cause"])))
+    if not entries:
+        return []
+    top, rest = entries[0], entries[1:]
+    secondary = [entry for entry in rest if _number(entry["minutes"]) >= max(_number(top["minutes"]) * 0.35, 10)][:1]
+    return [top, *secondary]
 
 
 def _pf_compliance_minutes(plant_name: Any) -> float:

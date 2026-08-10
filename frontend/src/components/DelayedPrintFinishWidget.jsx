@@ -403,14 +403,17 @@ function computeBaseline(rows) {
 }
 
 function computeAverageSpeed(row) {
+  // effective_speed/print_order are already twin-folder-divisor-adjusted upstream (capacity.py's
+  // _effective_print_order/_apportioned_print_order) whenever row.twin_folder_mode is set —
+  // dividing by twinDivisor again here double-counted the split for folders that mix twin-mode
+  // and normal nights, skewing their period baseline speed.
   const segments = Array.isArray(row.runtime_segments) ? row.runtime_segments : [];
   let weightedSpeed = 0;
   let totalMinutes = 0;
-  const twinDivisor = row.twin_folder_mode ? 2 : 1;
 
   for (const segment of segments) {
     const minutes = positiveNumber(segment.minutes);
-    const speed = positiveNumber(segment.effective_speed) / twinDivisor;
+    const speed = positiveNumber(segment.effective_speed);
     if (minutes > 0 && speed > 0) {
       weightedSpeed += speed * minutes;
       totalMinutes += minutes;
@@ -422,8 +425,7 @@ function computeAverageSpeed(row) {
 
 function computeTotalPrintOrder(row) {
   const segments = Array.isArray(row.runtime_segments) ? row.runtime_segments : [];
-  const twinDivisor = row.twin_folder_mode ? 2 : 1;
-  return segments.reduce((sum, segment) => sum + positiveNumber(segment.print_order) / twinDivisor, 0);
+  return segments.reduce((sum, segment) => sum + positiveNumber(segment.print_order), 0);
 }
 
 function computeComplexMinutes(row) {
