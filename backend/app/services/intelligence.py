@@ -555,7 +555,7 @@ async def build_chat_response(
         "For 'why was this folder/night delayed' or 'what caused the delay' questions: the matching delayed_pf or "
         "delayed_finish_complexity row's root_causes field IS the answer — it is the exact same root-cause classification "
         "(Low average speed, High complexity, High downtime, High wait time, High lost time) shown as pills on the "
-        "dashboard's Delayed Print Finish widget for that row, already correctly adjusted for Twin Folder Mode where "
+        "dashboard's Delayed Print Finish widget for that row, already correctly adjusted for Twin Folder Mode where applicable. "
         "High complexity is eligible only when that same folder-night has a C4 or C9-C15 runtime code; never infer it from "
         "category labels, flags, or runtime/share thresholds. State every cause listed in root_causes (usually 1-2), "
         "not just the single largest time component. "
