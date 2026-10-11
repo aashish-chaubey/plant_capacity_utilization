@@ -25,8 +25,6 @@ const ROOT_CAUSE_THRESHOLDS = {
   waiting_time_minutes: 30,
   lost_time_minutes: 40,
   speed_loss_minutes: 10,
-  complex_minutes: 30,
-  complex_share_pct: 40,
 };
 
 const CAUSE_META = {
@@ -316,16 +314,12 @@ function calculateCauseScores(row, baseline) {
   const printOrder = computeTotalPrintOrder(row);
   const baselineSpeed = positiveNumber(baseline.avg_speed);
   const complexMinutes = computeComplexMinutes(row);
-  const complexShare = runtime > 0 ? (complexMinutes / runtime) * 100 : 0;
   const speedLossMinutes = baselineSpeed > 0 && printOrder > 0
     ? Math.max(runtime - (printOrder / baselineSpeed) * 60, 0)
     : 0;
   const scores = {
     low_speed: speedLossMinutes >= ROOT_CAUSE_THRESHOLDS.speed_loss_minutes ? speedLossMinutes : 0,
-    high_complexity:
-      complexMinutes >= ROOT_CAUSE_THRESHOLDS.complex_minutes || complexShare >= ROOT_CAUSE_THRESHOLDS.complex_share_pct
-        ? complexMinutes
-        : 0,
+    high_complexity: complexMinutes,
     high_downtime: downtime >= ROOT_CAUSE_THRESHOLDS.downtime_minutes ? downtime : 0,
     high_wait_time: waitingTime >= ROOT_CAUSE_THRESHOLDS.waiting_time_minutes ? waitingTime : 0,
     high_lost_time: nonWaitLostTime >= ROOT_CAUSE_THRESHOLDS.lost_time_minutes ? nonWaitLostTime : 0,
@@ -428,13 +422,21 @@ function computeTotalPrintOrder(row) {
   return segments.reduce((sum, segment) => sum + positiveNumber(segment.print_order), 0);
 }
 
+function isHighComplexityCode(value) {
+  const code = String(value || "").trim().toUpperCase();
+  if (!/^C(?:[1-9]|1[0-5])$/.test(code)) return false;
+  const number = Number(code.slice(1));
+  return number === 4 || (number >= 9 && number <= 15);
+}
+
 function computeComplexMinutes(row) {
   const segments = Array.isArray(row.runtime_segments) ? row.runtime_segments : [];
 
-  return segments.reduce((sum, segment) => {
-    const isComplex = Boolean(segment.is_complex) || String(segment.key || "").toLowerCase().includes("complex");
-    return isComplex ? sum + positiveNumber(segment.minutes) : sum;
-  }, 0);
+  return segments.reduce((sum, segment) => (
+    isHighComplexityCode(segment.complexity_code)
+      ? sum + positiveNumber(segment.minutes)
+      : sum
+  ), 0);
 }
 
 function calculateNonWaitLostTime(row, waitingTime) {

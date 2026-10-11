@@ -41,26 +41,10 @@ LOSS_DRIVER_INFERENCES = {
 # Tolerates common typos ("how may days") so a misspelling doesn't silently fall through a
 # keyword-gated deterministic shortcut straight to the full LLM call.
 _HOW_MANY_RE = re.compile(r"how\s+(?:many|much|may)\b")
-_OUT_OF_SCOPE_CHAT_PATTERNS = [
-    re.compile(r"\b(?:python|javascript|java|c\+\+|pygame)\b.*\b(?:code|game|script|program)\b"),
-    re.compile(r"\b(?:code|script|program|game)\b.*\b(?:python|javascript|java|c\+\+|pygame)\b"),
-    re.compile(r"\b(?:rewrite|rephrase|paraphrase|proofread)\b"),
-]
 
 
 def _asks_how_many(question: str) -> bool:
     return bool(_HOW_MANY_RE.search(question))
-
-
-def _is_out_of_scope_chat_request(message: str) -> bool:
-    """Reject clear general-assistant requests before spending tokens on the decomposer.
-
-    Capacity questions can be phrased very broadly, so this guard intentionally targets only
-    explicit non-dashboard tasks observed in production. The final LLM prompt provides the
-    broader domain boundary for anything less clear-cut.
-    """
-    text = _clean_text(message).casefold()
-    return bool(text and any(pattern.search(text) for pattern in _OUT_OF_SCOPE_CHAT_PATTERNS))
 
 
 def _raise_if_chat_cancelled(cancellation_event: asyncio.Event | None = None) -> None:
@@ -83,7 +67,7 @@ def _infer_query_intent(message: str, qu_plan: dict[str, Any] | None) -> str:
     """Deterministic, no-extra-LLM-call classification of what kind of question this was.
 
     Prefers the QU decomposer's own intent field (already computed this turn) and only falls back
-    to keyword matching when no plan was produced (force_full_llm or decomposer failure).
+    to keyword matching when no plan was produced (for example, if the decomposer fails).
     """
     if isinstance(qu_plan, dict):
         intent = _clean_text(qu_plan.get("intent", ""))
@@ -204,6 +188,87 @@ def _qu_decomposer_user_content(message: str, conversation_state: dict[str, Any]
     return f"[Conversation context: {'; '.join(parts)}]\nQuestion: {clean_message}"
 
 
+def _is_complex_night_folder_util_question(message: str) -> bool:
+    question = _clean_text(message).casefold()
+    return bool(
+        ("utilization" in question or "utilisation" in question)
+        and re.search(r"\b(?:high\s+)?complex(?:ity)?\s+nights?\b", question)
+        and re.search(r"folder\s*[- ]?wise|by\s+folder|per\s+folder|folder\s+wise", question)
+    )
+
+
+def _complex_night_folder_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep all folder rows for dates with a C4/C9-C15 code, using codes only."""
+    def has_complex_code(row: dict[str, Any]) -> bool:
+        raw_codes = row.get("complexity_codes") or []
+        if isinstance(raw_codes, str):
+            raw_codes = re.findall(r"\bC(?:[1-9]|1[0-5])\b", raw_codes.upper())
+        for raw_code in raw_codes:
+            match = re.fullmatch(r"C(\d{1,2})", _clean_text(raw_code).upper())
+            if match and (int(match.group(1)) == 4 or 9 <= int(match.group(1)) <= 15):
+                return True
+        return False
+
+    qualifying_dates = {
+        _clean_text(row.get("run_date") or row.get("date"))
+        for row in rows
+        if has_complex_code(row) and _clean_text(row.get("run_date") or row.get("date"))
+    }
+    return [
+        row for row in rows
+        if _clean_text(row.get("run_date") or row.get("date")) in qualifying_dates
+    ]
+
+
+def _fallback_complex_night_folder_plan(
+    message: str,
+    context: dict[str, Any],
+    selected_plant: str,
+) -> dict[str, Any] | None:
+    question = _clean_text(message).casefold()
+    if not _is_complex_night_folder_util_question(message):
+        return None
+    month_year = re.search(
+        r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(20\d{2})\b",
+        question,
+    )
+    if not month_year:
+        return None
+    month_number = {
+        "january": "01", "february": "02", "march": "03", "april": "04",
+        "may": "05", "june": "06", "july": "07", "august": "08",
+        "september": "09", "october": "10", "november": "11", "december": "12",
+    }[month_year.group(1)]
+    exact = context.get("exact_dashboard") or {}
+    rows = exact.get("folder_days_all") or exact.get("folder_days") or []
+    plants = sorted({_clean_text(row.get("plant")) for row in rows if _clean_text(row.get("plant"))}, key=len, reverse=True)
+    normalized_question = re.sub(r"[^a-z0-9]+", " ", question).strip()
+    plant = next(
+        (name for name in plants if re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip() in normalized_question),
+        _clean_text(selected_plant),
+    )
+    entities = [{"type": "plant", "value": plant}] if plant else []
+    return {
+        "intent": "breakdown",
+        "primary_source": "exact_dashboard.folder_days",
+        "entities": entities,
+        "metrics": [{"field": "utilization_pct", "label": "Capacity utilization", "aggregation": "avg"}],
+        "conditions": [],
+        "condition_logic": "AND",
+        "time_scope": {
+            "type": "month",
+            "months": [f"{month_year.group(2)}-{month_number}"],
+            "weekdays": [],
+            "date_from": None,
+            "date_to": None,
+            "specific_date": None,
+        },
+        "group_by": "folder",
+        "required_sources": ["exact_dashboard.folder_days"],
+        "output_format": "table",
+    }
+
+
 async def build_chat_response(
     message: str,
     intelligence: dict[str, Any] | None = None,
@@ -214,12 +279,13 @@ async def build_chat_response(
     downtime_reasons: list[dict[str, Any]] | None = None,
     book_details: list[dict[str, Any]] | None = None,
     history: list[dict[str, str]] | None = None,
-    force_full_llm: bool = False,
+    force_full_llm: bool = True,  # Legacy compatibility; ignored so chat always uses Full AI.
     cancellation_event: asyncio.Event | None = None,
     conversation_state: dict[str, Any] | None = None,
     selected_plant: str = "",
     selected_folders: list[str] | None = None,
     timeframe: dict[str, Any] | None = None,
+    loaded_date_range: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     _raise_if_chat_cancelled(cancellation_event)
     intelligence = intelligence or {}
@@ -231,29 +297,6 @@ async def build_chat_response(
     book_details = book_details or []
     history = history or []
     selected_folders = selected_folders or []
-
-    if _is_out_of_scope_chat_request(message):
-        return {
-            "answer": (
-                "I can only help with this plant-capacity dashboard, its production data, "
-                "and related operational analytics."
-            ),
-            "status": "out_of_scope",
-            "detail": "",
-            "plan": None,
-            "confidence": None,
-            "refined": False,
-            "llm_used": False,
-            "llm_status": "out_of_scope",
-            "chart": None,
-            "conversation_state": conversation_state,
-            "eval_trace": {
-                "mode": "out_of_scope",
-                "system_prompt": "Request rejected locally as outside the capacity-dashboard scope.",
-                "retrieval_context": [],
-                "history_turns_used": 0,
-            },
-        }
 
     if not (intelligence.get("sections") or {}) and (summary or daily_rows or details):
         intelligence = _build_deterministic_intelligence(
@@ -274,6 +317,8 @@ async def build_chat_response(
         book_details=book_details,
         question=message,
     )
+    if loaded_date_range:
+        context["loaded_date_range"] = loaded_date_range
     endpoint = _get_env("AZURE_ENDPOINT")
     api_key = (
         _get_env("API_KEY")
@@ -301,15 +346,8 @@ async def build_chat_response(
             },
         }
 
-    # Phase 1 — Query Understanding: decompose the question into a rich structured plan,
-    # then execute it deterministically. Only falls through to the full LLM when the executor
-    # can't produce a confident answer (trend/prediction intents, unresolvable fields, etc.).
-    # Still runs when force_full_llm=True — that flag only skips the deterministic fast-path
-    # ANSWER below, not this plan. Skipping the decomposer entirely here used to mean every
-    # forced-full-LLM question (the frontend's default chat mode) had no required_sources to size
-    # context by, so every table fell back to a small stub/no-plan cap regardless of what the
-    # question actually needed — the exact "capping causes wrong answers" bug, in the app's
-    # default mode. The plan is now used purely for context sizing and prompt guidance here.
+    # Query Understanding prepares a focused retrieval plan for the full answer model.
+    # The plan never supplies or replaces the user-facing answer.
     qu_plan: dict[str, Any] | None = None
     if _should_use_chat_planner(message):
         try:
@@ -321,45 +359,8 @@ async def build_chat_response(
             print(f"[chat] QU decomposer skipped: {_sanitize_error_message(qu_exc, api_key)}", flush=True)
             qu_plan = None
 
-    if not force_full_llm:
-        _raise_if_chat_cancelled(cancellation_event)
-        qu_answer = _execute_qu_plan(qu_plan, message, context)
-        if qu_answer:
-            confidence, conf_reasons = _compute_qu_confidence(qu_plan, qu_answer, context, message)
-            if _chat_debug_enabled():
-                print(f"[chat] QU confidence={confidence} reasons={conf_reasons}", flush=True)
-            if confidence >= _QU_CONFIDENCE_THRESHOLD:
-                return {
-                    "answer": qu_answer,
-                    "status": "ok",
-                    "plan": qu_plan,
-                    "confidence": confidence,
-                    "refined": False,
-                    "llm_used": False,
-                    "llm_status": "fast_path",
-                    "chart": _chart_for_answer(qu_answer, message, context, history, qu_plan),
-                    "conversation_state": _next_conversation_state(
-                        selected_plant, selected_folders, timeframe, message, qu_plan, qu_answer
-                    ),
-                    "eval_trace": {
-                        "mode": "fast_path",
-                        "system_prompt": "Deterministic fast path; no LLM system prompt was used.",
-                        "retrieval_context": [
-                            _chat_context_to_toon(_compact_chat_context_for_llm(context, message, qu_plan=qu_plan))
-                        ],
-                        "history_turns_used": 0,
-                    },
-                }
-            # Below threshold — fall through to full LLM for a better answer
-            if _chat_debug_enabled():
-                print(f"[chat] QU confidence {confidence} below threshold {_QU_CONFIDENCE_THRESHOLD}, escalating to full LLM", flush=True)
-    else:
-        if _chat_debug_enabled():
-            print(
-                "[chat] force_full_llm=True — using the QU plan for focused retrieval and "
-                "skipping only the deterministic answer",
-                flush=True,
-            )
+    if qu_plan is None:
+        qu_plan = _fallback_complex_night_folder_plan(message, context, selected_plant)
 
     _raise_if_chat_cancelled(cancellation_event)
     plan_section = ""
@@ -376,27 +377,14 @@ async def build_chat_response(
             "spot-check that runtime + loss + downtime + wait + spare ≈ available_capacity. "
             "Do not reveal private reasoning; only return the answer.\n"
             "5. Format your response as specified in output_format. For day/night/date counts, "
-            "return the distinct count and every authoritative evidence row as a Markdown table; "
+            "return the distinct count and support it with a Markdown table drawn from the supplied rows; "
             "never return only a single value.\n\n"
         )
 
-    authoritative_date_count = _date_count_evidence_for_plan(qu_plan, message, context)
     llm_context = _compact_chat_context_for_llm(context, message, qu_plan=qu_plan)
-    if authoritative_date_count:
-        llm_context["authoritative_result"] = {
-            key: value
-            for key, value in authoritative_date_count.items()
-            if key not in {"answer", "required_values"}
-        }
     context_text = _chat_context_to_toon(llm_context)
     if len(context_text) > 650_000:
         llm_context = _minimal_chat_context_for_llm(context, qu_plan=qu_plan)
-        if authoritative_date_count:
-            llm_context["authoritative_result"] = {
-                key: value
-                for key, value in authoritative_date_count.items()
-                if key not in {"answer", "required_values"}
-            }
         context_text = _chat_context_to_toon(llm_context)
 
     system_content = (
@@ -405,7 +393,7 @@ async def build_chat_response(
         "Only answer questions about the supplied dashboard data, its metrics and formulas, print "
         "production, capacity, and related operational analysis. Politely refuse unrelated coding, "
         "games, general writing, rewriting, or other general-assistant requests. "
-        "For numerical or data-specific questions, answer ONLY from the TOON dashboard context supplied — never invent values. "
+        "For numerical or data-specific questions, answer ONLY from the TOON dashboard context supplied — never invent values. " "loaded_date_range gives the full date coverage of the loaded dataset; use it to explain when a requested month is absent. "
         "For conceptual, definitional, or formula questions (e.g. 'what does X mean', 'what is the formula for Y', 'how is Z calculated', 'explain X'), answer from your domain knowledge — do not say the data is absent. "
         "Use the curated computed tables supplied here "
         "(exact_dashboard.folders, exact_dashboard.daily, towers, tower_runtime_segments, tower_runtime_mix, tower_availability, downtime_by_reason, "
@@ -428,9 +416,6 @@ async def build_chat_response(
         "- When selected_sources is present, its keys are the exact table names selected by the "
         "query plan, and its rows have already been filtered by the plan's conditions, timeframe, "
         "and entities. source_selection reports the original and selected row counts.\n\n"
-        "- When authoritative_result is present, its distinct_date_count and rows were computed "
-        "deterministically from the filtered source. Reproduce that count and every row in a "
-        "Markdown table. Do not substitute a single-value response or recompute a different result.\n\n"
 
         "OUTPUT FORMATTING (the response is rendered as Markdown, so use it deliberately):\n"
         "- Any answer with 2+ rows of comparable data (rankings, breakdowns by folder/tower/date/reason, "
@@ -443,6 +428,11 @@ async def build_chat_response(
         "real Markdown table.\n\n"
 
         "QUERY INTERPRETATION RULES:\n"
+        "- For folder-wise capacity utilization on complex nights, qualify dates ONLY from complexity_codes: "
+        "a date qualifies when ANY folder has code C4 or C9-C15. Ignore complexity_categories and all "
+        "Complexity Category & root cause labels for qualification. Then use ALL folder-day rows for the "
+        "requested plant and month on those dates, reporting utilization_pct for EVERY folder, "
+        "not only the complex-code folders. Return a Markdown table with one row per folder.\n"
         "- 'runtime' / 'run time' with no qualifier: total aggregate runtime across ALL complexity types. "
         "Report the combined figure first. Break down by SNP/GNP only if the user explicitly says 'SNP runtime', 'GNP runtime', or 'by type'.\n"
         "- 'SNP' / 'standard' as a base category: include SNP and SNP Complex, codes C1-C4, unless the user explicitly separates simple vs complex.\n"
@@ -566,7 +556,9 @@ async def build_chat_response(
         "delayed_finish_complexity row's root_causes field IS the answer — it is the exact same root-cause classification "
         "(Low average speed, High complexity, High downtime, High wait time, High lost time) shown as pills on the "
         "dashboard's Delayed Print Finish widget for that row, already correctly adjusted for Twin Folder Mode where "
-        "applicable. State every cause listed in root_causes (usually 1-2), not just the single largest time component. "
+        "High complexity is eligible only when that same folder-night has a C4 or C9-C15 runtime code; never infer it from "
+        "category labels, flags, or runtime/share thresholds. State every cause listed in root_causes (usually 1-2), "
+        "not just the single largest time component. "
         "'Low average speed' means that night's implied speed (print order ÷ runtime) fell short of that folder's own "
         "period-average baseline speed by at least 10 minutes of run time — it is a comparison against the folder's own "
         "history, not an absolute speed threshold. Use loss_time.all_days (dominant_driver) and downtime_by_reason only "
@@ -752,12 +744,6 @@ async def build_chat_response(
         )).strip()
         if _chat_debug_enabled():
             print(f"[chat-debug] raw_answer={answer!r}", flush=True)
-        authoritative_fallback = bool(
-            authoritative_date_count
-            and not _date_count_answer_is_complete(answer, authoritative_date_count)
-        )
-        if authoritative_fallback:
-            answer = _clean_text(authoritative_date_count.get("answer"))
         _raise_if_chat_cancelled(cancellation_event)
         return {
             "answer": answer,
@@ -765,11 +751,7 @@ async def build_chat_response(
             "plan": qu_plan,
             "refined": True,
             "llm_used": True,
-            "llm_status": (
-                "authoritative_fallback"
-                if authoritative_fallback
-                else ("weak_answer" if _is_weak_chat_answer(answer) else "answered")
-            ),
+            "llm_status": "weak_answer" if _is_weak_chat_answer(answer) else "answered",
             "chart": _chart_for_answer(answer, message, context, history, qu_plan),
             "conversation_state": _next_conversation_state(
                 selected_plant, selected_folders, timeframe, message, qu_plan, answer
@@ -780,22 +762,6 @@ async def build_chat_response(
         detail = _sanitize_error_message(exc, api_key)
         if _chat_debug_enabled():
             print(f"[chat] full LLM request failed: {_chat_error_kind(exc)} — {detail}", flush=True)
-        if authoritative_date_count:
-            answer = _clean_text(authoritative_date_count.get("answer"))
-            return {
-                "answer": answer,
-                "status": "ok",
-                "detail": detail,
-                "plan": qu_plan,
-                "llm_used": False,
-                "llm_status": "authoritative_fallback",
-                "refined": False,
-                "chart": _chart_for_answer(answer, message, context, history, qu_plan),
-                "conversation_state": _next_conversation_state(
-                    selected_plant, selected_folders, timeframe, message, qu_plan, answer
-                ),
-                "eval_trace": eval_trace,
-            }
         if _is_timeout_error(exc):
             return {
                 "answer": (
@@ -1042,7 +1008,7 @@ exact_dashboard.folders     — per-folder period totals; fields: resource (fold
 exact_dashboard.folder_alternation_groups — one row per machine whose folders are alternately deployed (only one physically fitted/running at a time), detected from folder-day activity, not configured; fields: plant, machine, folders (list), exclusive_nights, concurrent_nights, idle_nights, engaged_nights, alternation_ratio_pct, pooled_utilization_pct, note. When this table has a row for a machine, that machine's individual folder utilization_pct figures understate real usage — always mention the pooled_utilization_pct alongside them for that machine.
 exact_dashboard.folder_days — exactly one row per folder per date; fields: plant, machine, folder_name, folder, run_date, weekday, month, runtime_min, loss_time_min, downtime_min, waiting_time_min, waiting_time_pct (= waiting_time_min / available_capacity_min * 100), spare_time_min, unplanned_time_min, utilization_pct, spare_capacity_pct, complexity_codes, complexity_categories, folder_has_gnp (bool: this folder ran any C5-C15), folder_has_gnp_complex (bool: this folder ran any C9-C15), folder_has_snp (bool: this folder ran any C1-C4), folder_has_snp_only (bool), folder_product_types, plant_night_type, plant_gnp_night, delayed_print_finish, overrun_minutes, print_finish_time. For what a specific folder printed, use folder_has_*; plant_night_type is only the whole-plant classification. For an arbitrary clock threshold such as "after 03:30", compare print_finish_time here; do not use delayed_pf unless the question asks about the compliance cutoff.
 loss_time.all_days          — per-date loss breakdown; fields: run_date, weekday, month, runtime_min, lost_time_min, waiting_time_min, loss_pct, loss_components (dict), dominant_driver
-delayed_pf                  — late-night folder rows only; fields: run_date, folder, overrun_minutes, loss_time_min, downtime_min, waiting_time_min, runtime_min, night_type, editions, largest_components (top time components: run/loss/wait/downtime/spare), root_causes (list of {cause, label, minutes} — the SAME root-cause classification the dashboard's Delayed Print Finish widget shows, 1-2 ranked entries from low_speed="Low average speed", high_complexity="High complexity", high_downtime="High downtime", high_wait_time="High wait time", high_lost_time="High lost time"), cause_scores (score for all 5 causes, 0 if below threshold). For "why was this folder delayed" questions, use root_causes/cause_scores as the primary answer — they are twin-folder-aware and match the dashboard exactly. "low_speed" means that night's implied speed (print order ÷ runtime) fell short of this folder's own period-average baseline speed by >=10 minutes of run time; it is not a raw speed value.
+delayed_pf                  — late-night folder rows only; fields: run_date, folder, overrun_minutes, loss_time_min, downtime_min, waiting_time_min, runtime_min, night_type, editions, largest_components (top time components: run/loss/wait/downtime/spare), root_causes (list of {cause, label, minutes} — the SAME root-cause classification the dashboard's Delayed Print Finish widget shows, 1-2 ranked entries from low_speed="Low average speed", high_complexity="High complexity", high_downtime="High downtime", high_wait_time="High wait time", high_lost_time="High lost time"), cause_scores (score for all 5 causes; High complexity is eligible only for same-folder-night C4 or C9-C15 runtime codes). For "why was this folder delayed" questions, use root_causes/cause_scores as the primary answer — they are twin-folder-aware and match the dashboard exactly. "low_speed" means that night's implied speed (print order ÷ runtime) fell short of this folder's own period-average baseline speed by >=10 minutes of run time; it is not a raw speed value.
 towers                      — per-tower period totals; fields: tower, machine, runtime_min, downtime_min, loss_time_min, waiting_time_min, spare_time_min, active_nights, uv_tower. No utilization_pct — utilization is folder-level only.
 tower_days                  — per-tower per-date; fields: tower, run_date, weekday, month, runtime_min, downtime_min, loss_time_min, waiting_time_min, uv_tower. No utilization_pct — utilization is folder-level only.
 tower_runtime_mix           — runtime split by tower TYPE × product TYPE (use this for any question about SNP/GNP products running on UV/GNP or non-UV towers); fields: tower_type_key ("gnp_uv" or "non_uv"), tower_type (human label), product_type ("SNP", "GNP", or "Unknown"), runtime_min, share_of_tower_type_runtime_pct, tower_day_count, tower_count
@@ -1220,6 +1186,34 @@ def _normalize_qu_plan_for_question(
     )
     mentions_gnp = "gnp" in question
     mentions_snp = bool(re.search(r"\bsnp\b", question))
+    asks_complex_night_folder_util = _is_complex_night_folder_util_question(message)
+    if asks_complex_night_folder_util:
+        normalized["primary_source"] = "exact_dashboard.folder_days"
+        normalized["group_by"] = "folder"
+        normalized["required_sources"] = ["exact_dashboard.folder_days"]
+        normalized["conditions"] = [
+            condition for condition in (normalized.get("conditions") or [])
+            if "complex" not in _clean_text(condition.get("field")).casefold()
+            and "complex" not in _clean_text(condition.get("label")).casefold()
+        ]
+        month_year = re.search(
+            r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(20\d{2})\b",
+            question,
+        )
+        if month_year:
+            month_number = {
+                "january": "01", "february": "02", "march": "03", "april": "04",
+                "may": "05", "june": "06", "july": "07", "august": "08",
+                "september": "09", "october": "10", "november": "11", "december": "12",
+            }[month_year.group(1)]
+            normalized["time_scope"] = {
+                "type": "month",
+                "months": [f"{month_year.group(2)}-{month_number}"],
+                "weekdays": [],
+                "date_from": None,
+                "date_to": None,
+                "specific_date": None,
+            }
     if has_folder_scope and (mentions_gnp or mentions_snp):
         source_key = "exact_dashboard.folder_days"
         normalized["primary_source"] = source_key
@@ -2462,16 +2456,7 @@ def _compact_chat_context_for_llm(
         )
 
     def _lim(key: str, full: int, stub: int) -> int | None:
-        """Return None (uncapped — every row) if the source is required, or if no plan is
-        available at all (force_full_llm=True skips the decomposer entirely, and the frontend's
-        default chat mode uses force_full_llm=True — so 'no plan' is the common case, not a rare
-        edge case). Only when a plan DOES exist and explicitly does not need this table do we send
-        the small stub — that's the one case where truncation doesn't risk cutting real data the
-        question needs. Capped 'full' values used to still be small fixed numbers (e.g. 120 rows),
-        which silently truncated the exact table a question needed on larger workbooks and
-        produced wrong aggregates/counts. The overall context-size check further down (which
-        degrades to _minimal_chat_context_for_llm) is the backstop against oversized requests, not
-        a blanket per-table cap."""
+        """Return every row when required or when no plan was produced; otherwise send a small stub."""
         if not required or _req(key):
             return None
         return stub
@@ -2518,6 +2503,7 @@ def _compact_chat_context_for_llm(
                     }
 
     return {
+        "loaded_date_range": context.get("loaded_date_range") or {},
         "scope": context.get("scope") or {},
         "summary": context.get("summary") or {},
         "exact_dashboard": {
@@ -2690,6 +2676,7 @@ def _focused_chat_context_for_llm(
     condition_logic = _clean_text(qu_plan.get("condition_logic") or "AND").upper()
     time_scope = qu_plan.get("time_scope") or {}
     entities = qu_plan.get("entities") or []
+    complex_folder_util = _is_complex_night_folder_util_question(question)
     selected_sources: dict[str, list[dict[str, Any]]] = {}
     source_selection: list[dict[str, Any]] = []
 
@@ -2697,7 +2684,10 @@ def _focused_chat_context_for_llm(
         source_rows = _rows_for_plan_source(source_key, context)
         selected_rows = list(source_rows)
         condition_status = "not_applicable"
-        if source_key.casefold() == primary_source.casefold():
+        if source_key.casefold() == primary_source.casefold() and complex_folder_util:
+            # Ignore planner category/root-cause filters: qualification is derived only from codes.
+            condition_status = "complexity_codes_only"
+        elif source_key.casefold() == primary_source.casefold():
             conditioned = _apply_qu_conditions(selected_rows, conditions, condition_logic)
             if conditioned is None:
                 # Keep the relevant source available to the answering model when the decomposer
@@ -2709,6 +2699,8 @@ def _focused_chat_context_for_llm(
                 condition_status = "applied" if conditions else "none"
         selected_rows = _apply_qu_time_scope(selected_rows, time_scope)
         selected_rows = _apply_qu_entity_filters(selected_rows, entities)
+        if source_key.casefold() == primary_source.casefold() and complex_folder_util:
+            selected_rows = _complex_night_folder_rows(selected_rows)
         selected_sources[source_key] = _compact_rows(selected_rows, limit=None)
         source_selection.append({
             "source": source_key,
@@ -2718,6 +2710,7 @@ def _focused_chat_context_for_llm(
         })
 
     focused_context = {
+        "loaded_date_range": context.get("loaded_date_range") or {},
         "scope": context.get("scope") or {},
         "summary": context.get("summary") or {},
         "context_note": (
@@ -2727,13 +2720,6 @@ def _focused_chat_context_for_llm(
         "source_selection": source_selection,
         "selected_sources": selected_sources,
     }
-    evidence = _date_count_evidence_for_plan(qu_plan, question, context)
-    if evidence:
-        focused_context["authoritative_result"] = {
-            key: value
-            for key, value in evidence.items()
-            if key not in {"answer", "required_values"}
-        }
     return focused_context
 
 
@@ -2754,17 +2740,22 @@ def _minimal_chat_context_for_llm(
     metric_aggregates = _aggregate_plan_metrics_for_context(source_rows, qu_plan or {})
     exact = context.get("exact_dashboard") or {}
     return {
+        "loaded_date_range": context.get("loaded_date_range") or {},
         "scope": context.get("scope") or {},
         "summary": context.get("summary") or {},
         "context_note": (
-            "Large focused context was reduced to stay under the model input limit. "
-            "primary_source_aggregates were calculated from every selected row; "
-            "primary_source_rows is only a sample."
+            "Large context was reduced to stay under the model input limit. "
+            "primary_source_aggregates were calculated from every selected row. "
+            "When primary_source is exact_dashboard.folder_days, primary_source_rows contains all selected rows."
         ),
         "primary_source": primary_source,
         "primary_source_selected_row_count": len(source_rows),
         "primary_source_aggregates": metric_aggregates,
-        "primary_source_rows": _compact_rows(source_rows, limit=80, max_list_items=10),
+        "primary_source_rows": _compact_rows(
+            source_rows,
+            limit=None if primary_source.casefold() == "exact_dashboard.folder_days" else 80,
+            max_list_items=10,
+        ),
         "exact_dashboard": {
             "summary": (exact.get("summary") or {}),
             "daily": _compact_rows(exact.get("daily") or [], limit=120, max_list_items=10),
@@ -7931,8 +7922,6 @@ _ROOT_CAUSE_THRESHOLDS = {
     "waiting_time_minutes": 30,
     "lost_time_minutes": 40,
     "speed_loss_minutes": 10,
-    "complex_minutes": 30,
-    "complex_share_pct": 40,
 }
 
 
@@ -7954,11 +7943,17 @@ def _row_total_print_order(row: dict[str, Any]) -> float:
     return sum(max(_number(segment.get("print_order")), 0.0) for segment in _runtime_segment_rows(row))
 
 
+def _is_high_complexity_code(value: Any) -> bool:
+    code_number = re_fullmatch_complexity(value)
+    return bool(code_number and (int(code_number) == 4 or 9 <= int(code_number) <= 15))
+
+
 def _row_complex_minutes(row: dict[str, Any]) -> float:
+    """Complex runtime is determined only by complexity mix codes C4 and C9-C15."""
     return sum(
         max(_number(segment.get("minutes")), 0.0)
         for segment in _runtime_segment_rows(row)
-        if segment.get("is_complex")
+        if _is_high_complexity_code(segment.get("complexity_code"))
     )
 
 
@@ -7977,16 +7972,13 @@ def _folder_speed_baselines(folder_rows: list[dict[str, Any]]) -> dict[str, floa
 
 
 def _delayed_pf_cause_scores(row: dict[str, Any], baseline_speed: float) -> dict[str, float]:
-    """Mirrors DelayedPrintFinishWidget.jsx calculateCauseScores, including its fallback branch:
-    if no threshold is crossed, return raw magnitudes instead of all-zero so a root cause can
-    still be ranked/shown."""
+    """Mirror the dashboard root-cause scores; High Complexity is code-qualified only."""
     waiting_time = max(_number(row.get("waiting_time")), 0.0)
     downtime = max(_number(row.get("downtime")), 0.0)
     non_wait_lost_time = _loss_time_minutes(row)
     runtime = max(_number(row.get("runtime")), 0.0)
     print_order = _row_total_print_order(row)
     complex_minutes = _row_complex_minutes(row)
-    complex_share = (complex_minutes / runtime * 100) if runtime > 0 else 0.0
     speed_loss_minutes = (
         max(runtime - (print_order / baseline_speed) * 60, 0.0)
         if baseline_speed > 0 and print_order > 0
@@ -7995,12 +7987,7 @@ def _delayed_pf_cause_scores(row: dict[str, Any], baseline_speed: float) -> dict
 
     scores = {
         "low_speed": speed_loss_minutes if speed_loss_minutes >= _ROOT_CAUSE_THRESHOLDS["speed_loss_minutes"] else 0.0,
-        "high_complexity": (
-            complex_minutes
-            if complex_minutes >= _ROOT_CAUSE_THRESHOLDS["complex_minutes"]
-            or complex_share >= _ROOT_CAUSE_THRESHOLDS["complex_share_pct"]
-            else 0.0
-        ),
+        "high_complexity": _clean_number(complex_minutes),
         "high_downtime": downtime if downtime >= _ROOT_CAUSE_THRESHOLDS["downtime_minutes"] else 0.0,
         "high_wait_time": waiting_time if waiting_time >= _ROOT_CAUSE_THRESHOLDS["waiting_time_minutes"] else 0.0,
         "high_lost_time": non_wait_lost_time if non_wait_lost_time >= _ROOT_CAUSE_THRESHOLDS["lost_time_minutes"] else 0.0,

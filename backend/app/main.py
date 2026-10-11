@@ -87,7 +87,7 @@ class ChatRequest(BaseModel):
     selected_folders: list[str] = []
     timeframe: ChatTimeframe | None = None
     history: list[dict[str, Any]] = []
-    force_full_llm: bool = False
+    force_full_llm: bool = True  # Legacy compatibility; chat always uses the full answer model.
     conversation_state: dict[str, Any] | None = None
 
 
@@ -726,6 +726,7 @@ async def capacity_chat(request: ChatRequest) -> JSONResponse:
             selected_plant=request.selected_plant,
             selected_folders=request.selected_folders,
             timeframe=request.timeframe.model_dump() if request.timeframe else None,
+            loaded_date_range=(job.get("result") or {}).get("loaded_date_range") or {},
         )
         if cancellation_event.is_set():
             raise asyncio.CancelledError()

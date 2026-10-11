@@ -131,7 +131,6 @@ export default function Dashboard({
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatStopping, setChatStopping] = useState(false);
-  const [forceLLM, setForceLLM] = useState(true);
   const [chatSize, setChatSize] = useState({ width: 360, height: 480 });
   const chatEndRef = useRef(null);
   const prevIntelligenceRef = useRef(null);
@@ -268,7 +267,7 @@ export default function Dashboard({
           timeframe: timeframeRange ? { start: timeframeRange.start, end: timeframeRange.end } : null,
           history: chatMessages.slice(-3).map(({ role, content }) => ({ role, content })),
           conversation_state: conversationState,
-          force_full_llm: forceLLM,
+          force_full_llm: true,
         }),
       });
       const payload = await response.json();
@@ -699,21 +698,6 @@ export default function Dashboard({
                 />
                 <button
                   type="button"
-                  onClick={() => setForceLLM((v) => !v)}
-                  title={forceLLM ? "Full AI mode on — click to use fast mode" : "Fast mode — click to use full AI"}
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition ${
-                    forceLLM
-                      ? "bg-violet-600 text-white hover:bg-violet-700"
-                      : "bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
-                  }`}
-                >
-                  <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M8 1.5l1.5 3L13 5.5l-2.5 2.4.6 3.4L8 9.8l-3.1 1.5.6-3.4L3 5.5l3.5-1z"/>
-                    <path d="M4 12l-2 2M12 12l2 2"/>
-                  </svg>
-                </button>
-                <button
-                  type="button"
                   onClick={handleChatSend}
                   disabled={intelligenceLoading || (!chatLoading && !chatInput.trim()) || chatStopping}
                   title={chatLoading ? "Stop response generation" : "Send question"}
@@ -730,9 +714,7 @@ export default function Dashboard({
                   )}
                 </button>
               </div>
-              {forceLLM && (
-                <p className="mt-1.5 text-center text-xs text-violet-500">Full AI mode — bypassing fast path</p>
-              )}
+              <p className="mt-1.5 text-center text-xs text-violet-500">Responses are assessed by Full AI</p>
             </div>
           </div>
         )}
